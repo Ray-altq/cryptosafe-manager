@@ -23,5 +23,13 @@ class Config:
             'language': 'en',    #язык интерфейса (en/ru)
         }
     }
+
+    def __init__(self):  #конструктор, который создает объект конфига
+        self.config = self.DEFAULTS.copy()
+        self.config_file = Path.home() / '.cryptosafe' / 'config.json'
+        self._ensure_config_dir()
+        self._load()
     
+    def _ensure_config_dir(self):
+        self.config_file.parent.mkdir(parents=True, exist_ok=True)  #создает папку конфига, если ее нет
     
