@@ -31,3 +31,41 @@ class StateManager:  #управление состоянием
     
     def is_unlocked(self) -> bool:  #проверка, разблокировано ли приложение
         return self.session_state == SessionState.UNLOCKED
+    
+    def update_activity(self):  #обновление времени последней активности
+        self.last_activity = datetime.now()
+    
+    def get_idle_time(self) -> float:  #сколько секунд прошло с последней активности
+        if self.last_activity is None:
+            return 0
+        return (datetime.now() - self.last_activity).total_seconds()
+    
+    def should_auto_lock(self) -> bool:  #проверка на автоблокировку
+        if self.session_state != SessionState.UNLOCKED:
+            return False
+        if self.last_activity is None:
+            return False
+        
+        return self.get_idle_time() >= self.inactivity_timeout
+    
+    def set_inactivity_timeout(self, seconds: int):  #установка таймаута неактивности (берем из кфг)
+        self.inactivity_timeout = seconds
+
+    def set_clipboard(self, content: str, timeout_seconds: int = 30):  #установка содержимого буфера обмена с таймером
+        self.clipboard_content = content
+        if timeout_seconds > 0:
+            self.clipboard_timer = datetime.now() + timedelta(seconds=timeout_seconds)
+    
+    def get_clipboard(self) -> Optional[str]:  #получение содержимого буфера (с проверкой таймера)
+        #проверяем, не истек ли таймер
+        if self.clipboard_timer and datetime.now() >= self.clipboard_timer:
+            self.clipboard_content = None
+            self.clipboard_timer = None
+        
+        return self.clipboard_content
+    
+    def clear_clipboard(self):  #принудительная очистка буфера
+        self.clipboard_content = None
+        self.clipboard_timer = None
+    
+    
