@@ -32,4 +32,20 @@ class Config:
     
     def _ensure_config_dir(self):
         self.config_file.parent.mkdir(parents=True, exist_ok=True)  #создает папку конфига, если ее нет
+
+    def _load(self):  #загружаект кфг из файла
+        if self.config_file.exists():
+            try:
+                with open(self.config_file, 'r', encoding='utf-8') as f:
+                    user_config = json.load(f)
+                    self.config.update(user_config)
+            except Exception as e:
+                print(f"Ошибка загрузки конфига: {e}")
+    
+    def save(self):  #сохраняет кфг в файл
+        try:
+            with open(self.config_file, 'w', encoding='utf-8') as f:
+                json.dump(self.config, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            print(f"Ошибка сохранения конфига: {e}")
     
