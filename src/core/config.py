@@ -48,4 +48,30 @@ class Config:
                 json.dump(self.config, f, indent=2, ensure_ascii=False)
         except Exception as e:
             print(f"Ошибка сохранения конфига: {e}")
+
+    def get(self, key: str, default: Any = None) -> Any: #будем получать настройку значения по ключу
+        keys = key.split('.')
+        value = self.config
+        
+        for k in keys:
+            if isinstance(value, dict):
+                value = value.get(k)
+                if value is None:
+                    return default
+            else:
+                return default
+        
+        return value
+    
+    def set(self, key: str, value: Any):  #установка настройки значения по ключу
+        keys = key.split('.')
+        target = self.config
+        
+        for k in keys[:-1]:
+            if k not in target:
+                target[k] = {}
+            target = target[k]
+        
+        target[keys[-1]] = value
+        self.save()
     
