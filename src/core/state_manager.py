@@ -15,3 +15,19 @@ class StateManager:  #управление состоянием
         self.clipboard_timer: Optional[datetime] = None
         #таймаут неактивности (будет браться из config)
         self.inactivity_timeout: int = 300  #5 минут
+
+    def unlock(self):  #разблок
+        self.session_state = SessionState.UNLOCKED
+        self.update_activity()
+    
+    def lock(self):  #блок
+        self.session_state = SessionState.LOCKED
+        #при блокировке очищаем буфер обмена
+        self.clipboard_content = None
+        self.clipboard_timer = None
+    
+    def is_locked(self) -> bool:  #проверка, заблокировано ли приложение
+        return self.session_state == SessionState.LOCKED
+    
+    def is_unlocked(self) -> bool:  #проверка, разблокировано ли приложение
+        return self.session_state == SessionState.UNLOCKED
