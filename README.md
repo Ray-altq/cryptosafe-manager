@@ -29,16 +29,20 @@ cryptosafe-manager/
 ├── src/
 │ ├── core/ # Криптография, события, конфигурация, состояние
 │ │ ├── crypto/ # Шифрование (абстракция + заглушка)
+│ │ │ ├── abstract.py
+│ │ │ └── placeholder.py
 │ │ ├── events.py # Шина событий
 │ │ ├── config.py # Конфигурация
-│ │ └── state_manager.py
+│ │ └── state_manager.py # Управление состоянием
 │ ├── database/ # Модели и работа с БД
 │ │ ├── models.py # Модели таблиц
 │ │ └── db.py # Помощник SQLite
 │ └── gui/ # Пользовательский интерфейс
 │ ├── widgets/ # Переиспользуемые компоненты
-│ ├── main_window.py
-│ └── setup_wizard.py
+│ │ ├── password_entry.py
+│ │ └── secure_table.py
+│ ├── main_window.py # Главное окно
+│ └── setup_wizard.py # Мастер настройки
 ├── tests/ # Тесты
 ├── run.py # Точка входа
 ├── README.md
