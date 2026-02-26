@@ -48,7 +48,7 @@ cryptosafe-manager/
 ├── README.md
 └── requirements.txt
 ```
-
+## Установка
 ```bash
 # 1. Клонировать репозиторий
 git clone https://github.com/Ray-altq/cryptosafe-manager.git
@@ -66,6 +66,14 @@ pip install -r requirements.txt
 
 # 5. Запустить
 python run.py
+```
 
+## Дорожная карта спринтов
 
+  - **Спринт 1**: Фундамент, БД, события, базовый GUI
+  - Модульная архитектура (MVC)
+  - SQLite с 4 таблицами
+  - Криптографическая абстракция (заглушка)
+  - Система событий
+  - Tkinter GUI с мастером настройки
 
