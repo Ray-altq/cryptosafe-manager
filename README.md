@@ -49,5 +49,23 @@ cryptosafe-manager/
 └── requirements.txt
 ```
 
+```bash
+# 1. Клонировать репозиторий
+git clone https://github.com/Ray-altq/cryptosafe-manager.git
+cd cryptosafe-manager
+
+# 2. Создать виртуальное окружение
+python -m venv venv
+
+# 3. Активировать
+
+venv\Scripts\activate
+
+# 4. Установить зависимости
+pip install -r requirements.txt
+
+# 5. Запустить
+python run.py
+
 
 
