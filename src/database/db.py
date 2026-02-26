@@ -80,26 +80,58 @@ class Database:
     
     def add_entry(self, entry: VaultEntry) -> int:
         with self._get_connection() as conn:
+            #преобразуем datetime в строку для SQLite
+            created_at = entry.created_at.isoformat() if entry.created_at else datetime.now().isoformat()
+            updated_at = entry.updated_at.isoformat() if entry.updated_at else datetime.now().isoformat()
+        
             cursor = conn.execute("""
-                INSERT INTO vault_entries 
-                (title, username, encrypted_password, url, notes, created_at, updated_at, tags)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (entry.title, entry.username, entry.encrypted_password,
-                  entry.url, entry.notes, entry.created_at, entry.updated_at, entry.tags))
+              INSERT INTO vault_entries 
+              (title, username, encrypted_password, url, notes, created_at, updated_at, tags)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+              entry.title, 
+              entry.username, 
+              entry.encrypted_password,
+              entry.url, 
+              entry.notes, 
+              created_at,  # строка
+              updated_at,  # строка
+              entry.tags
+            ))
             return cursor.lastrowid
     
     def get_entry(self, entry_id: int) -> Optional[VaultEntry]:
         with self._get_connection() as conn:
-            cursor = conn.execute("SELECT * FROM vault_entries WHERE id = ?", (entry_id,))
-            row = cursor.fetchone()
-            if row:
-                return VaultEntry(**dict(row))
-            return None
-    
+          cursor = conn.execute(
+            "SELECT * FROM vault_entries WHERE id = ?",
+            (entry_id,)
+          )
+          row = cursor.fetchone()
+          if row:
+              data = dict(row)
+              # преобразуем строки обратно в datetime
+              if data.get('created_at'):
+                  data['created_at'] = datetime.fromisoformat(data['created_at'])
+              if data.get('updated_at'):
+                  data['updated_at'] = datetime.fromisoformat(data['updated_at'])
+              return VaultEntry(**data)
+          return None
+
     def get_all_entries(self) -> List[VaultEntry]:
         with self._get_connection() as conn:
-            cursor = conn.execute("SELECT * FROM vault_entries ORDER BY updated_at DESC")
-            return [VaultEntry(**dict(row)) for row in cursor.fetchall()]
+          cursor = conn.execute(
+              "SELECT * FROM vault_entries ORDER BY updated_at DESC"
+          )
+          entries = []
+          for row in cursor.fetchall():
+              data = dict(row)
+              # преобразуем строки обратно в datetime
+              if data.get('created_at'):
+                  data['created_at'] = datetime.fromisoformat(data['created_at'])
+              if data.get('updated_at'):
+                  data['updated_at'] = datetime.fromisoformat(data['updated_at'])
+              entries.append(VaultEntry(**data))
+          return entries
     
     def update_entry(self, entry: VaultEntry):
         if entry.id is None:
