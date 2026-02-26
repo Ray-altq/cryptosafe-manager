@@ -208,26 +208,48 @@ class MainWindow:
         notes_text.pack(padx=5, pady=2)
         
         def save():
-            # TODO: здесь будет шифрование
-            # пока просто заглушка
-            encrypted = b"test_encrypted"
-            
-            entry = VaultEntry(
-                title=title_entry.get(),
-                username=username_entry.get(),
-                encrypted_password=encrypted,
-                url=url_entry.get(),
-                notes=notes_text.get("1.0", tk.END).strip(),
-                created_at=datetime.now(),
-                updated_at=datetime.now(),
-                tags=""
-            )
-            
-            entry_id = self.db.add_entry(entry)
-            event_bus.publish(Event(EventType.ENTRY_ADDED, {"id": entry_id}))
-            dialog.destroy()
+          #получаем данные из полей
+          title = title_entry.get().strip()
+          username = username_entry.get().strip()
+          password = password_entry.get().strip()
+          url = url_entry.get().strip()
+          notes = notes_text.get("1.0", tk.END).strip()
         
-        ttk.Button(dialog, text="Сохранить", command=save).pack(pady=10)
+          #проверка обязательных полей
+          if not title:
+            messagebox.showerror("Ошибка", "Введите название")
+            return
+          if not username:
+            messagebox.showerror("Ошибка", "Введите имя пользователя")
+            return
+          if not password:
+            messagebox.showerror("Ошибка", "Введите пароль")
+            return
+        
+          #сохраняем пароль как байты (без шифрования) (потом изменю!!!)
+          encrypted = password.encode('utf-8')
+        
+          entry = VaultEntry(
+              title=title,
+              username=username,
+              encrypted_password=encrypted,
+              url=url,
+              notes=notes,
+              created_at=datetime.now(),
+              updated_at=datetime.now(),
+              tags=""
+          ) 
+        
+          entry_id = self.db.add_entry(entry)
+          event_bus.publish(Event(EventType.ENTRY_ADDED, {"id": entry_id}))
+        
+          #обновляем таблицу
+          self._load_entries()
+        
+          dialog.destroy()
+          messagebox.showinfo("Успех", f"Запись '{title}' добавлена!")
+
+        ttk.Button(dialog, text="Сохранить", command=save).pack(pady=10)  #кнопка сохранения
     
     def edit_entry(self):
         """Диалог изменения записи"""
