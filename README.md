@@ -58,8 +58,10 @@ cd cryptosafe-manager
 python -m venv venv
 
 # 3.активировать
-
+# Windows
 venv\Scripts\activate
+# Linux/Mac:
+source venv/bin/activate
 
 # 4.установить зависимости
 pip install -r requirements.txt
