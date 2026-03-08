@@ -63,3 +63,22 @@ class KeyDerivation:  #понадобится для управления фор
          b"dummy_constant_time_string",
          b"dummy_constant_time_string"
     )
+    
+    def derive_encryption_key(self, password: str, salt: Optional[bytes] = None) -> tuple[bytes, bytes]:
+      if salt is None:  #если соль не передана, то создаем новую криптостойкую соль
+        salt = secrets.token_bytes(self.pbkdf2_salt_len)
+
+      kdf = PBKDF2HMAC(                               #инициализация kdf
+        algorithm=hashes.SHA256(),                    #алгоритм хеширования
+        length=self.pbkdf2_key_len,                   #32 байта
+        salt=salt,                                    #соль
+        iterations=self.pbkdf2_iterations             #количество итераций
+      )
+    
+      key = kdf.derive(password.encode('utf-8'))  #формируем ключ из пароля
+    
+      return key, salt
+
+    def derive_key_with_known_salt(self, password: str, salt: bytes) -> bytes:
+      key, _ = self.derive_encryption_key(password, salt)
+      return key
