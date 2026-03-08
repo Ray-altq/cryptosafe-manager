@@ -97,3 +97,75 @@ class PasswordValidator:
                 return True
         
         return False
+    
+    def get_strength_score(self, password: str) -> int:
+        score = 0
+        
+        length_score = min(40, len(password) * 2)
+        score += length_score
+        
+        #разнообразие символов
+        has_upper = 1 if re.search(r'[A-Z]', password) else 0
+        has_lower = 1 if re.search(r'[a-z]', password) else 0
+        has_digit = 1 if re.search(r'\d', password) else 0
+        has_special = 1 if re.search(r'[!@#$%^&*(),.?":{}|<>]', password) else 0
+        
+        variety = (has_upper + has_lower + has_digit + has_special) * 7.5
+        score += variety
+        
+        #штрафы
+        #штраф за распространенный пароль
+        if password.lower() in self.common_passwords:
+            score -= 30
+        
+        #штраф за последовательности
+        if self._has_sequences(password):
+            score -= 15
+        
+        #штраф за повторения
+        if self._has_repetitions(password):
+            score -= 15
+        
+        #ограничиваем диапазон 0-100
+        return max(0, min(100, int(score)))
+    
+    def get_strength_label(self, score: int) -> str:
+        if score < 20:
+            return "Очень слабый"
+        elif score < 40:
+            return "Слабый"
+        elif score < 60:
+            return "Средний"
+        elif score < 80:
+            return "Хороший"
+        else:
+            return "Отличный"
+    
+    def suggest_improvements(self, password: str) -> List[str]:  #рекомендации
+        suggestions = []
+        
+        if len(password) < self.min_length:
+            suggestions.append(f"Увеличьте длину до {self.min_length}+ символов")
+        
+        if self.require_uppercase and not re.search(r'[A-Z]', password):
+            suggestions.append("Добавьте заглавные буквы")
+        
+        if self.require_lowercase and not re.search(r'[a-z]', password):
+            suggestions.append("Добавьте строчные буквы")
+        
+        if self.require_digits and not re.search(r'\d', password):
+            suggestions.append("Добавьте цифры")
+        
+        if self.require_special and not re.search(r'[!@#$%^&*(),.?":{}|<>]', password):
+            suggestions.append("Добавьте специальные символы")
+        
+        if self._has_sequences(password):
+            suggestions.append("Избегайте простых последовательностей (123, abc, qwerty)")
+        
+        if self._has_repetitions(password):
+            suggestions.append("Избегайте повторяющихся символов")
+        
+        if password.lower() in self.common_passwords:
+            suggestions.append("Этот пароль слишком распространен")
+        
+        return suggestions
