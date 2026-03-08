@@ -54,3 +54,46 @@ class PasswordValidator:
             errors.append("Пароль содержит слишком много повторяющихся символов")
         
         return len(errors) == 0, errors
+    
+    def _has_sequences(self, password: str) -> bool:
+        password_lower = password.lower()
+        
+        #распространенные последовательности
+        sequences = [
+            '123', '234', '345', '456', '567', '678', '789',
+            'abc', 'bcd', 'cde', 'def', 'efg', 'fgh', 'ghi',
+            'qwe', 'wer', 'ert', 'rty', 'tyu', 'yui', 'uio',
+            'asd', 'sdf', 'dfg', 'fgh', 'ghj', 'hjk', 'jkl',
+            'zxc', 'xcv', 'cvb', 'vbn', 'bnm',
+            'qwerty', 'asdfgh', 'zxcvbn', 'qwertyuiop', 'asdfghjkl'
+        ]
+        
+        for seq in sequences:
+            if seq in password_lower:
+                return True
+        
+        #проверка на клавиатурные ряды (qwerty, йцукен)
+        keyboard_rows = [
+            'qwertyuiop', 'asdfghjkl', 'zxcvbnm',
+            'йцукенгшщзхъ', 'фывапролджэ', 'ячсмитьбю'
+        ]
+        
+        for row in keyboard_rows:
+            for i in range(len(row) - 3):
+                seq = row[i:i+4]
+                if seq in password_lower:
+                    return True
+        
+        return False
+    
+    def _has_repetitions(self, password: str) -> bool:
+        if re.search(r'(.)\1{3,}', password):  #проверка на 4+ одинаковых символа подряд
+            return True
+        
+        from collections import Counter
+        counts = Counter(password.lower())  #проверка на 8+ одинаковых символов в любом месте
+        for char, count in counts.items():
+            if count > 7 and char.isalnum():
+                return True
+        
+        return False
