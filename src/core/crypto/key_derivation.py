@@ -27,3 +27,16 @@ class KeyDerivation:  #понадобится для управления фор
             salt_len=16,
             type=Type.ID  #argon2id
         )
+        
+    def create_auth_hash(self, password: str) -> dict:
+        hash_str = self.argon2_hasher.hash(password)  #argon2 сам генерирует соль и кодирует все параметры в строке хэша
+    
+        return {   #возвращаем словарь с хэшем и параметрами для сохранения в БД
+          'hash': hash_str,
+          'algorithm': 'argon2id',
+          'time_cost': self.argon2_time,
+          'memory_cost': self.argon2_memory,
+          'parallelism': self.argon2_parallelism,
+          'hash_len': self.argon2_hash_len,
+          'version': 19  
+    }
