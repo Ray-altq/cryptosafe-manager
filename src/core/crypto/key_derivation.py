@@ -27,7 +27,7 @@ class KeyDerivation:  #понадобится для управления фор
             salt_len=16,
             type=Type.ID  #argon2id
         )
-        
+
     def create_auth_hash(self, password: str) -> dict:
         hash_str = self.argon2_hasher.hash(password)  #argon2 сам генерирует соль и кодирует все параметры в строке хэша
     
@@ -40,3 +40,26 @@ class KeyDerivation:  #понадобится для управления фор
           'hash_len': self.argon2_hash_len,
           'version': 19  
     }
+
+    def verify_auth_hash(self, password: str, stored_hash: str) -> bool:
+      
+      try:
+          self.argon2_hasher.verify(stored_hash, password)  #argon2 сам обеспечивает защиту от timing-атак
+          return True
+        
+      except Exception:
+        #выполняем фиктивную проверку для константного времени
+          self._dummy_verify()
+          return False
+
+    def hash_needs_rehash(self, stored_hash: str) -> bool:
+      try:
+          return self.argon2_hasher.check_needs_rehash(stored_hash)
+      except Exception:
+          return True
+
+    def _dummy_verify(self):
+      secrets.compare_digest(  #secrets.compare_digest всегда выполняется за константное время
+         b"dummy_constant_time_string",
+         b"dummy_constant_time_string"
+    )
