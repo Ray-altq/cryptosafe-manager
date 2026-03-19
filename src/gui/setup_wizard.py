@@ -25,6 +25,8 @@ class SetupWizard:
         self.db_path = tk.StringVar(value=str(Path.home() / ".cryptosafe" / "vault.db"))
         self.algorithm = tk.StringVar(value=self.config.get("crypto.algorithm", "XOR"))
         self.pbkdf2_iterations = tk.IntVar(value=self.config.get("crypto.pbkdf2_iterations", 100000))
+        self.auto_lock_minutes = tk.IntVar(value=self.config.get("security.auto_lock_minutes", 5))
+        self.key_cache_timeout_minutes = tk.IntVar(value=self.config.get("security.key_cache_timeout_minutes", 60))
 
         self.current_step = 0
         self.steps = [
@@ -147,6 +149,14 @@ class SetupWizard:
             textvariable=self.pbkdf2_iterations,
         ).pack(fill=tk.X, pady=(0, 10))
 
+        ttk.Label(self.content_frame, text="Таймаут авто-блокировки (мин)").pack(anchor=tk.W)
+        ttk.Spinbox(self.content_frame, from_=1, to=120, textvariable=self.auto_lock_minutes).pack(fill=tk.X, pady=(0, 10))
+
+        ttk.Label(self.content_frame, text="Таймаут кэша ключа (мин)").pack(anchor=tk.W)
+        ttk.Spinbox(self.content_frame, from_=1, to=60, textvariable=self.key_cache_timeout_minutes).pack(
+            fill=tk.X, pady=(0, 10)
+        )
+
     def _step_finish(self):
         text = tk.Text(self.content_frame, wrap=tk.WORD, height=10, font=("Segoe UI", 10))
         text.insert(
@@ -154,7 +164,9 @@ class SetupWizard:
             f"Все готово к инициализации vault.\n\n"
             f"База данных: {self.db_path.get()}\n"
             f"Алгоритм: {self.algorithm.get()}\n"
-            f"Итерации PBKDF2: {self.pbkdf2_iterations.get()}\n\n"
+            f"Итерации PBKDF2: {self.pbkdf2_iterations.get()}\n"
+            f"Авто-блокировка: {self.auto_lock_minutes.get()} мин\n"
+            f"Кэш ключа: {self.key_cache_timeout_minutes.get()} мин\n\n"
             "Нажмите «Готово», чтобы создать vault и сохранить мастер-пароль.",
         )
         text.config(state=tk.DISABLED)
@@ -191,6 +203,8 @@ class SetupWizard:
         self.config.set("database.path", self.db_path.get())
         self.config.set("crypto.algorithm", self.algorithm.get())
         self.config.set("crypto.pbkdf2_iterations", self.pbkdf2_iterations.get())
+        self.config.set("security.auto_lock_minutes", self.auto_lock_minutes.get())
+        self.config.set("security.key_cache_timeout_minutes", self.key_cache_timeout_minutes.get())
 
         database = Database(self.db_path.get())
         self.auth_service.key_storage = KeyStorage(database)
@@ -211,6 +225,22 @@ class SetupWizard:
                 "require_special": self.config.get("security.require_special", True),
             },
         )
+        database.set_setting(
+            "crypto.key_derivation",
+            {
+                "argon2_time": self.config.get("crypto.argon2_time", 3),
+                "argon2_memory": self.config.get("crypto.argon2_memory", 65536),
+                "argon2_parallelism": self.config.get("crypto.argon2_parallelism", 4),
+                "argon2_hash_len": self.config.get("crypto.argon2_hash_len", 32),
+                "pbkdf2_iterations": self.pbkdf2_iterations.get(),
+                "pbkdf2_salt_len": self.config.get("crypto.pbkdf2_salt_len", 16),
+                "pbkdf2_key_len": self.config.get("crypto.pbkdf2_key_len", 32),
+            },
+        )
+        database.set_setting("security.auto_lock_timeout_minutes", self.auto_lock_minutes.get())
+        database.set_setting("security.key_cache_timeout_minutes", self.key_cache_timeout_minutes.get())
+        database.set_setting("security.lock_on_focus_loss", self.config.get("security.lock_on_focus_loss", False))
+        database.set_setting("security.lock_on_minimize", self.config.get("security.lock_on_minimize", True))
 
         messagebox.showinfo("Успешно", "Vault успешно инициализирован.")
         self.wizard.destroy()
