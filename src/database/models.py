@@ -38,8 +38,10 @@ class Setting:  #класс для представления настройки
 class KeyStore:  #класс для представления информации о ключе шифрования
     id: Optional[int] = None
     key_type: str = ""
+    key_data: bytes = b""
+    version: int = 1
+    created_at: Optional[datetime] = None
     salt: bytes = b""
     hash: str = ""
     params: str = ""
-    created_at: Optional[datetime] = None
     last_rotated_at: Optional[datetime] = None
