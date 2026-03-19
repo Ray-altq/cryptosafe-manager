@@ -26,6 +26,8 @@ class MainWindow:
         self.root.geometry("980x640")
 
         self.config = Config()
+        self.config.set("security.lock_on_focus_loss", True)
+        self.config.set("security.lock_on_minimize", True)
         self.state = StateManager()
         self.state.set_inactivity_timeout(self.config.get("security.auto_lock_minutes", 5) * 60)
         self.state.set_key_cache_timeout(self.config.get("security.key_cache_timeout_minutes", 60) * 60)
@@ -88,7 +90,7 @@ class MainWindow:
         )
         self.db.set_setting("security.auto_lock_timeout_minutes", self.config.get("security.auto_lock_minutes", 5))
         self.db.set_setting("security.key_cache_timeout_minutes", self.config.get("security.key_cache_timeout_minutes", 60))
-        self.db.set_setting("security.lock_on_focus_loss", self.config.get("security.lock_on_focus_loss", False))
+        self.db.set_setting("security.lock_on_focus_loss", self.config.get("security.lock_on_focus_loss", True))
         self.db.set_setting("security.lock_on_minimize", self.config.get("security.lock_on_minimize", True))
 
     def _load_password_policy(self):
@@ -216,7 +218,7 @@ class MainWindow:
 
     def _on_focus_out(self, _event=None):
         self.state.set_application_active(False)
-        if self.config.get("security.lock_on_focus_loss", False) and self.auth_service.is_authenticated():
+        if self.config.get("security.lock_on_focus_loss", True) and self.auth_service.is_authenticated():
             self._lock_vault(show_dialog=False)
 
     def _on_unmap(self, _event=None):
@@ -554,8 +556,8 @@ class MainWindow:
         auto_lock_minutes = tk.IntVar(value=self.config.get("security.auto_lock_minutes", 5))
         min_password_length = tk.IntVar(value=self.config.get("security.min_password_length", 12))
         key_cache_timeout_minutes = tk.IntVar(value=self.config.get("security.key_cache_timeout_minutes", 60))
-        lock_on_focus_loss = tk.BooleanVar(value=self.config.get("security.lock_on_focus_loss", False))
-        lock_on_minimize = tk.BooleanVar(value=self.config.get("security.lock_on_minimize", True))
+        lock_on_focus_loss = tk.BooleanVar(value=True)
+        lock_on_minimize = tk.BooleanVar(value=True)
 
         ttk.Label(dialog, text="Таймаут буфера обмена (сек)").pack(anchor=tk.W, padx=10, pady=(12, 2))
         ttk.Spinbox(dialog, from_=5, to=300, textvariable=clipboard_timeout).pack(fill=tk.X, padx=10, pady=2)
@@ -569,10 +571,20 @@ class MainWindow:
         ttk.Label(dialog, text="Минимальная длина мастер-пароля").pack(anchor=tk.W, padx=10, pady=(12, 2))
         ttk.Spinbox(dialog, from_=8, to=64, textvariable=min_password_length).pack(fill=tk.X, padx=10, pady=2)
 
-        ttk.Checkbutton(dialog, text="Блокировать при потере фокуса", variable=lock_on_focus_loss).pack(
+        ttk.Checkbutton(
+            dialog,
+            text="Блокировать при потере фокуса",
+            variable=lock_on_focus_loss,
+            state=tk.DISABLED,
+        ).pack(
             anchor=tk.W, padx=10, pady=(12, 2)
         )
-        ttk.Checkbutton(dialog, text="Блокировать при сворачивании", variable=lock_on_minimize).pack(
+        ttk.Checkbutton(
+            dialog,
+            text="Блокировать при сворачивании",
+            variable=lock_on_minimize,
+            state=tk.DISABLED,
+        ).pack(
             anchor=tk.W, padx=10, pady=2
         )
 
@@ -581,8 +593,8 @@ class MainWindow:
             self.config.set("security.auto_lock_minutes", auto_lock_minutes.get())
             self.config.set("security.min_password_length", min_password_length.get())
             self.config.set("security.key_cache_timeout_minutes", key_cache_timeout_minutes.get())
-            self.config.set("security.lock_on_focus_loss", lock_on_focus_loss.get())
-            self.config.set("security.lock_on_minimize", lock_on_minimize.get())
+            self.config.set("security.lock_on_focus_loss", True)
+            self.config.set("security.lock_on_minimize", True)
             self.password_validator.min_length = min_password_length.get()
             self.db.set_setting(
                 "security.password_policy",
