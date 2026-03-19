@@ -65,7 +65,6 @@ class TestDatabase(unittest.TestCase):  #класс для тестирован�
         self.assertEqual(updated.title, "Updated Title")
 
     def test_delete_entry(self):  #тест для проверки удаления записи
-
         entry_id = self.db.add_entry(self.test_entry)
         self.db.delete_entry(entry_id)
 
@@ -76,7 +75,7 @@ class TestDatabase(unittest.TestCase):  #класс для тестирован�
         with self.db._get_connection() as conn:
             cursor = conn.execute("PRAGMA user_version")
             version = cursor.fetchone()[0]
-            self.assertEqual(version, 2)
+            self.assertEqual(version, 3)
 
     def test_settings_roundtrip(self):  #тест для проверки сохранения и получения настроек из базы данных
         self.db.set_setting("security.password_policy", {"min_length": 12})
@@ -85,17 +84,20 @@ class TestDatabase(unittest.TestCase):  #класс для тестирован�
 
     def test_key_store_roundtrip(self):  #тест для проверки сохранения и получения записи из хранилища ключей
         record = KeyStore(
-            key_type="master",
-            salt=b"1234567890123456",
+            key_type="auth_hash",
+            key_data=b"$argon2id$example",
+            version=19,
             hash="$argon2id$example",
-            params='{"algorithm":"argon2id"}',
+            created_at=datetime.now(),
+            last_rotated_at=datetime.now(),
         )
         self.db.save_key_store(record)
 
-        loaded = self.db.get_key_store("master")
+        loaded = self.db.get_key_store("auth_hash")
         self.assertIsNotNone(loaded)
-        self.assertEqual(loaded.key_type, "master")
-        self.assertEqual(loaded.hash, "$argon2id$example")
+        self.assertEqual(loaded.key_type, "auth_hash")
+        self.assertEqual(loaded.version, 19)
+        self.assertEqual(loaded.key_data, b"$argon2id$example")
 
 
 if __name__ == "__main__":
