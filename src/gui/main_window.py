@@ -89,52 +89,52 @@ class MainWindow:
         self.root.config(menu=menubar)
 
         file_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="File", menu=file_menu)
-        file_menu.add_command(label="New vault", command=self.new_database)
-        file_menu.add_command(label="Open vault", command=self.open_database)
-        file_menu.add_command(label="Backup", command=self.backup)
+        menubar.add_cascade(label="Файл", menu=file_menu)
+        file_menu.add_command(label="Новый vault", command=self.new_database)
+        file_menu.add_command(label="Открыть vault", command=self.open_database)
+        file_menu.add_command(label="Резервная копия", command=self.backup)
         file_menu.add_separator()
-        file_menu.add_command(label="Lock", command=self._lock_vault)
-        file_menu.add_command(label="Exit", command=self.root.quit)
+        file_menu.add_command(label="Заблокировать", command=self._lock_vault)
+        file_menu.add_command(label="Выход", command=self.root.quit)
 
         entry_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="Entries", menu=entry_menu)
-        entry_menu.add_command(label="Add", command=self.add_entry)
-        entry_menu.add_command(label="Edit", command=self.edit_entry)
-        entry_menu.add_command(label="Delete", command=self.delete_entry)
-        entry_menu.add_command(label="Show password", command=self.show_selected_password)
-        entry_menu.add_command(label="Copy password", command=self.copy_selected_password)
+        menubar.add_cascade(label="Записи", menu=entry_menu)
+        entry_menu.add_command(label="Добавить", command=self.add_entry)
+        entry_menu.add_command(label="Изменить", command=self.edit_entry)
+        entry_menu.add_command(label="Удалить", command=self.delete_entry)
+        entry_menu.add_command(label="Показать пароль", command=self.show_selected_password)
+        entry_menu.add_command(label="Скопировать пароль", command=self.copy_selected_password)
 
         security_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="Security", menu=security_menu)
-        security_menu.add_command(label="Change master password", command=self.change_master_password)
-        security_menu.add_command(label="Settings", command=self.show_settings)
-        security_menu.add_command(label="Audit log", command=self.show_logs)
+        menubar.add_cascade(label="Безопасность", menu=security_menu)
+        security_menu.add_command(label="Сменить мастер-пароль", command=self.change_master_password)
+        security_menu.add_command(label="Настройки", command=self.show_settings)
+        security_menu.add_command(label="Журнал аудита", command=self.show_logs)
 
         help_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="Help", menu=help_menu)
-        help_menu.add_command(label="About", command=self.show_about)
+        menubar.add_cascade(label="Справка", menu=help_menu)
+        help_menu.add_command(label="О программе", command=self.show_about)
 
     def _create_toolbar(self):
         toolbar = ttk.Frame(self.root)
         toolbar.pack(side=tk.TOP, fill=tk.X, padx=6, pady=6)
 
-        ttk.Button(toolbar, text="Add", command=self.add_entry).pack(side=tk.LEFT, padx=2)
-        ttk.Button(toolbar, text="Edit", command=self.edit_entry).pack(side=tk.LEFT, padx=2)
-        ttk.Button(toolbar, text="Delete", command=self.delete_entry).pack(side=tk.LEFT, padx=2)
-        ttk.Button(toolbar, text="Show Password", command=self.show_selected_password).pack(side=tk.LEFT, padx=10)
-        ttk.Button(toolbar, text="Copy Password", command=self.copy_selected_password).pack(side=tk.LEFT, padx=2)
-        ttk.Button(toolbar, text="Lock", command=self._lock_vault).pack(side=tk.RIGHT, padx=2)
+        ttk.Button(toolbar, text="Добавить", command=self.add_entry).pack(side=tk.LEFT, padx=2)
+        ttk.Button(toolbar, text="Изменить", command=self.edit_entry).pack(side=tk.LEFT, padx=2)
+        ttk.Button(toolbar, text="Удалить", command=self.delete_entry).pack(side=tk.LEFT, padx=2)
+        ttk.Button(toolbar, text="Показать пароль", command=self.show_selected_password).pack(side=tk.LEFT, padx=10)
+        ttk.Button(toolbar, text="Скопировать пароль", command=self.copy_selected_password).pack(side=tk.LEFT, padx=2)
+        ttk.Button(toolbar, text="Заблокировать", command=self._lock_vault).pack(side=tk.RIGHT, padx=2)
 
     def _create_main_area(self):
         main_frame = ttk.Frame(self.root)
         main_frame.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
 
         columns = [
-            {"id": "title", "label": "Title", "width": 180},
-            {"id": "username", "label": "Username", "width": 180},
+            {"id": "title", "label": "Название", "width": 180},
+            {"id": "username", "label": "Имя пользователя", "width": 180},
             {"id": "url", "label": "URL", "width": 260},
-            {"id": "updated_at", "label": "Updated", "width": 160},
+            {"id": "updated_at", "label": "Обновлено", "width": 160},
         ]
         self.table = SecureTable(main_frame, columns)
         self.table.pack(fill=tk.BOTH, expand=True)
@@ -143,10 +143,10 @@ class MainWindow:
         statusbar = ttk.Frame(self.root)
         statusbar.pack(side=tk.BOTTOM, fill=tk.X)
 
-        self.status_label = ttk.Label(statusbar, text="Locked")
+        self.status_label = ttk.Label(statusbar, text="Заблокировано")
         self.status_label.pack(side=tk.LEFT, padx=5)
 
-        self.clipboard_label = ttk.Label(statusbar, text="Clipboard: empty")
+        self.clipboard_label = ttk.Label(statusbar, text="Буфер обмена: пуст")
         self.clipboard_label.pack(side=tk.LEFT, padx=20)
 
         ttk.Label(statusbar, text="v2.0").pack(side=tk.RIGHT, padx=5)
@@ -188,14 +188,14 @@ class MainWindow:
 
     def _refresh_clipboard_status(self):
         self.clipboard_label.config(
-            text="Clipboard: has password" if self.state.get_clipboard() else "Clipboard: empty"
+            text="Буфер обмена: содержит пароль" if self.state.get_clipboard() else "Буфер обмена: пуст"
         )
 
     def _require_login(self, initial: bool = False):
         while not self.auth_service.is_authenticated():
             password = simpledialog.askstring(
-                "Master Password",
-                "Enter the master password to unlock the vault:",
+                "Мастер-пароль",
+                "Введите мастер-пароль, чтобы разблокировать vault:",
                 show="*",
                 parent=self.root,
             )
@@ -210,17 +210,19 @@ class MainWindow:
                     event_bus.publish(Event(EventType.VAULT_UNLOCKED, {}))
                     break
             except AuthenticationError as error:
-                messagebox.showerror("Authentication error", str(error), parent=self.root)
+                messagebox.showerror("Ошибка аутентификации", str(error), parent=self.root)
                 continue
 
             remaining = self.auth_service.get_lockout_remaining_seconds()
             messagebox.showwarning(
-                "Access denied",
-                f"Wrong master password. Retry after about {remaining} sec." if remaining else "Wrong master password.",
+                "Доступ запрещён",
+                f"Неверный мастер-пароль. Повторите попытку примерно через {remaining} сек."
+                if remaining
+                else "Неверный мастер-пароль.",
                 parent=self.root,
             )
 
-        self._set_status("Unlocked")
+        self._set_status("Разблокировано")
         self.state.update_activity()
 
     def _load_entries(self):
@@ -255,15 +257,15 @@ class MainWindow:
         dialog.transient(self.root)
         dialog.grab_set()
 
-        ttk.Label(dialog, text="Title").pack(anchor=tk.W, padx=8, pady=(8, 2))
+        ttk.Label(dialog, text="Название").pack(anchor=tk.W, padx=8, pady=(8, 2))
         title_entry = ttk.Entry(dialog, width=60)
         title_entry.pack(fill=tk.X, padx=8, pady=2)
 
-        ttk.Label(dialog, text="Username").pack(anchor=tk.W, padx=8, pady=(8, 2))
+        ttk.Label(dialog, text="Имя пользователя").pack(anchor=tk.W, padx=8, pady=(8, 2))
         username_entry = ttk.Entry(dialog, width=60)
         username_entry.pack(fill=tk.X, padx=8, pady=2)
 
-        ttk.Label(dialog, text="Password").pack(anchor=tk.W, padx=8, pady=(8, 2))
+        ttk.Label(dialog, text="Пароль").pack(anchor=tk.W, padx=8, pady=(8, 2))
         password_entry = PasswordEntry(dialog, width=50)
         password_entry.pack(fill=tk.X, padx=8, pady=2)
 
@@ -271,7 +273,7 @@ class MainWindow:
         url_entry = ttk.Entry(dialog, width=60)
         url_entry.pack(fill=tk.X, padx=8, pady=2)
 
-        ttk.Label(dialog, text="Notes").pack(anchor=tk.W, padx=8, pady=(8, 2))
+        ttk.Label(dialog, text="Заметки").pack(anchor=tk.W, padx=8, pady=(8, 2))
         notes_text = tk.Text(dialog, height=7, width=60)
         notes_text.pack(fill=tk.BOTH, expand=True, padx=8, pady=2)
 
@@ -292,7 +294,7 @@ class MainWindow:
         notes = notes_text.get("1.0", tk.END).strip()
 
         if not title or not username or not password:
-            raise ValueError("Title, username and password are required.")
+            raise ValueError("Поля «Название», «Имя пользователя» и «Пароль» обязательны.")
 
         return title, username, password, url, notes
 
@@ -306,11 +308,11 @@ class MainWindow:
         self._load_entries()
 
     def new_database(self):
-        if not messagebox.askyesno("Confirm", "Create a new vault database? Existing data in that file will be lost."):
+        if not messagebox.askyesno("Подтверждение", "Создать новую базу vault? Данные в выбранном файле будут потеряны."):
             return
 
         new_path = filedialog.asksaveasfilename(
-            title="Create new vault",
+            title="Создать новый vault",
             defaultextension=".db",
             filetypes=[("SQLite database", "*.db"), ("All files", "*.*")],
         )
@@ -340,7 +342,7 @@ class MainWindow:
 
     def open_database(self):
         path = filedialog.askopenfilename(
-            title="Open vault database",
+            title="Открыть базу vault",
             filetypes=[("SQLite database", "*.db"), ("All files", "*.*")],
         )
         if not path:
@@ -371,19 +373,19 @@ class MainWindow:
 
     def backup(self):
         backup_path = filedialog.asksaveasfilename(
-            title="Backup vault",
+            title="Создать резервную копию vault",
             defaultextension=".db",
             filetypes=[("SQLite database", "*.db"), ("All files", "*.*")],
         )
         if not backup_path:
             return
         self.db.backup(backup_path)
-        messagebox.showinfo("Backup", "Backup created successfully.")
+        messagebox.showinfo("Резервная копия", "Резервная копия успешно создана.")
 
     def add_entry(self):
         if not self.auth_service.is_authenticated():
             self._require_login()
-        dialog, title_entry, username_entry, password_entry, url_entry, notes_text = self._build_entry_dialog("Add Entry")
+        dialog, title_entry, username_entry, password_entry, url_entry, notes_text = self._build_entry_dialog("Добавить запись")
 
         def save():
             try:
@@ -391,7 +393,7 @@ class MainWindow:
                     title_entry, username_entry, password_entry, url_entry, notes_text
                 )
             except ValueError as error:
-                messagebox.showerror("Error", str(error), parent=dialog)
+                messagebox.showerror("Ошибка", str(error), parent=dialog)
                 return
 
             entry = VaultEntry(
@@ -408,16 +410,16 @@ class MainWindow:
             event_bus.publish(Event(EventType.ENTRY_ADDED, {"id": entry_id, "title": title}))
             dialog.destroy()
 
-        ttk.Button(dialog, text="Save", command=save).pack(pady=10)
+        ttk.Button(dialog, text="Сохранить", command=save).pack(pady=10)
 
     def edit_entry(self):
         entry = self._get_selected_entry()
         if not entry:
-            messagebox.showwarning("Warning", "Select an entry to edit.")
+            messagebox.showwarning("Предупреждение", "Выберите запись для редактирования.")
             return
 
         dialog, title_entry, username_entry, password_entry, url_entry, notes_text = self._build_entry_dialog(
-            "Edit Entry",
+            "Редактировать запись",
             entry,
         )
 
@@ -427,7 +429,7 @@ class MainWindow:
                     title_entry, username_entry, password_entry, url_entry, notes_text
                 )
             except ValueError as error:
-                messagebox.showerror("Error", str(error), parent=dialog)
+                messagebox.showerror("Ошибка", str(error), parent=dialog)
                 return
 
             entry.title = title
@@ -439,29 +441,29 @@ class MainWindow:
             event_bus.publish(Event(EventType.ENTRY_UPDATED, {"id": entry.id, "title": title}))
             dialog.destroy()
 
-        ttk.Button(dialog, text="Save changes", command=save).pack(pady=10)
+        ttk.Button(dialog, text="Сохранить изменения", command=save).pack(pady=10)
 
     def delete_entry(self):
         selected = self.table.get_selected()
         if not selected:
-            messagebox.showwarning("Warning", "Select an entry to delete.")
+            messagebox.showwarning("Предупреждение", "Выберите запись для удаления.")
             return
-        if messagebox.askyesno("Confirm", f"Delete entry '{selected['title']}'?"):
+        if messagebox.askyesno("Подтверждение", f"Удалить запись «{selected['title']}»?"):
             self.db.delete_entry(selected["id"])
             event_bus.publish(Event(EventType.ENTRY_DELETED, {"id": selected["id"], "title": selected["title"]}))
 
     def show_selected_password(self):
         entry = self._get_selected_entry()
         if not entry:
-            messagebox.showwarning("Warning", "Select an entry first.")
+            messagebox.showwarning("Предупреждение", "Сначала выберите запись.")
             return
-        messagebox.showinfo("Password", self._decrypt_password(entry.encrypted_password))
+        messagebox.showinfo("Пароль", self._decrypt_password(entry.encrypted_password))
         self.state.update_activity()
 
     def copy_selected_password(self):
         entry = self._get_selected_entry()
         if not entry:
-            messagebox.showwarning("Warning", "Select an entry first.")
+            messagebox.showwarning("Предупреждение", "Сначала выберите запись.")
             return
         password = self._decrypt_password(entry.encrypted_password)
         self.root.clipboard_clear()
@@ -471,7 +473,7 @@ class MainWindow:
 
     def show_logs(self):
         dialog = tk.Toplevel(self.root)
-        dialog.title("Audit Log")
+        dialog.title("Журнал аудита")
         dialog.geometry("760x420")
         text = tk.Text(dialog, wrap=tk.NONE)
         text.pack(fill=tk.BOTH, expand=True)
@@ -482,20 +484,20 @@ class MainWindow:
 
     def show_settings(self):
         dialog = tk.Toplevel(self.root)
-        dialog.title("Settings")
+        dialog.title("Настройки")
         dialog.geometry("460x360")
 
         clipboard_timeout = tk.IntVar(value=self.config.get("security.clipboard_timeout", 30))
         auto_lock_minutes = tk.IntVar(value=self.config.get("security.auto_lock_minutes", 5))
         min_password_length = tk.IntVar(value=self.config.get("security.min_password_length", 12))
 
-        ttk.Label(dialog, text="Clipboard timeout (sec)").pack(anchor=tk.W, padx=10, pady=(12, 2))
+        ttk.Label(dialog, text="Таймаут буфера обмена (сек)").pack(anchor=tk.W, padx=10, pady=(12, 2))
         ttk.Spinbox(dialog, from_=5, to=300, textvariable=clipboard_timeout).pack(fill=tk.X, padx=10, pady=2)
 
-        ttk.Label(dialog, text="Auto-lock timeout (min)").pack(anchor=tk.W, padx=10, pady=(12, 2))
+        ttk.Label(dialog, text="Таймаут автоблокировки (мин)").pack(anchor=tk.W, padx=10, pady=(12, 2))
         ttk.Spinbox(dialog, from_=1, to=120, textvariable=auto_lock_minutes).pack(fill=tk.X, padx=10, pady=2)
 
-        ttk.Label(dialog, text="Minimum master password length").pack(anchor=tk.W, padx=10, pady=(12, 2))
+        ttk.Label(dialog, text="Минимальная длина мастер-пароля").pack(anchor=tk.W, padx=10, pady=(12, 2))
         ttk.Spinbox(dialog, from_=8, to=64, textvariable=min_password_length).pack(fill=tk.X, padx=10, pady=2)
 
         def save():
@@ -514,29 +516,29 @@ class MainWindow:
                 },
             )
             self.state.set_inactivity_timeout(auto_lock_minutes.get() * 60)
-            messagebox.showinfo("Settings", "Settings saved.", parent=dialog)
+            messagebox.showinfo("Настройки", "Настройки сохранены.", parent=dialog)
             dialog.destroy()
 
-        ttk.Button(dialog, text="Save", command=save).pack(pady=16)
-        ttk.Button(dialog, text="Change master password", command=self.change_master_password).pack(pady=2)
+        ttk.Button(dialog, text="Сохранить", command=save).pack(pady=16)
+        ttk.Button(dialog, text="Сменить мастер-пароль", command=self.change_master_password).pack(pady=2)
 
     def change_master_password(self):
-        current_password = simpledialog.askstring("Change Password", "Current master password:", show="*", parent=self.root)
+        current_password = simpledialog.askstring("Смена пароля", "Текущий мастер-пароль:", show="*", parent=self.root)
         if current_password is None:
             return
-        new_password = simpledialog.askstring("Change Password", "New master password:", show="*", parent=self.root)
+        new_password = simpledialog.askstring("Смена пароля", "Новый мастер-пароль:", show="*", parent=self.root)
         if new_password is None:
             return
-        confirm = simpledialog.askstring("Change Password", "Confirm new master password:", show="*", parent=self.root)
+        confirm = simpledialog.askstring("Смена пароля", "Подтвердите новый мастер-пароль:", show="*", parent=self.root)
         if confirm != new_password:
-            messagebox.showerror("Error", "Passwords do not match.")
+            messagebox.showerror("Ошибка", "Пароли не совпадают.")
             return
         try:
             self.auth_service.change_master_password(current_password, new_password)
             self.key_manager.store_key("active", self.auth_service.get_active_key())
-            messagebox.showinfo("Success", "Master password changed.")
+            messagebox.showinfo("Успешно", "Мастер-пароль успешно изменён.")
         except AuthenticationError as error:
-            messagebox.showerror("Error", str(error))
+            messagebox.showerror("Ошибка", str(error))
 
     def _lock_vault(self, show_dialog: bool = True):
         self.auth_service.logout()
@@ -548,7 +550,7 @@ class MainWindow:
             pass
         event_bus.publish(Event(EventType.VAULT_LOCKED, {}))
         self.table.clear()
-        self._set_status("Locked")
+        self._set_status("Заблокировано")
         if show_dialog:
             self._require_login()
             if self.auth_service.is_authenticated():
@@ -557,9 +559,9 @@ class MainWindow:
 
     def show_about(self):
         messagebox.showinfo(
-            "About",
-            "CryptoSafe Manager\nVersion 2.0\n\n"
-            "Password manager with encrypted local storage, master-password auth and audit logging.",
+            "О программе",
+            "CryptoSafe Manager\nВерсия 2.0\n\n"
+            "Менеджер паролей с локальным зашифрованным хранилищем, мастер-паролем и журналом аудита.",
         )
 
     def run(self):
