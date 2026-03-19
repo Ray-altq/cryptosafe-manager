@@ -30,7 +30,7 @@ class TestAuthentication(unittest.TestCase):  #класс для тестиро�
             self.password_validator,
             self.state_manager,
         )
-        self.password = "ValidMasterPass123!"
+        self.password = "ValidMasterPass!9X"
 
     def tearDown(self):  #метод для очистки тестовой среды после каждого теста, который очищает кеш ключа и удаляет временный файл базы данных
         self.key_storage.clear_cached_key()
@@ -86,10 +86,10 @@ class TestAuthentication(unittest.TestCase):  #класс для тестиро�
 
             self.database.reencrypt_passwords(transform)
 
-        self.auth.change_master_password(self.password, "NewValidMasterPass456!", rotate_entries)
+        self.auth.change_master_password(self.password, "NewValidMasterPass!7Q", rotate_entries)
         self.auth.logout()
 
-        self.assertTrue(self.auth.authenticate("NewValidMasterPass456!"))
+        self.assertTrue(self.auth.authenticate("NewValidMasterPass!7Q"))
         updated_entry = self.database.get_entry(entry_id)
         decrypted = crypto.decrypt(updated_entry.encrypted_password, self.auth.get_active_key())
         self.assertEqual(decrypted, b"secret")
