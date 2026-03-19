@@ -1,84 +1,117 @@
-from argon2 import PasswordHasher, Type
-from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-from cryptography.hazmat.primitives import hashes
+import base64
+import re
 import secrets
-from typing import Dict, Tuple, Optional
+from typing import Dict, Optional
 
-class KeyDerivation:  #понадобится для управления формированием ключей (argon2 для хэширования мастер-пароля, PBKDF2 для ключа шифрования)
+from argon2 import PasswordHasher, Type
+from argon2.low_level import hash_secret_raw
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
-    def __init__(self, config: Dict):  #инициализируем параметрами из конфига
-        #параметры argon2
-        self.argon2_time = config.get('argon2_time', 3)           #временная стоимость
-        self.argon2_memory = config.get('argon2_memory', 65536)   #64 MiB в кибибайтах
-        self.argon2_parallelism = config.get('argon2_parallelism', 4)  #потоки
-        self.argon2_hash_len = config.get('argon2_hash_len', 32)  #32 байта
-        
-        #параметры PBKDF2
-        self.pbkdf2_iterations = config.get('pbkdf2_iterations', 100000)  #минимум 100k
-        self.pbkdf2_salt_len = config.get('pbkdf2_salt_len', 16)           #16 байт
-        self.pbkdf2_key_len = config.get('pbkdf2_key_len', 32)             #32 байта
-        
-        #инициализация argon2 хэшера
+
+class KeyDerivation:  #класс для управления процессом создания и проверки хэшей паролей
+    ARGON2_HASH_RE = re.compile(
+        r"^\$argon2id\$v=(?P<version>\d+)\$m=(?P<memory>\d+),t=(?P<time>\d+),p=(?P<parallelism>\d+)"
+        r"\$(?P<salt>[^$]+)\$(?P<hash>[^$]+)$"
+    )
+
+    def __init__(self, config: Dict): 
+        self.argon2_time = self._validated_int(config.get("argon2_time", 3), minimum=3, maximum=10, default=3)
+        self.argon2_memory = self._validated_int(
+            config.get("argon2_memory", 65536), minimum=65536, maximum=262144, default=65536
+        )
+        self.argon2_parallelism = self._validated_int(
+            config.get("argon2_parallelism", 4), minimum=1, maximum=8, default=4
+        )
+        self.argon2_hash_len = self._validated_int(config.get("argon2_hash_len", 32), minimum=16, maximum=64, default=32)
+        self.pbkdf2_iterations = self._validated_int(
+            config.get("pbkdf2_iterations", 100000), minimum=100000, maximum=1000000, default=100000
+        )
+        self.pbkdf2_salt_len = self._validated_int(config.get("pbkdf2_salt_len", 16), minimum=16, maximum=64, default=16)
+        self.pbkdf2_key_len = self._validated_int(config.get("pbkdf2_key_len", 32), minimum=32, maximum=64, default=32)
+
         self.argon2_hasher = PasswordHasher(
             time_cost=self.argon2_time,
             memory_cost=self.argon2_memory,
             parallelism=self.argon2_parallelism,
             hash_len=self.argon2_hash_len,
             salt_len=16,
-            type=Type.ID  #argon2id
+            type=Type.ID,
         )
 
-    def create_auth_hash(self, password: str) -> dict:
-        hash_str = self.argon2_hasher.hash(password)  #argon2 сам генерирует соль и кодирует все параметры в строке хэша
-    
-        return {   #возвращаем словарь с хэшем и параметрами для сохранения в БД
-          'hash': hash_str,
-          'algorithm': 'argon2id',
-          'time_cost': self.argon2_time,
-          'memory_cost': self.argon2_memory,
-          'parallelism': self.argon2_parallelism,
-          'hash_len': self.argon2_hash_len,
-          'version': 19  
-    }
+    def create_auth_hash(self, password: str) -> dict:  #метод для создания хэша пароля, который возвращает словарь с хэшем и параметрами алгоритма
+        hash_str = self.argon2_hasher.hash(password)
+        return {
+            "hash": hash_str,
+            "algorithm": "argon2id",
+            "time_cost": self.argon2_time,
+            "memory_cost": self.argon2_memory,
+            "parallelism": self.argon2_parallelism,
+            "hash_len": self.argon2_hash_len,
+            "version": 19,
+        }
 
-    def verify_auth_hash(self, password: str, stored_hash: str) -> bool:
-      
-      try:
-          self.argon2_hasher.verify(stored_hash, password)  #argon2 сам обеспечивает защиту от timing-атак
-          return True
-        
-      except Exception:
-        #выполняем фиктивную проверку для константного времени
-          self._dummy_verify()
-          return False
+    def verify_auth_hash(self, password: str, stored_hash: str) -> bool:  #метод для проверки пароля по хэшу
+        match = self.ARGON2_HASH_RE.match(stored_hash)
+        if not match:
+            self._dummy_verify()
+            return False
 
-    def hash_needs_rehash(self, stored_hash: str) -> bool:
-      try:
-          return self.argon2_hasher.check_needs_rehash(stored_hash)
-      except Exception:
-          return True
+        try:
+            expected_hash = self._argon2_b64decode(match.group("hash"))  #декодируем хэш из строки
+            salt = self._argon2_b64decode(match.group("salt"))  #декодируем соль из строки
+            derived_hash = hash_secret_raw( 
+                secret=password.encode("utf-8"),
+                salt=salt,
+                time_cost=int(match.group("time")),
+                memory_cost=int(match.group("memory")),
+                parallelism=int(match.group("parallelism")),
+                hash_len=len(expected_hash),
+                type=Type.ID,
+                version=int(match.group("version")),
+            )
+            return secrets.compare_digest(derived_hash, expected_hash)
+        except Exception:
+            self._dummy_verify()
+            return False
 
-    def _dummy_verify(self):
-      secrets.compare_digest(  #secrets.compare_digest всегда выполняется за константное время
-         b"dummy_constant_time_string",
-         b"dummy_constant_time_string"
-    )
-    
-    def derive_encryption_key(self, password: str, salt: Optional[bytes] = None) -> tuple[bytes, bytes]:
-      if salt is None:  #если соль не передана, то создаем новую криптостойкую соль
-        salt = secrets.token_bytes(self.pbkdf2_salt_len)
+    def hash_needs_rehash(self, stored_hash: str) -> bool:  #метод для проверки, нужно ли обновить хэш пароля
+        try:
+            return self.argon2_hasher.check_needs_rehash(stored_hash)
+        except Exception:
+            return True
 
-      kdf = PBKDF2HMAC(                               #инициализация kdf
-        algorithm=hashes.SHA256(),                    #алгоритм хеширования
-        length=self.pbkdf2_key_len,                   #32 байта
-        salt=salt,                                    #соль
-        iterations=self.pbkdf2_iterations             #количество итераций
-      )
-    
-      key = kdf.derive(password.encode('utf-8'))  #формируем ключ из пароля
-    
-      return key, salt
+    def derive_encryption_key(self, password: str, salt: Optional[bytes] = None) -> tuple[bytes, bytes]:  #метод для получения ключа шифрования из пароля
+        if salt is None:
+            salt = secrets.token_bytes(self.pbkdf2_salt_len)
 
-    def derive_key_with_known_salt(self, password: str, salt: bytes) -> bytes:
-      key, _ = self.derive_encryption_key(password, salt)
-      return key
+        kdf = PBKDF2HMAC(
+            algorithm=hashes.SHA256(),
+            length=self.pbkdf2_key_len,
+            salt=salt,
+            iterations=self.pbkdf2_iterations,
+        )
+        key = kdf.derive(password.encode("utf-8"))
+        return key, salt
+
+    def derive_key_with_known_salt(self, password: str, salt: bytes) -> bytes:  #метод для получения ключа шифрования из пароля и известного соли
+        key, _ = self.derive_encryption_key(password, salt)
+        return key
+
+    def _dummy_verify(self):  #метод для выполнения фиктивной проверки пароля
+        secrets.compare_digest(b"dummy_constant_time_string", b"dummy_constant_time_string")
+
+    def _validated_int(self, value, minimum: int, maximum: int, default: int) -> int:  #метод для проверки и ограничения целочисленных параметров конфигурации
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return default
+        if parsed < minimum:
+            return minimum
+        if parsed > maximum:
+            return maximum
+        return parsed
+
+    def _argon2_b64decode(self, value: str) -> bytes:  #метод для декодирования строки хэша и соли
+        padding = "=" * (-len(value) % 4)
+        return base64.b64decode(value + padding)
