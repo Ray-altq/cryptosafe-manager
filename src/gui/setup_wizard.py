@@ -239,7 +239,7 @@ class SetupWizard:
         )
         database.set_setting("security.auto_lock_timeout_minutes", self.auto_lock_minutes.get())
         database.set_setting("security.key_cache_timeout_minutes", self.key_cache_timeout_minutes.get())
-        database.set_setting("security.lock_on_focus_loss", self.config.get("security.lock_on_focus_loss", False))
+        database.set_setting("security.lock_on_focus_loss", self.config.get("security.lock_on_focus_loss", True))
         database.set_setting("security.lock_on_minimize", self.config.get("security.lock_on_minimize", True))
 
         messagebox.showinfo("Успешно", "Vault успешно инициализирован.")
