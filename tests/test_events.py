@@ -5,15 +5,13 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 from src.core.events import EventBus, Event, EventType, AuditLoggerStub
 
-class TestEvents(unittest.TestCase):
-    """Тесты для системы событий (TEST-1)"""
+class TestEvents(unittest.TestCase):  #класс для тестирования системы событий и логгера аудита
     
-    def setUp(self):
+    def setUp(self):  #метод для настройки тестовой среды
         self.event_bus = EventBus()
         self.received_events = []
     
-    def test_publish_subscribe(self):
-        """Тест: подписка и публикация"""
+    def test_publish_subscribe(self):  #тест для проверки публикации и подписки
         def callback(event):
             self.received_events.append(event)
         
@@ -24,8 +22,7 @@ class TestEvents(unittest.TestCase):
         self.assertEqual(len(self.received_events), 1)
         self.assertEqual(self.received_events[0].type, EventType.ENTRY_ADDED)
     
-    def test_multiple_subscribers(self):
-        """Тест: несколько подписчиков"""
+    def test_multiple_subscribers(self):  #тест для проверки нескольких подписчиков на одно событие
         count1 = 0
         count2 = 0
         
@@ -45,8 +42,7 @@ class TestEvents(unittest.TestCase):
         self.assertEqual(count1, 1)
         self.assertEqual(count2, 1)
     
-    def test_different_event_types(self):
-        """Тест: разные типы событий"""
+    def test_different_event_types(self):  #тест для проверки разных типов событий
         added = 0
         deleted = 0
         
@@ -67,10 +63,9 @@ class TestEvents(unittest.TestCase):
         self.assertEqual(added, 1)
         self.assertEqual(deleted, 1)
     
-    def test_audit_logger_stub(self):
-        """Тест: заглушка аудита"""
+    def test_audit_logger_stub(self):  #тест для проверки работы заглушки логгера аудита
         logger = AuditLoggerStub(self.event_bus)
-        # просто проверяем что нет ошибок
+        #просто проверяем что нет ошибок
         try:
             self.event_bus.publish(Event(EventType.ENTRY_ADDED, {}))
             self.event_bus.publish(Event(EventType.USER_LOGGED_IN, "test"))
