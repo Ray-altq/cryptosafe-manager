@@ -28,6 +28,7 @@ class MainWindow:
         self.config = Config()
         self.state = StateManager()
         self.state.set_inactivity_timeout(self.config.get("security.auto_lock_minutes", 5) * 60)
+        self.state.set_key_cache_timeout(self.config.get("security.key_cache_timeout_minutes", 60) * 60)
 
         self.db = Database(self.config.get("database.path", "cryptosafe.db"))
         self.key_manager = KeyManager()
@@ -42,17 +43,21 @@ class MainWindow:
         )
         self.crypto = AES256Placeholder(self.key_manager)
         self.audit_logger = AuditLogger(self.db, event_bus)
+        self._persist_runtime_settings()
         self._load_password_policy()
+
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         if not self.auth_service.is_initialized():
             SetupWizard(self.root, self.config, self.auth_service)
             if not self.auth_service.is_initialized():
-                self.root.destroy()
+                self._on_close()
                 return
             self.db = self.auth_service.key_storage.database
             self.key_storage = self.auth_service.key_storage
             self.audit_logger.close()
             self.audit_logger = AuditLogger(self.db, event_bus)
+            self._persist_runtime_settings()
             self._load_password_policy()
 
         self._create_menu()
@@ -67,6 +72,24 @@ class MainWindow:
             return
         self._load_entries()
         self._schedule_security_tasks()
+
+    def _persist_runtime_settings(self):
+        self.db.set_setting(
+            "crypto.key_derivation",
+            {
+                "argon2_time": self.config.get("crypto.argon2_time", 3),
+                "argon2_memory": self.config.get("crypto.argon2_memory", 65536),
+                "argon2_parallelism": self.config.get("crypto.argon2_parallelism", 4),
+                "argon2_hash_len": self.config.get("crypto.argon2_hash_len", 32),
+                "pbkdf2_iterations": self.config.get("crypto.pbkdf2_iterations", 100000),
+                "pbkdf2_salt_len": self.config.get("crypto.pbkdf2_salt_len", 16),
+                "pbkdf2_key_len": self.config.get("crypto.pbkdf2_key_len", 32),
+            },
+        )
+        self.db.set_setting("security.auto_lock_timeout_minutes", self.config.get("security.auto_lock_minutes", 5))
+        self.db.set_setting("security.key_cache_timeout_minutes", self.config.get("security.key_cache_timeout_minutes", 60))
+        self.db.set_setting("security.lock_on_focus_loss", self.config.get("security.lock_on_focus_loss", False))
+        self.db.set_setting("security.lock_on_minimize", self.config.get("security.lock_on_minimize", True))
 
     def _load_password_policy(self):
         policy = self.db.get_setting("security.password_policy", {})
@@ -95,7 +118,7 @@ class MainWindow:
         file_menu.add_command(label="Резервная копия", command=self.backup)
         file_menu.add_separator()
         file_menu.add_command(label="Заблокировать", command=self._lock_vault)
-        file_menu.add_command(label="Выход", command=self.root.quit)
+        file_menu.add_command(label="Выход", command=self._on_close)
 
         entry_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Записи", menu=entry_menu)
@@ -155,22 +178,26 @@ class MainWindow:
         event_bus.subscribe(EventType.ENTRY_ADDED, self._on_entry_changed)
         event_bus.subscribe(EventType.ENTRY_UPDATED, self._on_entry_changed)
         event_bus.subscribe(EventType.ENTRY_DELETED, self._on_entry_changed)
-        event_bus.subscribe(EventType.USER_LOGGED_IN, lambda _event: self._set_status("Unlocked"))
-        event_bus.subscribe(EventType.USER_LOGGED_OUT, lambda _event: self._set_status("Locked"))
+        event_bus.subscribe(EventType.USER_LOGGED_IN, lambda _event: self._set_status("Разблокировано"))
+        event_bus.subscribe(EventType.USER_LOGGED_OUT, lambda _event: self._set_status("Заблокировано"))
         event_bus.subscribe(EventType.CLIPBOARD_COPIED, lambda _event: self._refresh_clipboard_status())
         event_bus.subscribe(EventType.CLIPBOARD_CLEARED, lambda _event: self._refresh_clipboard_status())
 
     def _setup_activity_tracking(self):
         for sequence in ("<Any-KeyPress>", "<Any-ButtonPress>", "<Motion>"):
             self.root.bind_all(sequence, self._on_activity, add="+")
+        self.root.bind("<FocusIn>", self._on_focus_in, add="+")
+        self.root.bind("<FocusOut>", self._on_focus_out, add="+")
+        self.root.bind("<Unmap>", self._on_unmap, add="+")
+        self.root.bind("<Map>", self._on_map, add="+")
 
     def _schedule_security_tasks(self):
         self._check_security_timers()
         self.root.after(1000, self._schedule_security_tasks)
 
     def _check_security_timers(self):
-        if self.state.should_auto_lock():
-            self._lock_vault()
+        if self.state.should_auto_lock() or self.state.should_expire_key_cache() or self.key_storage.is_cache_expired():
+            self._lock_vault(show_dialog=False)
         if self.state.clipboard_timer and self.state.get_clipboard() is None:
             try:
                 self.root.clipboard_clear()
@@ -182,6 +209,28 @@ class MainWindow:
     def _on_activity(self, _event=None):
         if self.state.is_unlocked():
             self.state.update_activity()
+            self.key_storage.touch_cached_key(self.state.key_cache_timeout)
+
+    def _on_focus_in(self, _event=None):
+        self.state.set_application_active(True)
+
+    def _on_focus_out(self, _event=None):
+        self.state.set_application_active(False)
+        if self.config.get("security.lock_on_focus_loss", False) and self.auth_service.is_authenticated():
+            self._lock_vault(show_dialog=False)
+
+    def _on_unmap(self, _event=None):
+        try:
+            is_iconic = self.root.state() == "iconic"
+        except tk.TclError:
+            is_iconic = False
+        if is_iconic:
+            self.state.set_application_active(False)
+            if self.config.get("security.lock_on_minimize", True) and self.auth_service.is_authenticated():
+                self._lock_vault(show_dialog=False)
+
+    def _on_map(self, _event=None):
+        self.state.set_application_active(True)
 
     def _set_status(self, text: str):
         self.status_label.config(text=text)
@@ -201,7 +250,7 @@ class MainWindow:
             )
             if password is None:
                 if initial:
-                    self.root.destroy()
+                    self._on_close()
                 return
 
             try:
@@ -224,6 +273,7 @@ class MainWindow:
 
         self._set_status("Разблокировано")
         self.state.update_activity()
+        self.key_storage.touch_cached_key(self.state.key_cache_timeout)
 
     def _load_entries(self):
         if not self.auth_service.is_authenticated():
@@ -307,6 +357,16 @@ class MainWindow:
     def _on_entry_changed(self, _event):
         self._load_entries()
 
+    def _rotate_vault_entries(self, old_key: bytes, new_key: bytes):
+        old_crypto = AES256Placeholder()
+        new_crypto = AES256Placeholder()
+
+        def transform(ciphertext: bytes) -> bytes:
+            plaintext = old_crypto.decrypt(ciphertext, old_key)
+            return new_crypto.encrypt(plaintext, new_key)
+
+        self.db.reencrypt_passwords(transform)
+
     def new_database(self):
         if not messagebox.askyesno("Подтверждение", "Создать новую базу vault? Данные в выбранном файле будут потеряны."):
             return
@@ -333,6 +393,7 @@ class MainWindow:
             self.state,
         )
         self.audit_logger = AuditLogger(self.db, event_bus)
+        self._persist_runtime_settings()
         self._load_password_policy()
         SetupWizard(self.root, self.config, self.auth_service)
         if not self.auth_service.is_initialized():
@@ -360,6 +421,7 @@ class MainWindow:
             self.state,
         )
         self.audit_logger = AuditLogger(self.db, event_bus)
+        self._persist_runtime_settings()
         self._load_password_policy()
         if not self.auth_service.is_initialized():
             SetupWizard(self.root, self.config, self.auth_service)
@@ -458,7 +520,7 @@ class MainWindow:
             messagebox.showwarning("Предупреждение", "Сначала выберите запись.")
             return
         messagebox.showinfo("Пароль", self._decrypt_password(entry.encrypted_password))
-        self.state.update_activity()
+        self._on_activity()
 
     def copy_selected_password(self):
         entry = self._get_selected_entry()
@@ -470,6 +532,7 @@ class MainWindow:
         self.root.clipboard_append(password)
         self.state.set_clipboard(password, self.config.get("security.clipboard_timeout", 30))
         event_bus.publish(Event(EventType.CLIPBOARD_COPIED, {"entry_id": entry.id}))
+        self._on_activity()
 
     def show_logs(self):
         dialog = tk.Toplevel(self.root)
@@ -485,25 +548,41 @@ class MainWindow:
     def show_settings(self):
         dialog = tk.Toplevel(self.root)
         dialog.title("Настройки")
-        dialog.geometry("460x360")
+        dialog.geometry("460x450")
 
         clipboard_timeout = tk.IntVar(value=self.config.get("security.clipboard_timeout", 30))
         auto_lock_minutes = tk.IntVar(value=self.config.get("security.auto_lock_minutes", 5))
         min_password_length = tk.IntVar(value=self.config.get("security.min_password_length", 12))
+        key_cache_timeout_minutes = tk.IntVar(value=self.config.get("security.key_cache_timeout_minutes", 60))
+        lock_on_focus_loss = tk.BooleanVar(value=self.config.get("security.lock_on_focus_loss", False))
+        lock_on_minimize = tk.BooleanVar(value=self.config.get("security.lock_on_minimize", True))
 
         ttk.Label(dialog, text="Таймаут буфера обмена (сек)").pack(anchor=tk.W, padx=10, pady=(12, 2))
         ttk.Spinbox(dialog, from_=5, to=300, textvariable=clipboard_timeout).pack(fill=tk.X, padx=10, pady=2)
 
-        ttk.Label(dialog, text="Таймаут автоблокировки (мин)").pack(anchor=tk.W, padx=10, pady=(12, 2))
+        ttk.Label(dialog, text="Таймаут авто-блокировки (мин)").pack(anchor=tk.W, padx=10, pady=(12, 2))
         ttk.Spinbox(dialog, from_=1, to=120, textvariable=auto_lock_minutes).pack(fill=tk.X, padx=10, pady=2)
+
+        ttk.Label(dialog, text="Таймаут кэша ключа (мин)").pack(anchor=tk.W, padx=10, pady=(12, 2))
+        ttk.Spinbox(dialog, from_=1, to=60, textvariable=key_cache_timeout_minutes).pack(fill=tk.X, padx=10, pady=2)
 
         ttk.Label(dialog, text="Минимальная длина мастер-пароля").pack(anchor=tk.W, padx=10, pady=(12, 2))
         ttk.Spinbox(dialog, from_=8, to=64, textvariable=min_password_length).pack(fill=tk.X, padx=10, pady=2)
+
+        ttk.Checkbutton(dialog, text="Блокировать при потере фокуса", variable=lock_on_focus_loss).pack(
+            anchor=tk.W, padx=10, pady=(12, 2)
+        )
+        ttk.Checkbutton(dialog, text="Блокировать при сворачивании", variable=lock_on_minimize).pack(
+            anchor=tk.W, padx=10, pady=2
+        )
 
         def save():
             self.config.set("security.clipboard_timeout", clipboard_timeout.get())
             self.config.set("security.auto_lock_minutes", auto_lock_minutes.get())
             self.config.set("security.min_password_length", min_password_length.get())
+            self.config.set("security.key_cache_timeout_minutes", key_cache_timeout_minutes.get())
+            self.config.set("security.lock_on_focus_loss", lock_on_focus_loss.get())
+            self.config.set("security.lock_on_minimize", lock_on_minimize.get())
             self.password_validator.min_length = min_password_length.get()
             self.db.set_setting(
                 "security.password_policy",
@@ -516,6 +595,8 @@ class MainWindow:
                 },
             )
             self.state.set_inactivity_timeout(auto_lock_minutes.get() * 60)
+            self.state.set_key_cache_timeout(key_cache_timeout_minutes.get() * 60)
+            self._persist_runtime_settings()
             messagebox.showinfo("Настройки", "Настройки сохранены.", parent=dialog)
             dialog.destroy()
 
@@ -534,7 +615,11 @@ class MainWindow:
             messagebox.showerror("Ошибка", "Пароли не совпадают.")
             return
         try:
-            self.auth_service.change_master_password(current_password, new_password)
+            self.auth_service.change_master_password(
+                current_password,
+                new_password,
+                rotate_entries_callback=self._rotate_vault_entries,
+            )
             self.key_manager.store_key("active", self.auth_service.get_active_key())
             messagebox.showinfo("Успешно", "Мастер-пароль успешно изменён.")
         except AuthenticationError as error:
@@ -556,6 +641,23 @@ class MainWindow:
             if self.auth_service.is_authenticated():
                 self.key_manager.store_key("active", self.auth_service.get_active_key())
                 self._load_entries()
+
+    def _on_close(self):
+        try:
+            self.auth_service.logout()
+        except Exception:
+            pass
+        self.key_manager.clear_key()
+        self.state.clear_clipboard()
+        try:
+            self.root.clipboard_clear()
+        except tk.TclError:
+            pass
+        try:
+            self.audit_logger.close()
+        except Exception:
+            pass
+        self.root.destroy()
 
     def show_about(self):
         messagebox.showinfo(
