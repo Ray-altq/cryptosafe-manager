@@ -3,19 +3,21 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import Iterator, List, Optional
 
 from .models import AuditLog, KeyStore, VaultEntry
 
 
 class Database:
+    SCHEMA_VERSION = 3
+
     def __init__(self, db_path: str = "cryptosafe.db"):
         self.db_path = db_path
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
     @contextmanager
-    def _get_connection(self):
+    def _get_connection(self) -> Iterator[sqlite3.Connection]:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         try:
@@ -24,15 +26,32 @@ class Database:
         finally:
             conn.close()
 
+    @contextmanager
+    def transaction(self) -> Iterator[sqlite3.Connection]:
+        with self._get_connection() as conn:
+            try:
+                conn.execute("BEGIN")
+                yield conn
+            except Exception:
+                conn.rollback()
+                raise
+            else:
+                conn.commit()
+
     def _init_db(self):
         with self._get_connection() as conn:
             version = conn.execute("PRAGMA user_version").fetchone()[0]
             if version == 0:
                 self._create_schema(conn)
-                conn.execute("PRAGMA user_version = 2")
-            elif version == 1:
-                self._migrate_v1_to_v2(conn)
-                conn.execute("PRAGMA user_version = 2")
+                conn.execute(f"PRAGMA user_version = {self.SCHEMA_VERSION}")
+            else:
+                if version == 1:
+                    self._migrate_v1_to_v2(conn)
+                    version = 2
+                if version == 2:
+                    self._migrate_v2_to_v3(conn)
+                    version = 3
+                conn.execute(f"PRAGMA user_version = {max(version, self.SCHEMA_VERSION)}")
 
     def _create_schema(self, conn: sqlite3.Connection):
         conn.execute(
@@ -83,14 +102,17 @@ class Database:
             CREATE TABLE key_store (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 key_type TEXT UNIQUE NOT NULL,
-                salt BLOB NOT NULL,
-                hash TEXT NOT NULL,
-                params TEXT,
+                key_data BLOB NOT NULL,
+                version INTEGER NOT NULL DEFAULT 1,
                 created_at TIMESTAMP NOT NULL,
+                salt BLOB,
+                hash TEXT,
+                params TEXT,
                 last_rotated_at TIMESTAMP NOT NULL
             )
             """
         )
+        conn.execute("CREATE UNIQUE INDEX idx_key_store_type ON key_store(key_type)")
 
     def _migrate_v1_to_v2(self, conn: sqlite3.Connection):
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(key_store)").fetchall()}
@@ -111,6 +133,29 @@ class Database:
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_key_store_type ON key_store(key_type)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log(timestamp)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_entries_updated_at ON vault_entries(updated_at)")
+
+    def _migrate_v2_to_v3(self, conn: sqlite3.Connection):
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(key_store)").fetchall()}
+        if "key_data" not in columns:
+            conn.execute("ALTER TABLE key_store ADD COLUMN key_data BLOB")
+        if "version" not in columns:
+            conn.execute("ALTER TABLE key_store ADD COLUMN version INTEGER DEFAULT 1")
+
+        rows = conn.execute("SELECT id, key_type, salt, hash, params, key_data FROM key_store").fetchall()
+        for row in rows:
+            key_data = row["key_data"]
+            if key_data is None:
+                if row["hash"]:
+                    key_data = row["hash"].encode("utf-8")
+                elif row["salt"]:
+                    key_data = row["salt"]
+                elif row["params"]:
+                    key_data = row["params"].encode("utf-8")
+                else:
+                    key_data = b""
+                conn.execute("UPDATE key_store SET key_data = ? WHERE id = ?", (key_data, row["id"]))
+
+        conn.execute("UPDATE key_store SET version = COALESCE(version, 1)")
 
     def add_entry(self, entry: VaultEntry) -> int:
         with self._get_connection() as conn:
@@ -241,9 +286,12 @@ class Database:
         with self._get_connection() as conn:
             conn.execute(
                 """
-                INSERT INTO key_store (key_type, salt, hash, params, created_at, last_rotated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO key_store
+                (key_type, key_data, version, created_at, salt, hash, params, last_rotated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(key_type) DO UPDATE SET
+                    key_data = excluded.key_data,
+                    version = excluded.version,
                     salt = excluded.salt,
                     hash = excluded.hash,
                     params = excluded.params,
@@ -251,25 +299,37 @@ class Database:
                 """,
                 (
                     key_store.key_type,
+                    key_store.key_data,
+                    key_store.version,
+                    created_at,
                     key_store.salt,
                     key_store.hash,
                     key_store.params,
-                    created_at,
                     last_rotated_at,
                 ),
             )
 
-    def get_key_store(self, key_type: str = "master") -> Optional[KeyStore]:
+    def get_key_store(self, key_type: str) -> Optional[KeyStore]:
         with self._get_connection() as conn:
             row = conn.execute("SELECT * FROM key_store WHERE key_type = ?", (key_type,)).fetchone()
             if not row:
                 return None
-            data = dict(row)
-            if data.get("created_at"):
-                data["created_at"] = datetime.fromisoformat(data["created_at"])
-            if data.get("last_rotated_at"):
-                data["last_rotated_at"] = datetime.fromisoformat(data["last_rotated_at"])
-            return KeyStore(**data)
+            return self._row_to_key_store(row)
+
+    def reencrypt_passwords(self, transform) -> int:
+        with self.transaction() as conn:
+            rows = conn.execute("SELECT id, encrypted_password FROM vault_entries ORDER BY id").fetchall()
+            for row in rows:
+                updated_password = transform(row["encrypted_password"])
+                conn.execute(
+                    """
+                    UPDATE vault_entries
+                    SET encrypted_password = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (updated_password, datetime.now().isoformat(), row["id"]),
+                )
+            return len(rows)
 
     def _row_to_entry(self, row: sqlite3.Row) -> VaultEntry:
         data = dict(row)
@@ -278,3 +338,11 @@ class Database:
         if data.get("updated_at"):
             data["updated_at"] = datetime.fromisoformat(data["updated_at"])
         return VaultEntry(**data)
+
+    def _row_to_key_store(self, row: sqlite3.Row) -> KeyStore:
+        data = dict(row)
+        if data.get("created_at"):
+            data["created_at"] = datetime.fromisoformat(data["created_at"])
+        if data.get("last_rotated_at"):
+            data["last_rotated_at"] = datetime.fromisoformat(data["last_rotated_at"])
+        return KeyStore(**data)
