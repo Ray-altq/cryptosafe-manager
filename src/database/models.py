@@ -2,8 +2,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
+
 @dataclass
-class VaultEntry:  #запись пароля
+class VaultEntry:  #класс для представления записи в хранилище паролей
     id: Optional[int] = None
     title: str = ""
     username: str = ""
@@ -14,8 +15,9 @@ class VaultEntry:  #запись пароля
     updated_at: Optional[datetime] = None
     tags: str = ""
 
+
 @dataclass
-class AuditLog:  #журнал аудита
+class AuditLog:  #класс для представления записи в журнале аудита
     id: Optional[int] = None
     action: str = ""
     timestamp: Optional[datetime] = None
@@ -23,17 +25,21 @@ class AuditLog:  #журнал аудита
     details: str = ""
     signature: bytes = b""
 
-@dataclass
-class Setting:  #настройки
-    id: Optional[int] = None
-    setting_key: str = ""  # обрати внимание: setting_key, не key
-    setting_value: str = ""  # setting_value, не value
-    encrypted: bool = False
 
 @dataclass
-class KeyStore:  #хранилище ключей
+class Setting:  #класс для представления настройки приложения
+    id: Optional[int] = None
+    setting_key: str = ""
+    setting_value: str = ""
+    encrypted: bool = False
+
+
+@dataclass
+class KeyStore:  #класс для представления информации о ключе шифрования
     id: Optional[int] = None
     key_type: str = ""
     salt: bytes = b""
-    hash: bytes = b""
+    hash: str = ""
     params: str = ""
+    created_at: Optional[datetime] = None
+    last_rotated_at: Optional[datetime] = None
