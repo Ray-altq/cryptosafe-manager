@@ -7,29 +7,24 @@ from src.core.crypto.abstract import EncryptionService
 from src.core.crypto.placeholder import AES256Placeholder
 from src.core.key_manager import KeyManager
 
-class TestCrypto(unittest.TestCase):
-    """Тесты для криптографии (TEST-1)"""
+class TestCrypto(unittest.TestCase):  #класс для тестирования криптографических функций
     
-    def setUp(self):
-        """Подготовка перед каждым тестом"""
+    def setUp(self):  #метод для настройки тестовой среды
         self.crypto = AES256Placeholder()
         self.key_manager = KeyManager()
         self.test_key = b"test_key_16_bytes"
         self.test_data = b"Hello, World!"
     
-    def test_encryption_service_abstract(self):
-        """Тест: можно ли создать экземпляр абстрактного класса"""
+    def test_encryption_service_abstract(self):  #тест для проверки, что абстрактный класс EncryptionService не может быть инстанцирован напрямую
         with self.assertRaises(TypeError):
             EncryptionService()
     
-    def test_encrypt_decrypt(self):
-        """Тест: шифрование и расшифровка работают"""
+    def test_encrypt_decrypt(self):  #тест для проверки шифрования и расшифровки
         encrypted = self.crypto.encrypt(self.test_data, self.test_key)
         decrypted = self.crypto.decrypt(encrypted, self.test_key)
         self.assertEqual(self.test_data, decrypted)
     
-    def test_different_keys(self):
-        """Тест: разные ключи дают разный результат"""
+    def test_different_keys(self):  #тест для проверки, что разные ключи дают разный результат
         key1 = b"key123"
         key2 = b"key456"
         
@@ -38,17 +33,15 @@ class TestCrypto(unittest.TestCase):
         
         self.assertNotEqual(encrypted1, encrypted2)
     
-    def test_key_manager_derive(self):
-        """Тест: key_manager создает ключ из пароля"""
+    def test_key_manager_derive(self):  #тест для проверки, что key_manager может создать ключ из пароля
         password = "test_password"
         key, salt = self.key_manager.derive_key(password)
         
         self.assertIsInstance(key, bytes)
         self.assertIsInstance(salt, bytes)
-        self.assertEqual(len(key), 32)  # 32 байта для AES-256
+        self.assertEqual(len(key), 32)  #32 байта для AES-256
     
-    def test_key_manager_store_load(self):
-        """Тест: сохранение и загрузка ключа"""
+    def test_key_manager_store_load(self):  #тест для проверки, что key_manager может сохранить и загрузить ключ
         test_key = b"test_key_123"
         self.key_manager.store_key("test", test_key)
         loaded = self.key_manager.load_key("test")
