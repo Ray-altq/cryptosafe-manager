@@ -22,7 +22,7 @@ class PasswordValidator:
             'demon228', 'lolkek', '', 'qazwsx', 'pudge1337'
         ]
     
-    def validate(self, password: str) -> Tuple[bool, List[str]]:
+    def validate(self, password: str, strict: bool = False) -> Tuple[bool, List[str]]:
         errors = []
         
         if len(password) < self.min_length:  #проверка длины
@@ -32,26 +32,28 @@ class PasswordValidator:
             errors.append("Пароль не может быть пустым")
             return False, errors
         
-        if self.require_uppercase and not re.search(r'[A-Z]', password):  #проверка наличия заглавных букв
-            errors.append("Пароль должен содержать хотя бы одну заглавную букву")
+        if strict:
         
-        if self.require_lowercase and not re.search(r'[a-z]', password):  #проверка наличия строчных букв
-            errors.append("Пароль должен содержать хотя бы одну строчную букву")
+          if self.require_uppercase and not re.search(r'[A-Z]', password):  #проверка наличия заглавных букв
+              errors.append("Пароль должен содержать хотя бы одну заглавную букву")
         
-        if self.require_digits and not re.search(r'\d', password):  #проверка наличия цифр
-            errors.append("Пароль должен содержать хотя бы одну цифру")
+          if self.require_lowercase and not re.search(r'[a-z]', password):  #проверка наличия строчных букв
+              errors.append("Пароль должен содержать хотя бы одну строчную букву")
         
-        if self.require_special and not re.search(r'[!@#$%^&*(),.?":{}|<>]', password):  #проверка наличия спецсимволов
-            errors.append("Пароль должен содержать хотя бы один специальный символ")
+          if self.require_digits and not re.search(r'\d', password):  #проверка наличия цифр
+              errors.append("Пароль должен содержать хотя бы одну цифру")
         
-        if password.lower() in self.common_passwords:  #проверка на распространенные пароли
-            errors.append("Этот пароль слишком распространен")
+          if self.require_special and not re.search(r'[!@#$%^&*(),.?":{}|<>]', password):  #проверка наличия спецсимволов
+              errors.append("Пароль должен содержать хотя бы один специальный символ")
         
-        if self._has_sequences(password):  #проверка на последовательности (123, abc, qwerty)
-            errors.append("Пароль содержит простую последовательность (например, 123 или abc)")
+          if password.lower() in self.common_passwords:  #проверка на распространенные пароли
+              errors.append("Этот пароль слишком распространен")
         
-        if self._has_repetitions(password):  #проверка на повторяющиеся символы
-            errors.append("Пароль содержит слишком много повторяющихся символов")
+          if self._has_sequences(password):  #проверка на последовательности (123, abc, qwerty)
+              errors.append("Пароль содержит простую последовательность (например, 123 или abc)")
+        
+          if self._has_repetitions(password):  #проверка на повторяющиеся символы
+              errors.append("Пароль содержит слишком много повторяющихся символов")
         
         return len(errors) == 0, errors
     
@@ -101,33 +103,41 @@ class PasswordValidator:
     def get_strength_score(self, password: str) -> int:
         score = 0
         
-        length_score = min(40, len(password) * 2)
-        score += length_score
-        
-        #разнообразие символов
+        #длина (макс 25 баллов)
+        length = len(password)
+        if length >= 16:
+          score += 25
+        elif length >= 12:
+          score += 20
+        elif length >= 8:
+          score += 10
+        elif length >= 6:
+          score += 5
+    
+        #разнообразие символов (макс 40 баллов)
         has_upper = 1 if re.search(r'[A-Z]', password) else 0
         has_lower = 1 if re.search(r'[a-z]', password) else 0
         has_digit = 1 if re.search(r'\d', password) else 0
         has_special = 1 if re.search(r'[!@#$%^&*(),.?":{}|<>]', password) else 0
-        
-        variety = (has_upper + has_lower + has_digit + has_special) * 7.5
+    
+        variety = (has_upper + has_lower + has_digit + has_special) * 10
         score += variety
-        
-        #штрафы
-        #штраф за распространенный пароль
+    
+        #бонус за смешение типов (макс 20)
+        if has_upper + has_lower + has_digit + has_special >= 3:
+          score += 10
+        if has_upper + has_lower + has_digit + has_special == 4:
+          score += 10
+    
+        #штрафы (макс -35)
         if password.lower() in self.common_passwords:
-            score -= 30
-        
-        #штраф за последовательности
-        if self._has_sequences(password):
-            score -= 15
-        
-        #штраф за повторения
-        if self._has_repetitions(password):
-            score -= 15
-        
-        #ограничиваем диапазон 0-100
-        return max(0, min(100, int(score)))
+          score -= 25
+        elif self._has_sequences(password):
+          score -= 15
+        elif self._has_repetitions(password):
+          score -= 10
+    
+        return max(0, min(100, score))
     
     def get_strength_label(self, score: int) -> str:
         if score < 20:
