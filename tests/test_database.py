@@ -1,6 +1,8 @@
 import os
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from datetime import datetime
 
@@ -98,6 +100,48 @@ class TestDatabase(unittest.TestCase):  #класс для тестирован�
         self.assertEqual(loaded.key_type, "auth_hash")
         self.assertEqual(loaded.version, 19)
         self.assertEqual(loaded.key_data, b"$argon2id$example")
+
+    def test_reencrypt_passwords_reports_progress_and_respects_pause(self):
+        first_id = self.db.add_entry(
+            VaultEntry(
+                title="One",
+                username="user1",
+                encrypted_password=b"one",
+                created_at=datetime.now(),
+                updated_at=datetime.now(),
+            )
+        )
+        second_id = self.db.add_entry(
+            VaultEntry(
+                title="Two",
+                username="user2",
+                encrypted_password=b"two",
+                created_at=datetime.now(),
+                updated_at=datetime.now(),
+            )
+        )
+
+        progress_updates = []
+        pause_event = threading.Event()
+        pause_event.clear()
+
+        def release_pause():
+            time.sleep(0.05)
+            pause_event.set()
+
+        threading.Thread(target=release_pause, daemon=True).start()
+
+        updated = self.db.reencrypt_passwords(
+            lambda ciphertext: ciphertext + b"!",
+            progress_callback=lambda processed, total: progress_updates.append((processed, total)),
+            pause_event=pause_event,
+        )
+
+        self.assertEqual(updated, 2)
+        self.assertEqual(progress_updates[0], (0, 2))
+        self.assertEqual(progress_updates[-1], (2, 2))
+        self.assertEqual(self.db.get_entry(first_id).encrypted_password, b"one!")
+        self.assertEqual(self.db.get_entry(second_id).encrypted_password, b"two!")
 
 
 if __name__ == "__main__":

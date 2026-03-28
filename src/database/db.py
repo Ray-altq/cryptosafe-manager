@@ -3,7 +3,7 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Iterator, List, Optional
+from typing import Callable, Iterator, List, Optional
 
 from .models import AuditLog, KeyStore, VaultEntry
 
@@ -316,10 +316,20 @@ class Database:
                 return None
             return self._row_to_key_store(row)
 
-    def reencrypt_passwords(self, transform) -> int:
+    def reencrypt_passwords(
+        self,
+        transform,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+        pause_event=None,
+    ) -> int:
         with self.transaction() as conn:
             rows = conn.execute("SELECT id, encrypted_password FROM vault_entries ORDER BY id").fetchall()
-            for row in rows:
+            total = len(rows)
+            if progress_callback is not None:
+                progress_callback(0, total)
+            for index, row in enumerate(rows, start=1):
+                if pause_event is not None:
+                    pause_event.wait()
                 updated_password = transform(row["encrypted_password"])
                 conn.execute(
                     """
@@ -329,7 +339,9 @@ class Database:
                     """,
                     (updated_password, datetime.now().isoformat(), row["id"]),
                 )
-            return len(rows)
+                if progress_callback is not None:
+                    progress_callback(index, total)
+            return total
 
     def _row_to_entry(self, row: sqlite3.Row) -> VaultEntry:
         data = dict(row)

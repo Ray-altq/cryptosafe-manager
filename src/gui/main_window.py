@@ -1,4 +1,6 @@
 import os
+import queue
+import threading
 import tkinter as tk
 from datetime import datetime
 from tkinter import filedialog, messagebox, simpledialog, ttk
@@ -384,12 +386,106 @@ class MainWindow:
     def _rotate_vault_entries(self, old_key: bytes, new_key: bytes):
         old_crypto = AES256Placeholder()
         new_crypto = AES256Placeholder()
+        progress_dialog = tk.Toplevel(self.root)
+        progress_dialog.title("Смена мастер-пароля")
+        progress_dialog.geometry("420x180")
+        progress_dialog.transient(self.root)
+        progress_dialog.grab_set()
+        progress_dialog.resizable(False, False)
+
+        status_var = tk.StringVar(value="Подготовка к пере-шифрованию записей...")
+        progress_var = tk.DoubleVar(value=0)
+        pause_button_text = tk.StringVar(value="Пауза")
+        progress_queue: queue.Queue = queue.Queue()
+        pause_event = threading.Event()
+        pause_event.set()
+        state = {"paused": False, "processed": 0, "total": 0, "error": None}
+
+        ttk.Label(progress_dialog, text="Пере-шифрование vault", font=("Segoe UI", 10, "bold")).pack(
+            anchor=tk.W, padx=12, pady=(12, 6)
+        )
+        ttk.Label(progress_dialog, textvariable=status_var, wraplength=380, justify=tk.LEFT).pack(
+            anchor=tk.W, padx=12, pady=(0, 10)
+        )
+        progressbar = ttk.Progressbar(progress_dialog, variable=progress_var, maximum=1, mode="determinate")
+        progressbar.pack(fill=tk.X, padx=12, pady=(0, 12))
+
+        button_frame = ttk.Frame(progress_dialog)
+        button_frame.pack(fill=tk.X, padx=12, pady=(0, 12))
+
+        def update_status():
+            suffix = " (пауза)" if state["paused"] else ""
+            if state["total"] == 0:
+                status_var.set(f"Пере-шифрование записей...{suffix}")
+            else:
+                status_var.set(f"Пере-шифровано записей: {state['processed']} из {state['total']}{suffix}")
+
+        def toggle_pause():
+            state["paused"] = not state["paused"]
+            if state["paused"]:
+                pause_event.clear()
+                pause_button_text.set("Продолжить")
+            else:
+                pause_event.set()
+                pause_button_text.set("Пауза")
+            update_status()
+
+        pause_button = ttk.Button(button_frame, textvariable=pause_button_text, command=toggle_pause)
+        pause_button.pack(side=tk.RIGHT)
+        progress_dialog.protocol("WM_DELETE_WINDOW", lambda: None)
 
         def transform(ciphertext: bytes) -> bytes:
             plaintext = old_crypto.decrypt(ciphertext, old_key)
             return new_crypto.encrypt(plaintext, new_key)
 
-        self.db.reencrypt_passwords(transform)
+        def worker():
+            try:
+                self.db.reencrypt_passwords(
+                    transform,
+                    progress_callback=lambda processed, total: progress_queue.put(("progress", processed, total)),
+                    pause_event=pause_event,
+                )
+                progress_queue.put(("done",))
+            except Exception as error:
+                progress_queue.put(("error", str(error)))
+
+        def poll_progress():
+            try:
+                while True:
+                    message = progress_queue.get_nowait()
+                    kind = message[0]
+                    if kind == "progress":
+                        _, processed, total = message
+                        state["processed"] = processed
+                        state["total"] = total
+                        progressbar.configure(maximum=max(total, 1))
+                        progress_var.set(processed if total else 0)
+                        update_status()
+                    elif kind == "done":
+                        pause_button.state(["disabled"])
+                        status_var.set(
+                            "Пере-шифрование завершено."
+                            if state["total"]
+                            else "Записей для пере-шифрования не найдено."
+                        )
+                        progress_dialog.destroy()
+                        return
+                    elif kind == "error":
+                        state["error"] = message[1]
+                        progress_dialog.destroy()
+                        return
+            except queue.Empty:
+                pass
+
+            if progress_dialog.winfo_exists():
+                progress_dialog.after(100, poll_progress)
+
+        threading.Thread(target=worker, daemon=True).start()
+        poll_progress()
+        progress_dialog.wait_window()
+
+        if state["error"] is not None:
+            raise RuntimeError(state["error"])
 
     def new_database(self):
         if not messagebox.askyesno("Подтверждение", "Создать новую базу vault? Данные в выбранном файле будут потеряны."):
