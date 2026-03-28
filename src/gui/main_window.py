@@ -26,8 +26,6 @@ class MainWindow:
         self.root.geometry("980x640")
 
         self.config = Config()
-        self.config.set("security.lock_on_focus_loss", True)
-        self.config.set("security.lock_on_minimize", True)
         self.state = StateManager()
         self.state.set_inactivity_timeout(self.config.get("security.auto_lock_minutes", 5) * 60)
         self.state.set_key_cache_timeout(self.config.get("security.key_cache_timeout_minutes", 60) * 60)
@@ -218,8 +216,7 @@ class MainWindow:
 
     def _on_focus_out(self, _event=None):
         self.state.set_application_active(False)
-        if self.config.get("security.lock_on_focus_loss", True) and self.auth_service.is_authenticated():
-            self._lock_vault(show_dialog=False)
+        self.root.after(150, self._lock_if_application_inactive)
 
     def _on_unmap(self, _event=None):
         try:
@@ -234,13 +231,38 @@ class MainWindow:
     def _on_map(self, _event=None):
         self.state.set_application_active(True)
 
+    def _lock_if_application_inactive(self):
+        try:
+            app_has_focus = self.root.focus_displayof() is not None
+            is_iconic = self.root.state() == "iconic"
+        except tk.TclError:
+            return
+
+        if app_has_focus or is_iconic:
+            return
+
+        self.state.set_application_active(False)
+        if self.config.get("security.lock_on_focus_loss", True) and self.auth_service.is_authenticated():
+            self._lock_vault(show_dialog=False)
+
     def _set_status(self, text: str):
         self.status_label.config(text=text)
 
     def _refresh_clipboard_status(self):
-        self.clipboard_label.config(
-            text="Буфер обмена: содержит пароль" if self.state.get_clipboard() else "Буфер обмена: пуст"
-        )
+        clipboard_value = self.state.get_clipboard()
+        if not clipboard_value:
+            self.clipboard_label.config(text="Буфер обмена: пуст")
+            return
+
+        remaining_seconds = 0
+        if self.state.clipboard_timer is not None:
+            remaining_seconds = max(0, int((self.state.clipboard_timer - datetime.now()).total_seconds()))
+
+        if remaining_seconds > 0:
+            status_text = f"Буфер обмена: содержит пароль ({remaining_seconds} сек)"
+        else:
+            status_text = "Буфер обмена: содержит пароль"
+        self.clipboard_label.config(text=status_text)
 
     def _require_login(self, initial: bool = False):
         while not self.auth_service.is_authenticated():
@@ -556,8 +578,8 @@ class MainWindow:
         auto_lock_minutes = tk.IntVar(value=self.config.get("security.auto_lock_minutes", 5))
         min_password_length = tk.IntVar(value=self.config.get("security.min_password_length", 12))
         key_cache_timeout_minutes = tk.IntVar(value=self.config.get("security.key_cache_timeout_minutes", 60))
-        lock_on_focus_loss = tk.BooleanVar(value=True)
-        lock_on_minimize = tk.BooleanVar(value=True)
+        lock_on_focus_loss = tk.BooleanVar(value=self.config.get("security.lock_on_focus_loss", True))
+        lock_on_minimize = tk.BooleanVar(value=self.config.get("security.lock_on_minimize", True))
 
         ttk.Label(dialog, text="Таймаут буфера обмена (сек)").pack(anchor=tk.W, padx=10, pady=(12, 2))
         ttk.Spinbox(dialog, from_=5, to=300, textvariable=clipboard_timeout).pack(fill=tk.X, padx=10, pady=2)
@@ -575,7 +597,6 @@ class MainWindow:
             dialog,
             text="Блокировать при потере фокуса",
             variable=lock_on_focus_loss,
-            state=tk.DISABLED,
         ).pack(
             anchor=tk.W, padx=10, pady=(12, 2)
         )
@@ -583,7 +604,6 @@ class MainWindow:
             dialog,
             text="Блокировать при сворачивании",
             variable=lock_on_minimize,
-            state=tk.DISABLED,
         ).pack(
             anchor=tk.W, padx=10, pady=2
         )
@@ -593,8 +613,8 @@ class MainWindow:
             self.config.set("security.auto_lock_minutes", auto_lock_minutes.get())
             self.config.set("security.min_password_length", min_password_length.get())
             self.config.set("security.key_cache_timeout_minutes", key_cache_timeout_minutes.get())
-            self.config.set("security.lock_on_focus_loss", True)
-            self.config.set("security.lock_on_minimize", True)
+            self.config.set("security.lock_on_focus_loss", lock_on_focus_loss.get())
+            self.config.set("security.lock_on_minimize", lock_on_minimize.get())
             self.password_validator.min_length = min_password_length.get()
             self.db.set_setting(
                 "security.password_policy",
