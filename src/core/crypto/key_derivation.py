@@ -39,6 +39,25 @@ class KeyDerivation:  #класс для управления процессом
             type=Type.ID,
         )
 
+    def export_params(self) -> dict:
+        return {
+            "version": 1,
+            "auth_algorithm": "argon2id",
+            "argon2_version": 19,
+            "argon2_time": self.argon2_time,
+            "argon2_memory": self.argon2_memory,
+            "argon2_parallelism": self.argon2_parallelism,
+            "argon2_hash_len": self.argon2_hash_len,
+            "encryption_kdf": "pbkdf2-hmac-sha256",
+            "pbkdf2_iterations": self.pbkdf2_iterations,
+            "pbkdf2_salt_len": self.pbkdf2_salt_len,
+            "pbkdf2_key_len": self.pbkdf2_key_len,
+        }
+
+    @classmethod
+    def from_params(cls, params: Optional[Dict]) -> "KeyDerivation":
+        return cls(params or {})
+
     def create_auth_hash(self, password: str) -> dict:  #метод для создания хэша пароля, который возвращает словарь с хэшем и параметрами алгоритма
         hash_str = self.argon2_hasher.hash(password)
         return {
