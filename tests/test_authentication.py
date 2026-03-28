@@ -94,6 +94,72 @@ class TestAuthentication(unittest.TestCase):  #класс для тестиро�
         decrypted = crypto.decrypt(updated_entry.encrypted_password, self.auth.get_active_key())
         self.assertEqual(decrypted, b"secret")
 
+    def test_register_persists_full_derivation_params(self):
+        self.auth.register_master_password(self.password)
+
+        metadata = self.key_storage.load_metadata()
+
+        self.assertIsNotNone(metadata)
+        self.assertEqual(metadata.params["auth_algorithm"], "argon2id")
+        self.assertEqual(metadata.params["encryption_kdf"], "pbkdf2-hmac-sha256")
+        self.assertEqual(metadata.params["pbkdf2_iterations"], 100000)
+        self.assertEqual(metadata.params["pbkdf2_salt_len"], 16)
+        self.assertEqual(metadata.params["pbkdf2_key_len"], 32)
+
+    def test_authenticate_uses_stored_derivation_params(self):
+        initial_auth = AuthenticationService(
+            self.key_storage,
+            KeyDerivation({"pbkdf2_iterations": 150000}),
+            self.password_validator,
+            self.state_manager,
+        )
+        initial_auth.register_master_password(self.password)
+        original_key = initial_auth.get_active_key()
+        crypto = AES256Placeholder()
+
+        entry = VaultEntry(
+            title="site",
+            username="user",
+            encrypted_password=crypto.encrypt(b"secret", original_key),
+        )
+        entry_id = self.database.add_entry(entry)
+        initial_auth.logout()
+
+        runtime_auth = AuthenticationService(
+            self.key_storage,
+            KeyDerivation({"pbkdf2_iterations": 300000}),
+            self.password_validator,
+            StateManager(),
+        )
+
+        self.assertTrue(runtime_auth.authenticate(self.password))
+        self.assertEqual(runtime_auth.get_active_key(), original_key)
+
+        updated_entry = self.database.get_entry(entry_id)
+        decrypted = crypto.decrypt(updated_entry.encrypted_password, runtime_auth.get_active_key())
+        self.assertEqual(decrypted, b"secret")
+
+    def test_change_master_password_updates_stored_params(self):
+        initial_auth = AuthenticationService(
+            self.key_storage,
+            KeyDerivation({"pbkdf2_iterations": 120000}),
+            self.password_validator,
+            self.state_manager,
+        )
+        initial_auth.register_master_password(self.password)
+
+        updated_auth = AuthenticationService(
+            self.key_storage,
+            KeyDerivation({"pbkdf2_iterations": 220000}),
+            self.password_validator,
+            self.state_manager,
+        )
+        updated_auth.change_master_password(self.password, "NewValidMasterPass!7Q")
+
+        metadata = self.key_storage.load_metadata()
+        self.assertIsNotNone(metadata)
+        self.assertEqual(metadata.params["pbkdf2_iterations"], 220000)
+
 
 if __name__ == "__main__":
     unittest.main()
