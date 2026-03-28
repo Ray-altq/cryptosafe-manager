@@ -39,7 +39,11 @@ class AuthenticationService:
 
         auth_data = self.key_derivation.create_auth_hash(password)
         encryption_key, encryption_salt = self.key_derivation.derive_encryption_key(password)
-        self.key_storage.store_metadata(auth_data["hash"], encryption_salt, auth_data)
+        self.key_storage.store_metadata(
+            auth_data["hash"],
+            encryption_salt,
+            self.key_derivation.export_params(),
+        )
         self.key_storage.cache_active_key(encryption_key, ttl_seconds=self.CACHE_TTL_SECONDS)
         self.state_manager.set_key_cache_timeout(self.CACHE_TTL_SECONDS)
         self.state_manager.unlock()
@@ -54,11 +58,13 @@ class AuthenticationService:
         if metadata is None:
             raise AuthenticationError("Master password is not initialized")
 
-        if not self.key_derivation.verify_auth_hash(password, metadata.auth_hash):
+        stored_key_derivation = KeyDerivation.from_params(metadata.params)
+
+        if not stored_key_derivation.verify_auth_hash(password, metadata.auth_hash):
             self._register_failure()
             return False
 
-        encryption_key = self.key_derivation.derive_key_with_known_salt(password, metadata.encryption_salt)
+        encryption_key = stored_key_derivation.derive_key_with_known_salt(password, metadata.encryption_salt)
         self.key_storage.cache_active_key(encryption_key, ttl_seconds=self.CACHE_TTL_SECONDS)
         self.state_manager.set_key_cache_timeout(self.CACHE_TTL_SECONDS)
         self.state_manager.unlock()
@@ -77,7 +83,8 @@ class AuthenticationService:
         metadata = self.key_storage.load_metadata()
         if metadata is None:
             raise AuthenticationError("Master password is not initialized")
-        if not self.key_derivation.verify_auth_hash(current_password, metadata.auth_hash):
+        current_key_derivation = KeyDerivation.from_params(metadata.params)
+        if not current_key_derivation.verify_auth_hash(current_password, metadata.auth_hash):
             self._register_failure()
             raise AuthenticationError("Current password is invalid")
 
@@ -85,14 +92,18 @@ class AuthenticationService:
         if not is_valid:
             raise AuthenticationError("; ".join(errors))
 
-        old_encryption_key = self.key_derivation.derive_key_with_known_salt(current_password, metadata.encryption_salt)
+        old_encryption_key = current_key_derivation.derive_key_with_known_salt(current_password, metadata.encryption_salt)
         auth_data = self.key_derivation.create_auth_hash(new_password)
         new_encryption_key, new_encryption_salt = self.key_derivation.derive_encryption_key(new_password)
 
         try:
             if rotate_entries_callback is not None:
                 rotate_entries_callback(old_encryption_key, new_encryption_key)
-            self.key_storage.store_metadata(auth_data["hash"], new_encryption_salt, auth_data)
+            self.key_storage.store_metadata(
+                auth_data["hash"],
+                new_encryption_salt,
+                self.key_derivation.export_params(),
+            )
         except Exception as error:
             self.key_storage.cache_active_key(old_encryption_key, ttl_seconds=self.CACHE_TTL_SECONDS)
             raise AuthenticationError(f"Vault re-encryption failed: {error}") from error
