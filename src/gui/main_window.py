@@ -63,9 +63,11 @@ class MainWindow:
         self.entry_manager = EntryManager(self.db, self.vault_crypto, legacy_encryption_service=self.crypto)
         self.password_generator = PasswordGenerator()
         self.passwords_visible = False
+        self.search_history = []
         self.audit_logger = AuditLogger(self.db, event_bus)
         self._persist_runtime_settings()
         self._load_password_policy()
+        self._load_search_history()
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -81,6 +83,7 @@ class MainWindow:
             self.audit_logger = AuditLogger(self.db, event_bus)
             self._persist_runtime_settings()
             self._load_password_policy()
+            self._load_search_history()
 
         self._create_menu()
         self._create_toolbar()
@@ -128,6 +131,17 @@ class MainWindow:
         self.password_validator.require_special = policy.get(
             "require_special", self.password_validator.require_special
         )
+
+    def _load_search_history(self):
+        loaded_history = self.db.get_setting("ui.search_history", [])
+        if not isinstance(loaded_history, list):
+            self.search_history = []
+            return
+        self.search_history = [
+            str(item).strip()
+            for item in loaded_history
+            if isinstance(item, str) and str(item).strip()
+        ][:10]
 
     def _create_menu(self):
         menubar = tk.Menu(self.root)
@@ -179,6 +193,10 @@ class MainWindow:
         self.search_entry = ttk.Entry(toolbar, textvariable=self.search_var, width=28)
         self.search_entry.pack(side=tk.LEFT, padx=2)
         self.search_entry.bind("<Escape>", lambda _event: self._clear_search())
+        self.search_entry.bind("<Return>", self._commit_search_query)
+        self.search_entry.bind("<FocusOut>", self._remember_current_search)
+        self.search_history_button = ttk.Button(toolbar, text="История", command=self._show_search_history_menu)
+        self.search_history_button.pack(side=tk.LEFT, padx=(2, 4))
         ttk.Label(toolbar, text="Категория").pack(side=tk.LEFT, padx=(8, 4))
         self.category_filter_var = tk.StringVar(value="Все")
         self.category_filter = ttk.Combobox(
@@ -194,6 +212,7 @@ class MainWindow:
         self.search_status_var = tk.StringVar(value="Найдено: 0")
         ttk.Label(toolbar, textvariable=self.search_status_var).pack(side=tk.LEFT, padx=(4, 0))
         ttk.Button(toolbar, text="Заблокировать", command=self._lock_vault).pack(side=tk.RIGHT, padx=2)
+        self._update_search_history_button()
 
     def _create_main_area(self):
         main_frame = ttk.Frame(self.root)
@@ -506,6 +525,58 @@ class MainWindow:
             self.search_entry.focus_set()
             self.search_entry.selection_range(0, tk.END)
         return "break"
+
+    def _commit_search_query(self, _event=None):
+        self._remember_search_query(getattr(self, "search_var", tk.StringVar()).get())
+        return "break"
+
+    def _remember_current_search(self, _event=None):
+        self._remember_search_query(getattr(self, "search_var", tk.StringVar()).get())
+
+    def _remember_search_query(self, query: str):
+        normalized_query = str(query or "").strip()
+        if not normalized_query:
+            return
+
+        updated_history = [item for item in self.search_history if item != normalized_query]
+        updated_history.insert(0, normalized_query)
+        self.search_history = updated_history[:10]
+        self.db.set_setting("ui.search_history", self.search_history)
+        self._update_search_history_button()
+
+    def _update_search_history_button(self):
+        if not hasattr(self, "search_history_button"):
+            return
+        if self.search_history:
+            self.search_history_button.state(["!disabled"])
+        else:
+            self.search_history_button.state(["disabled"])
+
+    def _show_search_history_menu(self):
+        if not self.search_history or not hasattr(self, "search_history_button"):
+            return
+
+        history_menu = tk.Menu(self.root, tearoff=0)
+        for query in self.search_history:
+            history_menu.add_command(
+                label=query,
+                command=lambda value=query: self._apply_search_history_item(value),
+            )
+
+        try:
+            history_menu.tk_popup(
+                self.search_history_button.winfo_rootx(),
+                self.search_history_button.winfo_rooty() + self.search_history_button.winfo_height(),
+            )
+        finally:
+            history_menu.grab_release()
+
+    def _apply_search_history_item(self, query: str):
+        if hasattr(self, "search_var"):
+            self.search_var.set(query)
+        if hasattr(self, "search_entry"):
+            self.search_entry.focus_set()
+            self.search_entry.selection_range(0, tk.END)
 
     def _mask_username(self, username: str) -> str:
         if not username:
