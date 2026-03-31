@@ -1,5 +1,5 @@
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from ..events import Event, EventType, event_bus
@@ -26,15 +26,17 @@ class EntryManager:
             cursor = conn.execute(
                 """
                 INSERT INTO vault_entries
-                (title, username, encrypted_password, url, notes, created_at, updated_at, tags)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (title, username, encrypted_password, encrypted_data, url, notes, category, created_at, updated_at, tags)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     normalized["title"],
                     normalized["username"],
+                    b"",
                     encrypted_payload,
                     normalized["url"],
                     normalized["notes"],
+                    normalized["category"],
                     now.isoformat(),
                     now.isoformat(),
                     normalized["tags"],
@@ -81,15 +83,17 @@ class EntryManager:
             conn.execute(
                 """
                 UPDATE vault_entries
-                SET title = ?, username = ?, encrypted_password = ?, url = ?, notes = ?, updated_at = ?, tags = ?
+                SET title = ?, username = ?, encrypted_password = ?, encrypted_data = ?, url = ?, notes = ?, category = ?, updated_at = ?, tags = ?
                 WHERE id = ?
                 """,
                 (
                     normalized["title"],
                     normalized["username"],
+                    current_entry.encrypted_password,
                     encrypted_payload,
                     normalized["url"],
                     normalized["notes"],
+                    normalized["category"],
                     updated_at.isoformat(),
                     normalized["tags"],
                     entry_id,
@@ -101,15 +105,26 @@ class EntryManager:
         return entry
 
     def delete_entry(self, entry_id: int, soft_delete: bool = True):
-        if soft_delete:
-            raise NotImplementedError("Soft delete will be added with the Sprint 3 schema migration")
-
         existing_entry = self.database.get_entry(entry_id)
         if existing_entry is None:
             raise EntryNotFoundError("Requested entry is unavailable")
 
         title = existing_entry.title
         with self.database.transaction() as conn:
+            if soft_delete:
+                conn.execute(
+                    """
+                    INSERT INTO deleted_entries (original_entry_id, encrypted_data, title, deleted_at, expires_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        entry_id,
+                        existing_entry.encrypted_data or existing_entry.encrypted_password,
+                        title,
+                        datetime.now().isoformat(),
+                        self._default_soft_delete_expiration().isoformat(),
+                    ),
+                )
             conn.execute("DELETE FROM vault_entries WHERE id = ?", (entry_id,))
 
         event_bus.publish(Event(EventType.ENTRY_DELETED, {"id": entry_id, "title": title}))
@@ -152,7 +167,7 @@ class EntryManager:
         return self.encryption_service.encrypt(plaintext)
 
     def _deserialize_entry(self, entry) -> Dict[str, Any]:
-        payload = self._decrypt_payload(entry.encrypted_password)
+        payload = self._decrypt_payload(entry.encrypted_data or entry.encrypted_password)
         return {
             "id": entry.id,
             "title": payload.get("title", entry.title),
@@ -173,3 +188,6 @@ class EntryManager:
         if not isinstance(data, dict):
             raise ValueError("Entry payload must be a JSON object")
         return data
+
+    def _default_soft_delete_expiration(self) -> datetime:
+        return (datetime.now() + timedelta(days=30)).replace(microsecond=0)

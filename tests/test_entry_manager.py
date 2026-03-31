@@ -50,7 +50,8 @@ class TestEntryManager(unittest.TestCase):
 
         raw_entry = self.database.get_entry(created["id"])
         self.assertIsNotNone(raw_entry)
-        self.assertNotIn(b"Secret!123", raw_entry.encrypted_password)
+        self.assertEqual(raw_entry.encrypted_password, b"")
+        self.assertNotIn(b"Secret!123", raw_entry.encrypted_data)
 
     def test_get_all_entries_returns_decrypted_entries(self):
         self.manager.create_entry({"title": "One", "password": "alpha"})
@@ -77,16 +78,40 @@ class TestEntryManager(unittest.TestCase):
         self.assertEqual(updated["password"], "NewSecret!456")
         self.assertEqual(updated["category"], "Updated")
 
-    def test_delete_entry_requires_explicit_hard_delete_until_soft_delete_exists(self):
+    def test_delete_entry_soft_deletes_by_default(self):
         created = self.manager.create_entry({"title": "Example", "password": "Secret!123"})
 
-        with self.assertRaises(NotImplementedError):
-            self.manager.delete_entry(created["id"])
+        self.manager.delete_entry(created["id"])
+
+        with self.assertRaises(EntryNotFoundError):
+            self.manager.get_entry(created["id"])
+
+        with self.database._get_connection() as conn:
+            deleted_row = conn.execute(
+                "SELECT original_entry_id, encrypted_data, title FROM deleted_entries WHERE original_entry_id = ?",
+                (created["id"],),
+            ).fetchone()
+
+        self.assertIsNotNone(deleted_row)
+        self.assertEqual(deleted_row["original_entry_id"], created["id"])
+        self.assertEqual(deleted_row["title"], "Example")
+        self.assertNotIn(b"Secret!123", deleted_row["encrypted_data"])
+
+    def test_delete_entry_can_hard_delete_without_recycle_bin(self):
+        created = self.manager.create_entry({"title": "Example", "password": "Secret!123"})
 
         self.manager.delete_entry(created["id"], soft_delete=False)
 
         with self.assertRaises(EntryNotFoundError):
             self.manager.get_entry(created["id"])
+
+        with self.database._get_connection() as conn:
+            deleted_row = conn.execute(
+                "SELECT original_entry_id FROM deleted_entries WHERE original_entry_id = ?",
+                (created["id"],),
+            ).fetchone()
+
+        self.assertIsNone(deleted_row)
 
     def test_missing_entry_raises_safe_error(self):
         with self.assertRaises(EntryNotFoundError):
@@ -106,6 +131,17 @@ class TestEntryManager(unittest.TestCase):
 
         self.assertEqual(len(received_events), 1)
         self.assertEqual(received_events[0].data["id"], created["id"])
+
+    def test_get_entry_prefers_encrypted_data_from_new_schema(self):
+        created = self.manager.create_entry({"title": "Schema", "password": "Secret!123"})
+        raw_entry = self.database.get_entry(created["id"])
+        self.assertIsNotNone(raw_entry)
+
+        self.assertEqual(raw_entry.encrypted_password, b"")
+        self.assertTrue(raw_entry.encrypted_data)
+
+        loaded = self.manager.get_entry(created["id"])
+        self.assertEqual(loaded["password"], "Secret!123")
 
 
 if __name__ == "__main__":
