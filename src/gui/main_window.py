@@ -182,6 +182,25 @@ class MainWindow:
         ]
         self.table = SecureTable(main_frame, columns)
         self.table.pack(fill=tk.BOTH, expand=True)
+        self._create_table_context_menu()
+
+    def _create_table_context_menu(self):
+        self.table_menu = tk.Menu(self.root, tearoff=0)
+        self.table_menu.add_command(label="Изменить", command=self.edit_entry)
+        self.table_menu.add_command(label="Удалить", command=self.delete_entry)
+        self.table_menu.add_separator()
+        self.table_menu.add_command(label="Показать пароль", command=self.show_selected_password)
+        self.table_menu.add_command(label="Скопировать пароль", command=self.copy_selected_password)
+        self.table.bind_context_menu(self._show_table_context_menu)
+
+    def _show_table_context_menu(self, event):
+        selected = self.table.select_row_at_y(event.y)
+        if not selected:
+            return
+        try:
+            self.table_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.table_menu.grab_release()
 
     def _create_statusbar(self):
         statusbar = ttk.Frame(self.root)
