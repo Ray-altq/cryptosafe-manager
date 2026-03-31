@@ -62,6 +62,7 @@ class MainWindow:
         self.vault_crypto = AESGCMEncryptionService(self.key_manager)
         self.entry_manager = EntryManager(self.db, self.vault_crypto, legacy_encryption_service=self.crypto)
         self.password_generator = PasswordGenerator()
+        self.passwords_visible = False
         self.audit_logger = AuditLogger(self.db, event_bus)
         self._persist_runtime_settings()
         self._load_password_policy()
@@ -168,6 +169,10 @@ class MainWindow:
         ttk.Button(toolbar, text="Удалить", command=self.delete_entry).pack(side=tk.LEFT, padx=2)
         ttk.Button(toolbar, text="Показать пароль", command=self.show_selected_password).pack(side=tk.LEFT, padx=10)
         ttk.Button(toolbar, text="Скопировать пароль", command=self.copy_selected_password).pack(side=tk.LEFT, padx=2)
+        self.password_toggle_text = tk.StringVar(value="Показать пароли")
+        ttk.Button(toolbar, textvariable=self.password_toggle_text, command=self._toggle_password_visibility).pack(
+            side=tk.LEFT, padx=(8, 2)
+        )
         ttk.Label(toolbar, text="Поиск").pack(side=tk.LEFT, padx=(16, 4))
         self.search_var = tk.StringVar()
         self.search_var.trace_add("write", lambda *_args: self._apply_entry_filter())
@@ -197,6 +202,7 @@ class MainWindow:
         columns = [
             {"id": "title", "label": "Название", "width": 180},
             {"id": "username", "label": "Имя пользователя", "width": 180},
+            {"id": "password", "label": "Пароль", "width": 150},
             {"id": "category", "label": "Категория", "width": 140},
             {"id": "url", "label": "URL", "width": 260},
             {"id": "updated_at", "label": "Обновлено", "width": 160},
@@ -253,6 +259,8 @@ class MainWindow:
         self.root.bind("<Map>", self._on_map, add="+")
         self.root.bind_all("<Control-f>", self._focus_search, add="+")
         self.root.bind_all("<Control-F>", self._focus_search, add="+")
+        self.root.bind_all("<Control-Shift-P>", self._toggle_password_visibility, add="+")
+        self.root.bind_all("<Control-Shift-p>", self._toggle_password_visibility, add="+")
 
     def _schedule_security_tasks(self):
         self._check_security_timers()
@@ -378,9 +386,11 @@ class MainWindow:
                     "id": entry["id"],
                     "title": entry["title"],
                     "username": self._mask_username(entry["username"]),
+                    "password": self._format_password_for_table(entry["password"]),
                     "category": entry["category"],
                     "url": self._format_url_for_table(entry["url"]),
                     "updated_at": entry["updated_at"].strftime("%Y-%m-%d %H:%M") if entry["updated_at"] else "",
+                    "_password_plain": entry["password"],
                     "_search_username": entry["username"],
                     "_search_url": entry["url"],
                     "_search_notes": entry["notes"],
@@ -407,7 +417,9 @@ class MainWindow:
                 continue
 
             if self._matches_general_terms(entry, general_terms):
-                filtered_entries.append(entry)
+                display_entry = dict(entry)
+                display_entry["password"] = self._format_password_for_table(entry.get("_password_plain", ""))
+                filtered_entries.append(display_entry)
 
         self.table.set_data(filtered_entries)
         if hasattr(self, "search_status_var"):
@@ -482,6 +494,13 @@ class MainWindow:
         if hasattr(self, "search_entry"):
             self.search_entry.focus_set()
 
+    def _toggle_password_visibility(self, _event=None):
+        self.passwords_visible = not self.passwords_visible
+        if hasattr(self, "password_toggle_text"):
+            self.password_toggle_text.set("Скрыть пароли" if self.passwords_visible else "Показать пароли")
+        self._apply_entry_filter()
+        return "break"
+
     def _focus_search(self, _event=None):
         if hasattr(self, "search_entry"):
             self.search_entry.focus_set()
@@ -494,6 +513,13 @@ class MainWindow:
         if len(username) <= 4:
             return username
         return f"{username[:4]}{'*' * max(4, len(username) - 4)}"
+
+    def _format_password_for_table(self, password: str) -> str:
+        if not password:
+            return ""
+        if self.passwords_visible:
+            return password
+        return "•" * max(8, min(len(password), 16))
 
     def _format_url_for_table(self, url: str) -> str:
         if not url:
