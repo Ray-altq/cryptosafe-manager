@@ -168,6 +168,11 @@ class MainWindow:
         ttk.Button(toolbar, text="Удалить", command=self.delete_entry).pack(side=tk.LEFT, padx=2)
         ttk.Button(toolbar, text="Показать пароль", command=self.show_selected_password).pack(side=tk.LEFT, padx=10)
         ttk.Button(toolbar, text="Скопировать пароль", command=self.copy_selected_password).pack(side=tk.LEFT, padx=2)
+        ttk.Label(toolbar, text="Поиск").pack(side=tk.LEFT, padx=(16, 4))
+        self.search_var = tk.StringVar()
+        self.search_var.trace_add("write", lambda *_args: self._apply_entry_filter())
+        self.search_entry = ttk.Entry(toolbar, textvariable=self.search_var, width=28)
+        self.search_entry.pack(side=tk.LEFT, padx=2)
         ttk.Button(toolbar, text="Заблокировать", command=self._lock_vault).pack(side=tk.RIGHT, padx=2)
 
     def _create_main_area(self):
@@ -342,6 +347,7 @@ class MainWindow:
 
     def _load_entries(self):
         if not self.auth_service.is_authenticated():
+            self._all_entries = []
             self.table.clear()
             return
 
@@ -356,9 +362,38 @@ class MainWindow:
                     "category": entry["category"],
                     "url": self._format_url_for_table(entry["url"]),
                     "updated_at": entry["updated_at"].strftime("%Y-%m-%d %H:%M") if entry["updated_at"] else "",
+                    "_search_username": entry["username"],
+                    "_search_url": entry["url"],
+                    "_search_notes": entry["notes"],
                 }
             )
-        self.table.set_data(data)
+        self._all_entries = data
+        self._apply_entry_filter()
+
+    def _apply_entry_filter(self):
+        entries = getattr(self, "_all_entries", [])
+        query = getattr(self, "search_var", None)
+        search_text = query.get().strip().lower() if query is not None else ""
+
+        if not search_text:
+            self.table.set_data(entries)
+            return
+
+        filtered_entries = []
+        for entry in entries:
+            haystack = " ".join(
+                [
+                    str(entry.get("title", "")),
+                    str(entry.get("_search_username", "")),
+                    str(entry.get("category", "")),
+                    str(entry.get("_search_url", "")),
+                    str(entry.get("_search_notes", "")),
+                ]
+            ).lower()
+            if search_text in haystack:
+                filtered_entries.append(entry)
+
+        self.table.set_data(filtered_entries)
 
     def _mask_username(self, username: str) -> str:
         if not username:
