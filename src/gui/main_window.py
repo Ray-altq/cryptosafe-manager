@@ -385,6 +385,8 @@ class MainWindow:
         password_entry = PasswordEntry(dialog, width=50)
         password_entry.pack(fill=tk.X, padx=8, pady=2)
         ttk.Button(dialog, text="Generate Password", command=lambda: self._generate_entry_password(password_entry)).pack(anchor=tk.E, padx=8, pady=(0, 4))
+        strength_var = tk.StringVar(value="Password strength: not set")
+        ttk.Label(dialog, textvariable=strength_var).pack(anchor=tk.W, padx=8, pady=(0, 4))
 
         ttk.Label(dialog, text="URL").pack(anchor=tk.W, padx=8, pady=(8, 2))
         url_entry = ttk.Entry(dialog, width=60)
@@ -406,7 +408,10 @@ class MainWindow:
             category_entry.insert(0, entry["category"])
             notes_text.insert("1.0", entry["notes"])
 
+        password_entry.entry.bind("<KeyRelease>", lambda _event: self._update_password_strength(password_entry, strength_var))
+        self._update_password_strength(password_entry, strength_var)
         dialog.category_entry = category_entry
+        dialog.strength_var = strength_var
         return dialog, title_entry, username_entry, password_entry, url_entry, notes_text
 
     def _collect_entry_form(self, title_entry, username_entry, password_entry, url_entry, notes_text):
@@ -442,6 +447,23 @@ class MainWindow:
         password = self.password_generator.generate(PasswordGeneratorOptions())
         password_entry.set(password)
         password_entry.show_password.set(True)
+        strength_var = getattr(password_entry.master, "strength_var", None)
+        if strength_var is not None:
+            self._update_password_strength(password_entry, strength_var)
+
+    def _update_password_strength(self, password_entry: PasswordEntry, strength_var: tk.StringVar):
+        strength_var.set(f"Password strength: {self._describe_password_strength(password_entry.get())}")
+
+    def _describe_password_strength(self, password: str) -> str:
+        if not password:
+            return "not set"
+        if len(password) < 8:
+            return "weak"
+        if self.password_generator.is_strong_enough(password):
+            return "strong"
+        if len(password) >= 10:
+            return "medium"
+        return "weak"
 
     def _rotate_vault_entries(self, old_key: bytes, new_key: bytes):
         old_crypto = AES256Placeholder()
