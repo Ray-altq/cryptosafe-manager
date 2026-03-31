@@ -237,6 +237,8 @@ class TestMainWindowIntegration(IntegrationTestCase):
         self.assertEqual(len(window.table.rows), 1)
         self.assertEqual(window.table.rows[0]["id"], entry_id)
         self.assertEqual(window.table.rows[0]["title"], "Example")
+        self.assertEqual(window.table.rows[0]["username"], "demo")
+        self.assertEqual(window.table.rows[0]["url"], "example.com")
         self.assertEqual(window.db.get_setting("security.auto_lock_timeout_minutes"), 9)
         self.assertEqual(window.db.get_setting("security.key_cache_timeout_minutes"), 13)
         self.assertEqual(window.db.get_setting("crypto.key_derivation")["pbkdf2_iterations"], 180000)

@@ -10,6 +10,21 @@ class SecureTable(ttk.Frame):
         
         self.columns = columns
         self.data = []
+
+    def _sort_by(self, column_id: str):
+        if not self.data:
+            return
+
+        reverse = not self._sort_state.get(column_id, False)
+        self._sort_state = {column_id: reverse}
+        self.data.sort(key=lambda row: self._sort_key(row.get(column_id)), reverse=reverse)
+        self.set_data(self.data)
+
+    def _sort_key(self, value: Any):
+        if value is None:
+            return ""
+        return str(value).lower()
+        self._sort_state = {}
         
         # создаем таблицу
         self.tree = ttk.Treeview(
@@ -21,7 +36,7 @@ class SecureTable(ttk.Frame):
         
         # настраиваем заголовки
         for col in columns:
-            self.tree.heading(col['id'], text=col['label'])
+            self.tree.heading(col['id'], text=col['label'], command=lambda column_id=col['id']: self._sort_by(column_id))
             width = col.get('width', 100)
             self.tree.column(col['id'], width=width)
         

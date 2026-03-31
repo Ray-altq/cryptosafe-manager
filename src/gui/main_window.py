@@ -3,6 +3,7 @@ import queue
 import threading
 import tkinter as tk
 from datetime import datetime
+from urllib.parse import urlparse
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from ..core.config import Config
@@ -324,12 +325,31 @@ class MainWindow:
                 {
                     "id": entry["id"],
                     "title": entry["title"],
-                    "username": entry["username"],
-                    "url": entry["url"],
+                    "username": self._mask_username(entry["username"]),
+                    "url": self._format_url_for_table(entry["url"]),
                     "updated_at": entry["updated_at"].strftime("%Y-%m-%d %H:%M") if entry["updated_at"] else "",
                 }
             )
         self.table.set_data(data)
+
+    def _mask_username(self, username: str) -> str:
+        if not username:
+            return ""
+        if len(username) <= 4:
+            return username
+        return f"{username[:4]}{'*' * max(4, len(username) - 4)}"
+
+    def _format_url_for_table(self, url: str) -> str:
+        if not url:
+            return ""
+        parsed = urlparse(url)
+        if parsed.netloc:
+            return parsed.netloc
+        if "://" not in url:
+            parsed = urlparse(f"https://{url}")
+            if parsed.netloc:
+                return parsed.netloc
+        return url
 
     def _encrypt_password(self, password: str) -> bytes:
         return self.crypto.encrypt(password.encode("utf-8"))
