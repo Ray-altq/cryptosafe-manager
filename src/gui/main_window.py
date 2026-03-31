@@ -194,7 +194,7 @@ class MainWindow:
         self.table.bind_context_menu(self._show_table_context_menu)
 
     def _show_table_context_menu(self, event):
-        selected = self.table.select_row_at_y(event.y)
+        selected = self.table.ensure_row_selected_at_y(event.y)
         if not selected:
             return
         try:
@@ -462,6 +462,27 @@ class MainWindow:
         except EntryNotFoundError:
             return None
 
+    def _get_selected_entries(self):
+        entries = []
+        for selected in self.table.get_selected_items():
+            try:
+                entry = self.entry_manager.get_entry(selected["id"])
+                entry["encrypted_password"] = entry["password"]
+                entries.append(EntryView(entry))
+            except EntryNotFoundError:
+                continue
+        return entries
+
+    def _get_single_selected_entry(self, action_name: str):
+        selected_entries = self._get_selected_entries()
+        if not selected_entries:
+            messagebox.showwarning("Предупреждение", f"Выберите запись для действия «{action_name}».")
+            return None
+        if len(selected_entries) > 1:
+            messagebox.showwarning("Предупреждение", f"Для действия «{action_name}» нужно выбрать только одну запись.")
+            return None
+        return selected_entries[0]
+
     def _on_entry_changed(self, _event):
         self._load_entries()
 
@@ -726,7 +747,7 @@ class MainWindow:
         ttk.Button(dialog, text="Сохранить", command=save).pack(pady=10)
 
     def edit_entry(self):
-        entry = self._get_selected_entry()
+        entry = self._get_single_selected_entry("Изменить")
         if not entry:
             messagebox.showwarning("Предупреждение", "Выберите запись для редактирования.")
             return
@@ -761,6 +782,13 @@ class MainWindow:
         ttk.Button(dialog, text="Сохранить изменения", command=save).pack(pady=10)
 
     def delete_entry(self):
+        selected_items = self.table.get_selected_items()
+        if len(selected_items) > 1:
+            if not messagebox.askyesno("Подтверждение", f"Удалить выбранные записи ({len(selected_items)})?"):
+                return
+            for selected in selected_items:
+                self.entry_manager.delete_entry(selected["id"])
+            return
         selected = self.table.get_selected()
         if not selected:
             messagebox.showwarning("Предупреждение", "Выберите запись для удаления.")
@@ -769,7 +797,7 @@ class MainWindow:
             self.entry_manager.delete_entry(selected["id"])
 
     def show_selected_password(self):
-        entry = self._get_selected_entry()
+        entry = self._get_single_selected_entry("Показать пароль")
         if not entry:
             messagebox.showwarning("Предупреждение", "Сначала выберите запись.")
             return
@@ -777,7 +805,7 @@ class MainWindow:
         self._on_activity()
 
     def copy_selected_password(self):
-        entry = self._get_selected_entry()
+        entry = self._get_single_selected_entry("Скопировать пароль")
         if not entry:
             messagebox.showwarning("Предупреждение", "Сначала выберите запись.")
             return

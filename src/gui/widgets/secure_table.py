@@ -17,7 +17,7 @@ class SecureTable(ttk.Frame):
             self,
             columns=[col["id"] for col in columns],
             show="headings",
-            selectmode="browse",
+            selectmode="extended",
         )
 
         for col in columns:
@@ -72,12 +72,30 @@ class SecureTable(ttk.Frame):
             return self.data[index]
         return None
 
+    def get_selected_items(self) -> List[Dict[str, Any]]:
+        """Получить все выбранные записи."""
+        selected_items: List[Dict[str, Any]] = []
+        for item_id in self.tree.selection():
+            index = int(item_id)
+            selected_items.append(self.data[index])
+        return selected_items
+
     def select_row_at_y(self, y: int) -> Optional[Dict[str, Any]]:
         """Выбрать строку по координате Y внутри таблицы."""
         item_id = self.tree.identify_row(y)
         if not item_id:
             return None
         self.tree.selection_set(item_id)
+        self.tree.focus(item_id)
+        return self.get_selected()
+
+    def ensure_row_selected_at_y(self, y: int) -> Optional[Dict[str, Any]]:
+        """Выбрать строку под курсором, не сбрасывая текущую группу выделения."""
+        item_id = self.tree.identify_row(y)
+        if not item_id:
+            return None
+        if item_id not in self.tree.selection():
+            self.tree.selection_set(item_id)
         self.tree.focus(item_id)
         return self.get_selected()
 
