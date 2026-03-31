@@ -426,6 +426,9 @@ class MainWindow:
         if not title or not username or not password:
             raise ValueError("Поля «Название», «Имя пользователя» и «Пароль» обязательны.")
 
+        if url and not self._is_valid_url(url):
+            raise ValueError("URL has invalid format.")
+
         self._last_entry_category = category
         return title, username, password, url, notes
 
@@ -464,6 +467,18 @@ class MainWindow:
         if len(password) >= 10:
             return "medium"
         return "weak"
+
+    def _is_valid_url(self, url: str) -> bool:
+        candidate = url if "://" in url else f"https://{url}"
+        parsed = urlparse(candidate)
+        if parsed.scheme not in {"http", "https"}:
+            return False
+        hostname = parsed.netloc
+        if not hostname:
+            return False
+        if hostname == "localhost":
+            return True
+        return "." in hostname
 
     def _rotate_vault_entries(self, old_key: bytes, new_key: bytes):
         old_crypto = AES256Placeholder()
