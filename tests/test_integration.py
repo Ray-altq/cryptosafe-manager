@@ -11,6 +11,7 @@ from src.core.config import Config
 from src.core.crypto.authentication import AuthenticationService
 from src.core.crypto.key_derivation import KeyDerivation
 from src.core.crypto.key_storage import KeyStorage
+from src.core.crypto.placeholder import AES256Placeholder
 from src.core.crypto.password_validator import PasswordValidator
 from src.database.db import Database
 from src.database.models import VaultEntry
@@ -203,12 +204,15 @@ class TestMainWindowIntegration(IntegrationTestCase):
         auth_service = self.make_auth_service(db_path)
         password = "ValidMasterPass!9X"
         auth_service.register_master_password(password)
+        crypto = AES256Placeholder()
+        encrypted_password = crypto.encrypt(b"secret", auth_service.get_active_key())
         auth_service.logout()
         entry_id = database.add_entry(
             VaultEntry(
                 title="Example",
                 username="demo",
-                encrypted_password=b"secret",
+                encrypted_password=encrypted_password,
+                encrypted_data=encrypted_password,
                 url="https://example.com",
                 notes="seed",
                 tags="",

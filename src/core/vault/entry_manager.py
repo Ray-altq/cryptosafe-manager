@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from ..events import Event, EventType, event_bus
-from .encryption_service import AESGCMEncryptionService
+from .encryption_service import AESGCMEncryptionService, VaultEncryptionError
 
 
 class EntryNotFoundError(Exception):
@@ -13,9 +13,10 @@ class EntryNotFoundError(Exception):
 class EntryManager:
     PAYLOAD_VERSION = 1
 
-    def __init__(self, database, encryption_service: AESGCMEncryptionService):
+    def __init__(self, database, encryption_service: AESGCMEncryptionService, legacy_encryption_service=None):  #класс для управления записями в хранилище, который взаимодействует с базой данных и службой шифрования для создания, получения, обновления и удаления записей
         self.database = database
         self.encryption_service = encryption_service
+        self.legacy_encryption_service = legacy_encryption_service
 
     def create_entry(self, data_dict: Dict[str, Any]) -> Dict[str, Any]:
         normalized = self._normalize_entry_data(data_dict)
@@ -167,7 +168,7 @@ class EntryManager:
         return self.encryption_service.encrypt(plaintext)
 
     def _deserialize_entry(self, entry) -> Dict[str, Any]:
-        payload = self._decrypt_payload(entry.encrypted_data or entry.encrypted_password)
+        payload = self._decrypt_payload(entry)  #если расшифровка не удалась, будет выброшено исключение, которое может быть перехвачено для обработки устаревших данных
         return {
             "id": entry.id,
             "title": payload.get("title", entry.title),
@@ -182,12 +183,27 @@ class EntryManager:
             "updated_at": entry.updated_at,
         }
 
-    def _decrypt_payload(self, encrypted_payload: bytes) -> Dict[str, Any]:
-        plaintext = self.encryption_service.decrypt(encrypted_payload)
-        data = json.loads(plaintext.decode("utf-8"))
-        if not isinstance(data, dict):
-            raise ValueError("Entry payload must be a JSON object")
-        return data
+    def _decrypt_payload(self, entry) -> Dict[str, Any]:  #метод для расшифровки данных записи, который пытается расшифровать данные с помощью службы шифрования
+        encrypted_payload = entry.encrypted_data or entry.encrypted_password
+        try:
+            plaintext = self.encryption_service.decrypt(encrypted_payload)
+            data = json.loads(plaintext.decode("utf-8"))
+            if not isinstance(data, dict):
+                raise ValueError("Entry payload must be a JSON object")
+            return data
+        except (VaultEncryptionError, ValueError, json.JSONDecodeError, UnicodeDecodeError):
+            if self.legacy_encryption_service is None:
+                raise
+            password = self.legacy_encryption_service.decrypt(entry.encrypted_password).decode("utf-8")
+            return {
+                "title": entry.title,
+                "username": entry.username,
+                "password": password,
+                "url": entry.url,
+                "notes": entry.notes,
+                "category": entry.category,
+                "version": self.PAYLOAD_VERSION,
+            }
 
     def _default_soft_delete_expiration(self) -> datetime:
         return (datetime.now() + timedelta(days=30)).replace(microsecond=0)

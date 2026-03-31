@@ -14,11 +14,19 @@ from ..core.crypto.placeholder import AES256Placeholder
 from ..core.events import AuditLogger, Event, EventType, event_bus
 from ..core.key_manager import KeyManager
 from ..core.state_manager import StateManager
+from ..core.vault import AESGCMEncryptionService, EntryManager, EntryNotFoundError
 from ..database.db import Database
-from ..database.models import VaultEntry
 from .setup_wizard import SetupWizard
 from .widgets.password_entry import PasswordEntry
 from .widgets.secure_table import SecureTable
+
+
+class EntryView(dict):
+    def __getattr__(self, item):
+        try:
+            return self[item]
+        except KeyError as error:
+            raise AttributeError(item) from error
 
 
 class MainWindow:
@@ -44,6 +52,8 @@ class MainWindow:
             self.state,
         )
         self.crypto = AES256Placeholder(self.key_manager)
+        self.vault_crypto = AESGCMEncryptionService(self.key_manager)
+        self.entry_manager = EntryManager(self.db, self.vault_crypto, legacy_encryption_service=self.crypto)
         self.audit_logger = AuditLogger(self.db, event_bus)
         self._persist_runtime_settings()
         self._load_password_policy()
@@ -57,6 +67,7 @@ class MainWindow:
                 return
             self.db = self.auth_service.key_storage.database
             self.key_storage = self.auth_service.key_storage
+            self.entry_manager = EntryManager(self.db, self.vault_crypto, legacy_encryption_service=self.crypto)
             self.audit_logger.close()
             self.audit_logger = AuditLogger(self.db, event_bus)
             self._persist_runtime_settings()
@@ -306,16 +317,16 @@ class MainWindow:
             self.table.clear()
             return
 
-        entries = self.db.get_all_entries()
+        entries = self.entry_manager.get_all_entries()
         data = []
         for entry in entries:
             data.append(
                 {
-                    "id": entry.id,
-                    "title": entry.title,
-                    "username": entry.username,
-                    "url": entry.url,
-                    "updated_at": entry.updated_at.strftime("%Y-%m-%d %H:%M") if entry.updated_at else "",
+                    "id": entry["id"],
+                    "title": entry["title"],
+                    "username": entry["username"],
+                    "url": entry["url"],
+                    "updated_at": entry["updated_at"].strftime("%Y-%m-%d %H:%M") if entry["updated_at"] else "",
                 }
             )
         self.table.set_data(data)
@@ -324,6 +335,8 @@ class MainWindow:
         return self.crypto.encrypt(password.encode("utf-8"))
 
     def _decrypt_password(self, encrypted_password: bytes) -> str:
+        if isinstance(encrypted_password, str):
+            return encrypted_password
         return self.crypto.decrypt(encrypted_password).decode("utf-8")
 
     def _build_entry_dialog(self, title: str, entry=None):
@@ -354,11 +367,11 @@ class MainWindow:
         notes_text.pack(fill=tk.BOTH, expand=True, padx=8, pady=2)
 
         if entry:
-            title_entry.insert(0, entry.title)
-            username_entry.insert(0, entry.username)
-            password_entry.set(self._decrypt_password(entry.encrypted_password))
-            url_entry.insert(0, entry.url)
-            notes_text.insert("1.0", entry.notes)
+            title_entry.insert(0, entry["title"])
+            username_entry.insert(0, entry["username"])
+            password_entry.set(entry["password"])
+            url_entry.insert(0, entry["url"])
+            notes_text.insert("1.0", entry["notes"])
 
         return dialog, title_entry, username_entry, password_entry, url_entry, notes_text
 
@@ -378,7 +391,12 @@ class MainWindow:
         selected = self.table.get_selected()
         if not selected:
             return None
-        return self.db.get_entry(selected["id"])
+        try:
+            entry = self.entry_manager.get_entry(selected["id"])
+            entry["encrypted_password"] = entry["password"]
+            return EntryView(entry)
+        except EntryNotFoundError:
+            return None
 
     def _on_entry_changed(self, _event):
         self._load_entries()
@@ -386,6 +404,8 @@ class MainWindow:
     def _rotate_vault_entries(self, old_key: bytes, new_key: bytes):
         old_crypto = AES256Placeholder()
         new_crypto = AES256Placeholder()
+        old_vault_crypto = AESGCMEncryptionService()
+        new_vault_crypto = AESGCMEncryptionService()
         progress_dialog = tk.Toplevel(self.root)
         progress_dialog.title("Смена мастер-пароля")
         progress_dialog.geometry("420x180")
@@ -434,13 +454,25 @@ class MainWindow:
         pause_button.pack(side=tk.RIGHT)
         progress_dialog.protocol("WM_DELETE_WINDOW", lambda: None)
 
-        def transform(ciphertext: bytes) -> bytes:
-            plaintext = old_crypto.decrypt(ciphertext, old_key)
-            return new_crypto.encrypt(plaintext, new_key)
+        def transform(legacy_ciphertext: bytes, encrypted_payload: bytes) -> tuple[bytes, bytes]:
+            updated_legacy = legacy_ciphertext
+            if legacy_ciphertext:
+                plaintext = old_crypto.decrypt(legacy_ciphertext, old_key)
+                updated_legacy = new_crypto.encrypt(plaintext, new_key)
+
+            updated_payload = encrypted_payload
+            if encrypted_payload:
+                try:
+                    plaintext_payload = old_vault_crypto.decrypt(encrypted_payload, old_key)
+                    updated_payload = new_vault_crypto.encrypt(plaintext_payload, new_key)
+                except Exception:
+                    updated_payload = encrypted_payload
+
+            return updated_legacy, updated_payload
 
         def worker():
             try:
-                self.db.reencrypt_passwords(
+                self.db.reencrypt_entry_payloads(
                     transform,
                     progress_callback=lambda processed, total: progress_queue.put(("progress", processed, total)),
                     pause_event=pause_event,
@@ -512,6 +544,7 @@ class MainWindow:
             self.password_validator,
             self.state,
         )
+        self.entry_manager = EntryManager(self.db, self.vault_crypto, legacy_encryption_service=self.crypto)
         self.audit_logger = AuditLogger(self.db, event_bus)
         self._persist_runtime_settings()
         self._load_password_policy()
@@ -540,6 +573,7 @@ class MainWindow:
             self.password_validator,
             self.state,
         )
+        self.entry_manager = EntryManager(self.db, self.vault_crypto, legacy_encryption_service=self.crypto)
         self.audit_logger = AuditLogger(self.db, event_bus)
         self._persist_runtime_settings()
         self._load_password_policy()
@@ -578,18 +612,16 @@ class MainWindow:
                 messagebox.showerror("Ошибка", str(error), parent=dialog)
                 return
 
-            entry = VaultEntry(
-                title=title,
-                username=username,
-                encrypted_password=self._encrypt_password(password),
-                url=url,
-                notes=notes,
-                created_at=datetime.now(),
-                updated_at=datetime.now(),
-                tags="",
+            self.entry_manager.create_entry(
+                {
+                    "title": title,
+                    "username": username,
+                    "password": password,
+                    "url": url,
+                    "notes": notes,
+                    "tags": "",
+                }
             )
-            entry_id = self.db.add_entry(entry)
-            event_bus.publish(Event(EventType.ENTRY_ADDED, {"id": entry_id, "title": title}))
             dialog.destroy()
 
         ttk.Button(dialog, text="Сохранить", command=save).pack(pady=10)
@@ -614,13 +646,16 @@ class MainWindow:
                 messagebox.showerror("Ошибка", str(error), parent=dialog)
                 return
 
-            entry.title = title
-            entry.username = username
-            entry.encrypted_password = self._encrypt_password(password)
-            entry.url = url
-            entry.notes = notes
-            self.db.update_entry(entry)
-            event_bus.publish(Event(EventType.ENTRY_UPDATED, {"id": entry.id, "title": title}))
+            self.entry_manager.update_entry(
+                entry["id"],
+                {
+                    "title": title,
+                    "username": username,
+                    "password": password,
+                    "url": url,
+                    "notes": notes,
+                },
+            )
             dialog.destroy()
 
         ttk.Button(dialog, text="Сохранить изменения", command=save).pack(pady=10)
@@ -631,8 +666,7 @@ class MainWindow:
             messagebox.showwarning("Предупреждение", "Выберите запись для удаления.")
             return
         if messagebox.askyesno("Подтверждение", f"Удалить запись «{selected['title']}»?"):
-            self.db.delete_entry(selected["id"])
-            event_bus.publish(Event(EventType.ENTRY_DELETED, {"id": selected["id"], "title": selected["title"]}))
+            self.entry_manager.delete_entry(selected["id"])
 
     def show_selected_password(self):
         entry = self._get_selected_entry()

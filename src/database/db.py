@@ -400,6 +400,35 @@ class Database:
                     progress_callback(index, total)
             return total
 
+    def reencrypt_entry_payloads(
+        self,
+        transform,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+        pause_event=None,
+    ) -> int:
+        with self.transaction() as conn:
+            rows = conn.execute(
+                "SELECT id, encrypted_password, encrypted_data FROM vault_entries ORDER BY id"
+            ).fetchall()
+            total = len(rows)
+            if progress_callback is not None:
+                progress_callback(0, total)
+            for index, row in enumerate(rows, start=1):
+                if pause_event is not None:
+                    pause_event.wait()
+                updated_password, updated_data = transform(row["encrypted_password"], row["encrypted_data"])
+                conn.execute(
+                    """
+                    UPDATE vault_entries
+                    SET encrypted_password = ?, encrypted_data = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (updated_password, updated_data, datetime.now().isoformat(), row["id"]),
+                )
+                if progress_callback is not None:
+                    progress_callback(index, total)
+            return total
+
     def _row_to_entry(self, row: sqlite3.Row) -> VaultEntry:
         data = dict(row)
         if data.get("created_at"):
