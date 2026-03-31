@@ -177,6 +177,7 @@ class MainWindow:
         columns = [
             {"id": "title", "label": "Название", "width": 180},
             {"id": "username", "label": "Имя пользователя", "width": 180},
+            {"id": "category", "label": "Категория", "width": 140},
             {"id": "url", "label": "URL", "width": 260},
             {"id": "updated_at", "label": "Обновлено", "width": 160},
         ]
@@ -352,6 +353,7 @@ class MainWindow:
                     "id": entry["id"],
                     "title": entry["title"],
                     "username": self._mask_username(entry["username"]),
+                    "category": entry["category"],
                     "url": self._format_url_for_table(entry["url"]),
                     "updated_at": entry["updated_at"].strftime("%Y-%m-%d %H:%M") if entry["updated_at"] else "",
                 }
