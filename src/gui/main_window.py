@@ -495,15 +495,19 @@ class MainWindow:
         ttk.Label(dialog, text="Пароль").pack(anchor=tk.W, padx=8, pady=(8, 2))
         password_entry = PasswordEntry(dialog, width=50)
         password_entry.pack(fill=tk.X, padx=8, pady=2)
-        ttk.Button(dialog, text="Generate Password", command=lambda: self._generate_entry_password(password_entry)).pack(anchor=tk.E, padx=8, pady=(0, 4))
-        strength_var = tk.StringVar(value="Password strength: not set")
+        ttk.Button(
+            dialog,
+            text="Сгенерировать пароль",
+            command=lambda: self._open_password_generator_dialog(dialog, password_entry),
+        ).pack(anchor=tk.E, padx=8, pady=(0, 4))
+        strength_var = tk.StringVar(value="Сложность пароля: не задан")
         ttk.Label(dialog, textvariable=strength_var).pack(anchor=tk.W, padx=8, pady=(0, 4))
 
         ttk.Label(dialog, text="URL").pack(anchor=tk.W, padx=8, pady=(8, 2))
         url_entry = ttk.Entry(dialog, width=60)
         url_entry.pack(fill=tk.X, padx=8, pady=2)
 
-        ttk.Label(dialog, text="Category").pack(anchor=tk.W, padx=8, pady=(8, 2))
+        ttk.Label(dialog, text="Категория").pack(anchor=tk.W, padx=8, pady=(8, 2))
         category_entry = ttk.Entry(dialog, width=60)
         category_entry.pack(fill=tk.X, padx=8, pady=2)
 
@@ -519,13 +523,18 @@ class MainWindow:
             category_entry.insert(0, entry["category"])
             notes_text.insert("1.0", entry["notes"])
 
-        password_entry.entry.bind("<KeyRelease>", lambda _event: self._update_password_strength(password_entry, strength_var))
+        password_entry.entry.bind(
+            "<KeyRelease>",
+            lambda _event: self._on_password_entry_changed(dialog, password_entry, strength_var),
+        )
         self._update_password_strength(password_entry, strength_var)
         dialog.category_entry = category_entry
         dialog.strength_var = strength_var
+        dialog.password_was_generated = False
         return dialog, title_entry, username_entry, password_entry, url_entry, notes_text
 
     def _collect_entry_form(self, title_entry, username_entry, password_entry, url_entry, notes_text):
+        dialog = title_entry.master
         title = title_entry.get().strip()
         username = username_entry.get().strip()
         password = password_entry.get().strip()
@@ -534,11 +543,16 @@ class MainWindow:
         category = category_entry.get().strip() if category_entry is not None else ""
         notes = notes_text.get("1.0", tk.END).strip()
 
-        if not title or not username or not password:
-            raise ValueError("Поля «Название», «Имя пользователя» и «Пароль» обязательны.")
+        if not title or not password:
+            raise ValueError("Поля «Название» и «Пароль» обязательны.")
 
         if url and not self._is_valid_url(url):
-            raise ValueError("URL has invalid format.")
+            raise ValueError("URL имеет некорректный формат.")
+
+        if not getattr(dialog, "password_was_generated", False) and not self.password_generator.is_strong_enough(password):
+            raise ValueError(
+                "Слишком слабый пароль. Усильте его вручную или воспользуйтесь генератором паролей."
+            )
 
         self._last_entry_category = category
         return title, username, password, url, notes
@@ -578,27 +592,88 @@ class MainWindow:
     def _on_entry_changed(self, _event):
         self._load_entries()
 
-    def _generate_entry_password(self, password_entry: PasswordEntry):
-        password = self.password_generator.generate(PasswordGeneratorOptions())
+    def _generate_entry_password(
+        self,
+        dialog,
+        password_entry: PasswordEntry,
+        options: PasswordGeneratorOptions | None = None,
+    ):
+        password = self.password_generator.generate(options or PasswordGeneratorOptions())
         password_entry.set(password)
         password_entry.show_password.set(True)
+        dialog.password_was_generated = True
         strength_var = getattr(password_entry.master, "strength_var", None)
         if strength_var is not None:
             self._update_password_strength(password_entry, strength_var)
 
+    def _open_password_generator_dialog(self, parent_dialog, password_entry: PasswordEntry):
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Параметры генерации пароля")
+        dialog.geometry("360x320")
+        dialog.transient(parent_dialog)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+
+        length_var = tk.IntVar(value=16)
+        uppercase_var = tk.BooleanVar(value=True)
+        lowercase_var = tk.BooleanVar(value=True)
+        digits_var = tk.BooleanVar(value=True)
+        symbols_var = tk.BooleanVar(value=True)
+        ambiguous_var = tk.BooleanVar(value=False)
+
+        ttk.Label(dialog, text="Длина пароля").pack(anchor=tk.W, padx=10, pady=(12, 2))
+        ttk.Spinbox(dialog, from_=8, to=64, textvariable=length_var).pack(fill=tk.X, padx=10, pady=2)
+
+        ttk.Checkbutton(dialog, text="Включать заглавные буквы", variable=uppercase_var).pack(
+            anchor=tk.W, padx=10, pady=(12, 2)
+        )
+        ttk.Checkbutton(dialog, text="Включать строчные буквы", variable=lowercase_var).pack(
+            anchor=tk.W, padx=10, pady=2
+        )
+        ttk.Checkbutton(dialog, text="Включать цифры", variable=digits_var).pack(anchor=tk.W, padx=10, pady=2)
+        ttk.Checkbutton(dialog, text="Включать символы", variable=symbols_var).pack(anchor=tk.W, padx=10, pady=2)
+        ttk.Checkbutton(dialog, text="Исключить неоднозначные символы", variable=ambiguous_var).pack(
+            anchor=tk.W, padx=10, pady=(12, 2)
+        )
+
+        def generate():
+            options = PasswordGeneratorOptions(
+                length=length_var.get(),
+                include_uppercase=uppercase_var.get(),
+                include_lowercase=lowercase_var.get(),
+                include_digits=digits_var.get(),
+                include_symbols=symbols_var.get(),
+                exclude_ambiguous=ambiguous_var.get(),
+            )
+            try:
+                self._generate_entry_password(parent_dialog, password_entry, options)
+            except (ValueError, RuntimeError) as error:
+                messagebox.showerror("Ошибка", str(error), parent=dialog)
+                return
+            dialog.destroy()
+
+        button_frame = ttk.Frame(dialog)
+        button_frame.pack(fill=tk.X, padx=10, pady=(18, 10))
+        ttk.Button(button_frame, text="Сгенерировать", command=generate).pack(side=tk.RIGHT)
+        ttk.Button(button_frame, text="Отмена", command=dialog.destroy).pack(side=tk.RIGHT, padx=(0, 8))
+
+    def _on_password_entry_changed(self, dialog, password_entry: PasswordEntry, strength_var: tk.StringVar):
+        dialog.password_was_generated = False
+        self._update_password_strength(password_entry, strength_var)
+
     def _update_password_strength(self, password_entry: PasswordEntry, strength_var: tk.StringVar):
-        strength_var.set(f"Password strength: {self._describe_password_strength(password_entry.get())}")
+        strength_var.set(f"Сложность пароля: {self._describe_password_strength(password_entry.get())}")
 
     def _describe_password_strength(self, password: str) -> str:
         if not password:
-            return "not set"
+            return "не задан"
         if len(password) < 8:
-            return "weak"
+            return "слабый"
         if self.password_generator.is_strong_enough(password):
-            return "strong"
+            return "сильный"
         if len(password) >= 10:
-            return "medium"
-        return "weak"
+            return "средний"
+        return "слабый"
 
     def _is_valid_url(self, url: str) -> bool:
         candidate = url if "://" in url else f"https://{url}"
