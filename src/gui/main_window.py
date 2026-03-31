@@ -15,7 +15,13 @@ from ..core.crypto.placeholder import AES256Placeholder
 from ..core.events import AuditLogger, Event, EventType, event_bus
 from ..core.key_manager import KeyManager
 from ..core.state_manager import StateManager
-from ..core.vault import AESGCMEncryptionService, EntryManager, EntryNotFoundError
+from ..core.vault import (
+    AESGCMEncryptionService,
+    EntryManager,
+    EntryNotFoundError,
+    PasswordGenerator,
+    PasswordGeneratorOptions,
+)
 from ..database.db import Database
 from .setup_wizard import SetupWizard
 from .widgets.password_entry import PasswordEntry
@@ -55,6 +61,7 @@ class MainWindow:
         self.crypto = AES256Placeholder(self.key_manager)
         self.vault_crypto = AESGCMEncryptionService(self.key_manager)
         self.entry_manager = EntryManager(self.db, self.vault_crypto, legacy_encryption_service=self.crypto)
+        self.password_generator = PasswordGenerator()
         self.audit_logger = AuditLogger(self.db, event_bus)
         self._persist_runtime_settings()
         self._load_password_policy()
@@ -377,6 +384,7 @@ class MainWindow:
         ttk.Label(dialog, text="Пароль").pack(anchor=tk.W, padx=8, pady=(8, 2))
         password_entry = PasswordEntry(dialog, width=50)
         password_entry.pack(fill=tk.X, padx=8, pady=2)
+        ttk.Button(dialog, text="Generate Password", command=lambda: self._generate_entry_password(password_entry)).pack(anchor=tk.E, padx=8, pady=(0, 4))
 
         ttk.Label(dialog, text="URL").pack(anchor=tk.W, padx=8, pady=(8, 2))
         url_entry = ttk.Entry(dialog, width=60)
@@ -429,6 +437,11 @@ class MainWindow:
 
     def _on_entry_changed(self, _event):
         self._load_entries()
+
+    def _generate_entry_password(self, password_entry: PasswordEntry):
+        password = self.password_generator.generate(PasswordGeneratorOptions())
+        password_entry.set(password)
+        password_entry.show_password.set(True)
 
     def _rotate_vault_entries(self, old_key: bytes, new_key: bytes):
         old_crypto = AES256Placeholder()
