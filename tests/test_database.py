@@ -22,8 +22,10 @@ class TestDatabase(unittest.TestCase):  #класс для тестирован�
             title="Test Site",
             username="test_user",
             encrypted_password=b"encrypted_test",
+            encrypted_data=b"encrypted_test",
             url="https://test.com",
             notes="test notes",
+            category="General",
             created_at=datetime.now(),
             updated_at=datetime.now(),
             tags="test",
@@ -77,7 +79,7 @@ class TestDatabase(unittest.TestCase):  #класс для тестирован�
         with self.db._get_connection() as conn:
             cursor = conn.execute("PRAGMA user_version")
             version = cursor.fetchone()[0]
-            self.assertEqual(version, 3)
+            self.assertEqual(version, 4)
 
     def test_settings_roundtrip(self):  #тест для проверки сохранения и получения настроек из базы данных
         self.db.set_setting("security.password_policy", {"min_length": 12})
@@ -142,6 +144,60 @@ class TestDatabase(unittest.TestCase):  #класс для тестирован�
         self.assertEqual(progress_updates[-1], (2, 2))
         self.assertEqual(self.db.get_entry(first_id).encrypted_password, b"one!")
         self.assertEqual(self.db.get_entry(second_id).encrypted_password, b"two!")
+        self.assertEqual(self.db.get_entry(first_id).encrypted_data, b"one!")
+        self.assertEqual(self.db.get_entry(second_id).encrypted_data, b"two!")
+
+    def test_new_schema_supports_encrypted_data_and_category(self):
+        entry_id = self.db.add_entry(self.test_entry)
+        loaded = self.db.get_entry(entry_id)
+
+        self.assertEqual(loaded.encrypted_data, b"encrypted_test")
+        self.assertEqual(loaded.category, "General")
+
+    def test_migration_v3_to_v4_backfills_encrypted_data(self):
+        with self.db._get_connection() as conn:
+            conn.execute("PRAGMA user_version = 3")
+            conn.execute("DROP TABLE vault_entries")
+            conn.execute(
+                """
+                CREATE TABLE vault_entries (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT NOT NULL,
+                    username TEXT NOT NULL,
+                    encrypted_password BLOB NOT NULL,
+                    url TEXT,
+                    notes TEXT,
+                    created_at TIMESTAMP NOT NULL,
+                    updated_at TIMESTAMP NOT NULL,
+                    tags TEXT
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO vault_entries
+                (title, username, encrypted_password, url, notes, created_at, updated_at, tags)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "Legacy",
+                    "user",
+                    b"legacy-secret",
+                    "",
+                    "",
+                    datetime.now().isoformat(),
+                    datetime.now().isoformat(),
+                    "",
+                ),
+            )
+
+        migrated = Database(self.db_path)
+        entry = migrated.get_entry(1)
+
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry.encrypted_password, b"legacy-secret")
+        self.assertEqual(entry.encrypted_data, b"legacy-secret")
+        self.assertEqual(entry.category, "")
 
 
 if __name__ == "__main__":

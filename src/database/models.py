@@ -9,11 +9,23 @@ class VaultEntry:  #класс для представления записи в
     title: str = ""
     username: str = ""
     encrypted_password: bytes = b""
+    encrypted_data: bytes = b""
     url: str = ""
     notes: str = ""
+    category: str = ""
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     tags: str = ""
+
+
+@dataclass
+class DeletedEntry:
+    id: Optional[int] = None
+    original_entry_id: Optional[int] = None
+    encrypted_data: bytes = b""
+    deleted_at: Optional[datetime] = None
+    expires_at: Optional[datetime] = None
+    title: str = ""
 
 
 @dataclass

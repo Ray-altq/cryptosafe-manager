@@ -9,7 +9,7 @@ from .models import AuditLog, KeyStore, VaultEntry
 
 
 class Database:
-    SCHEMA_VERSION = 3
+    SCHEMA_VERSION = 4
 
     def __init__(self, db_path: str = "cryptosafe.db"):
         self.db_path = db_path
@@ -51,6 +51,9 @@ class Database:
                 if version == 2:
                     self._migrate_v2_to_v3(conn)
                     version = 3
+                if version == 3:
+                    self._migrate_v3_to_v4(conn)
+                    version = 4
                 conn.execute(f"PRAGMA user_version = {max(version, self.SCHEMA_VERSION)}")
 
     def _create_schema(self, conn: sqlite3.Connection):
@@ -61,8 +64,10 @@ class Database:
                 title TEXT NOT NULL,
                 username TEXT NOT NULL,
                 encrypted_password BLOB NOT NULL,
+                encrypted_data BLOB,
                 url TEXT,
                 notes TEXT,
+                category TEXT NOT NULL DEFAULT '',
                 created_at TIMESTAMP NOT NULL,
                 updated_at TIMESTAMP NOT NULL,
                 tags TEXT
@@ -70,7 +75,23 @@ class Database:
             """
         )
         conn.execute("CREATE INDEX idx_title ON vault_entries(title)")
+        conn.execute("CREATE INDEX idx_entries_created_at ON vault_entries(created_at)")
         conn.execute("CREATE INDEX idx_entries_updated_at ON vault_entries(updated_at)")
+        conn.execute("CREATE INDEX idx_entries_tags ON vault_entries(tags)")
+
+        conn.execute(
+            """
+            CREATE TABLE deleted_entries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                original_entry_id INTEGER,
+                encrypted_data BLOB NOT NULL,
+                title TEXT,
+                deleted_at TIMESTAMP NOT NULL,
+                expires_at TIMESTAMP NOT NULL
+            )
+            """
+        )
+        conn.execute("CREATE INDEX idx_deleted_entries_expires_at ON deleted_entries(expires_at)")
 
         conn.execute(
             """
@@ -157,6 +178,38 @@ class Database:
 
         conn.execute("UPDATE key_store SET version = COALESCE(version, 1)")
 
+    def _migrate_v3_to_v4(self, conn: sqlite3.Connection):
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(vault_entries)").fetchall()}
+        if "encrypted_data" not in columns:
+            conn.execute("ALTER TABLE vault_entries ADD COLUMN encrypted_data BLOB")
+        if "category" not in columns:
+            conn.execute("ALTER TABLE vault_entries ADD COLUMN category TEXT NOT NULL DEFAULT ''")
+
+        conn.execute(
+            """
+            UPDATE vault_entries
+            SET encrypted_data = COALESCE(encrypted_data, encrypted_password)
+            """
+        )
+
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_entries_created_at ON vault_entries(created_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_entries_updated_at ON vault_entries(updated_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_entries_tags ON vault_entries(tags)")
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS deleted_entries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                original_entry_id INTEGER,
+                encrypted_data BLOB NOT NULL,
+                title TEXT,
+                deleted_at TIMESTAMP NOT NULL,
+                expires_at TIMESTAMP NOT NULL
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_deleted_entries_expires_at ON deleted_entries(expires_at)")
+
     def add_entry(self, entry: VaultEntry) -> int:
         with self._get_connection() as conn:
             created_at = entry.created_at.isoformat() if entry.created_at else datetime.now().isoformat()
@@ -164,15 +217,17 @@ class Database:
             cursor = conn.execute(
                 """
                 INSERT INTO vault_entries
-                (title, username, encrypted_password, url, notes, created_at, updated_at, tags)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (title, username, encrypted_password, encrypted_data, url, notes, category, created_at, updated_at, tags)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     entry.title,
                     entry.username,
                     entry.encrypted_password,
+                    entry.encrypted_data or entry.encrypted_password,
                     entry.url,
                     entry.notes,
+                    entry.category,
                     created_at,
                     updated_at,
                     entry.tags,
@@ -198,15 +253,17 @@ class Database:
             conn.execute(
                 """
                 UPDATE vault_entries
-                SET title=?, username=?, encrypted_password=?, url=?, notes=?, updated_at=?, tags=?
+                SET title=?, username=?, encrypted_password=?, encrypted_data=?, url=?, notes=?, category=?, updated_at=?, tags=?
                 WHERE id=?
                 """,
                 (
                     entry.title,
                     entry.username,
                     entry.encrypted_password,
+                    entry.encrypted_data or entry.encrypted_password,
                     entry.url,
                     entry.notes,
+                    entry.category,
                     entry.updated_at.isoformat(),
                     entry.tags,
                     entry.id,
@@ -334,10 +391,10 @@ class Database:
                 conn.execute(
                     """
                     UPDATE vault_entries
-                    SET encrypted_password = ?, updated_at = ?
+                    SET encrypted_password = ?, encrypted_data = ?, updated_at = ?
                     WHERE id = ?
                     """,
-                    (updated_password, datetime.now().isoformat(), row["id"]),
+                    (updated_password, updated_password, datetime.now().isoformat(), row["id"]),
                 )
                 if progress_callback is not None:
                     progress_callback(index, total)
