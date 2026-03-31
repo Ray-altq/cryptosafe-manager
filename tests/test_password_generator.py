@@ -65,6 +65,34 @@ class TestPasswordGenerator(unittest.TestCase):
         self.assertFalse(self.generator.is_strong_enough("Password123"))
         self.assertTrue(self.generator.is_strong_enough("Strong!Pass123"))
 
+    def test_bulk_generation_respects_character_sets_and_history(self):
+        generator = PasswordGenerator(history_limit=20)
+        generated_passwords = []
+
+        for _ in range(200):
+            password = generator.generate(
+                PasswordGeneratorOptions(
+                    length=18,
+                    include_uppercase=True,
+                    include_lowercase=True,
+                    include_digits=True,
+                    include_symbols=True,
+                    exclude_ambiguous=True,
+                )
+            )
+            generated_passwords.append(password)
+
+            self.assertEqual(len(password), 18)
+            self.assertTrue(any(char.isupper() for char in password))
+            self.assertTrue(any(char.islower() for char in password))
+            self.assertTrue(any(char.isdigit() for char in password))
+            self.assertTrue(any(char in SYMBOLS for char in password))
+            self.assertTrue(all(char not in AMBIGUOUS_CHARACTERS for char in password))
+            self.assertTrue(generator.is_strong_enough(password))
+
+        self.assertEqual(len(generated_passwords), len(set(generated_passwords)))
+        self.assertEqual(generator.recent_passwords(), generated_passwords[-20:])
+
 
 if __name__ == "__main__":
     unittest.main()

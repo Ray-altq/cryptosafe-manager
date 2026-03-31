@@ -156,6 +156,55 @@ class TestEntryManager(unittest.TestCase):
         loaded = self.manager.get_entry(created["id"])
         self.assertEqual(loaded["password"], "Secret!123")
 
+    def test_crud_integration_handles_bulk_entry_lifecycle(self):
+        created_ids = []
+        for index in range(100):
+            created = self.manager.create_entry(
+                {
+                    "title": f"Entry {index}",
+                    "username": f"user{index}@example.com",
+                    "password": f"Secret!{index:03d}Aa",
+                    "url": f"https://example{index}.com",
+                    "notes": f"note-{index}",
+                    "category": "Work" if index % 2 == 0 else "Personal",
+                    "tags": [f"tag-{index}", "bulk"],
+                }
+            )
+            created_ids.append(created["id"])
+
+        all_entries = self.manager.get_all_entries()
+        self.assertEqual(len(all_entries), 100)
+        self.assertEqual({entry["id"] for entry in all_entries}, set(created_ids))
+
+        for entry_id in created_ids[:20]:
+            updated = self.manager.update_entry(
+                entry_id,
+                {
+                    "title": f"Updated {entry_id}",
+                    "password": f"Updated!{entry_id:03d}Bb",
+                    "category": "Updated",
+                    "notes": f"updated-note-{entry_id}",
+                },
+            )
+            self.assertEqual(updated["category"], "Updated")
+            self.assertTrue(updated["title"].startswith("Updated "))
+            self.assertTrue(updated["password"].startswith("Updated!"))
+
+        for entry_id in created_ids[:10]:
+            self.manager.delete_entry(entry_id)
+
+        remaining_entries = self.manager.get_all_entries()
+        self.assertEqual(len(remaining_entries), 90)
+        self.assertFalse(any(entry["id"] in set(created_ids[:10]) for entry in remaining_entries))
+
+        with self.database._get_connection() as conn:
+            deleted_count = conn.execute("SELECT COUNT(*) AS total FROM deleted_entries").fetchone()["total"]
+        self.assertEqual(deleted_count, 10)
+
+        sample_updated = self.manager.get_entry(created_ids[10])
+        self.assertEqual(sample_updated["category"], "Updated")
+        self.assertEqual(sample_updated["notes"], f"updated-note-{created_ids[10]}")
+
 
 if __name__ == "__main__":
     unittest.main()
