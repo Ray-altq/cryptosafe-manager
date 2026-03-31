@@ -173,6 +173,17 @@ class MainWindow:
         self.search_var.trace_add("write", lambda *_args: self._apply_entry_filter())
         self.search_entry = ttk.Entry(toolbar, textvariable=self.search_var, width=28)
         self.search_entry.pack(side=tk.LEFT, padx=2)
+        ttk.Label(toolbar, text="Категория").pack(side=tk.LEFT, padx=(8, 4))
+        self.category_filter_var = tk.StringVar(value="Все")
+        self.category_filter = ttk.Combobox(
+            toolbar,
+            textvariable=self.category_filter_var,
+            state="readonly",
+            width=18,
+            values=["Все"],
+        )
+        self.category_filter.pack(side=tk.LEFT, padx=2)
+        self.category_filter.bind("<<ComboboxSelected>>", lambda _event: self._apply_entry_filter())
         ttk.Button(toolbar, text="Очистить", command=self._clear_search).pack(side=tk.LEFT, padx=(2, 8))
         ttk.Button(toolbar, text="Заблокировать", command=self._lock_vault).pack(side=tk.RIGHT, padx=2)
 
@@ -369,19 +380,21 @@ class MainWindow:
                 }
             )
         self._all_entries = data
+        self._update_category_filter_options()
         self._apply_entry_filter()
 
     def _apply_entry_filter(self):
         entries = getattr(self, "_all_entries", [])
         query = getattr(self, "search_var", None)
         search_text = query.get().strip().lower() if query is not None else ""
-
-        if not search_text:
-            self.table.set_data(entries)
-            return
+        category_filter = getattr(self, "category_filter_var", None)
+        selected_category = category_filter.get().strip() if category_filter is not None else "Все"
 
         filtered_entries = []
         for entry in entries:
+            if selected_category not in {"", "Все"} and entry.get("category", "") != selected_category:
+                continue
+
             haystack = " ".join(
                 [
                     str(entry.get("title", "")),
@@ -391,14 +404,34 @@ class MainWindow:
                     str(entry.get("_search_notes", "")),
                 ]
             ).lower()
-            if search_text in haystack:
+            if not search_text or search_text in haystack:
                 filtered_entries.append(entry)
 
         self.table.set_data(filtered_entries)
 
+    def _update_category_filter_options(self):
+        if not hasattr(self, "category_filter"):
+            return
+
+        categories = sorted(
+            {
+                str(entry.get("category", "")).strip()
+                for entry in getattr(self, "_all_entries", [])
+                if str(entry.get("category", "")).strip()
+            }
+        )
+        values = ["Все", *categories]
+        self.category_filter.configure(values=values)
+
+        current_value = self.category_filter_var.get().strip()
+        if current_value not in values:
+            self.category_filter_var.set("Все")
+
     def _clear_search(self):
         if hasattr(self, "search_var"):
             self.search_var.set("")
+        if hasattr(self, "category_filter_var"):
+            self.category_filter_var.set("Все")
         if hasattr(self, "search_entry"):
             self.search_entry.focus_set()
 
