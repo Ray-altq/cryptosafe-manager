@@ -78,6 +78,19 @@ class TestEntryManager(unittest.TestCase):
         self.assertEqual(updated["password"], "NewSecret!456")
         self.assertEqual(updated["category"], "Updated")
 
+    def test_create_entry_persists_category(self):
+        created = self.manager.create_entry(
+            {
+                "title": "Categorized",
+                "password": "Secret!123",
+                "category": "Work",
+            }
+        )
+
+        loaded = self.manager.get_entry(created["id"])
+
+        self.assertEqual(loaded["category"], "Work")
+
     def test_delete_entry_soft_deletes_by_default(self):
         created = self.manager.create_entry({"title": "Example", "password": "Secret!123"})
 

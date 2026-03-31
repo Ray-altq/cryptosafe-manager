@@ -382,6 +382,10 @@ class MainWindow:
         url_entry = ttk.Entry(dialog, width=60)
         url_entry.pack(fill=tk.X, padx=8, pady=2)
 
+        ttk.Label(dialog, text="Category").pack(anchor=tk.W, padx=8, pady=(8, 2))
+        category_entry = ttk.Entry(dialog, width=60)
+        category_entry.pack(fill=tk.X, padx=8, pady=2)
+
         ttk.Label(dialog, text="Заметки").pack(anchor=tk.W, padx=8, pady=(8, 2))
         notes_text = tk.Text(dialog, height=7, width=60)
         notes_text.pack(fill=tk.BOTH, expand=True, padx=8, pady=2)
@@ -391,8 +395,10 @@ class MainWindow:
             username_entry.insert(0, entry["username"])
             password_entry.set(entry["password"])
             url_entry.insert(0, entry["url"])
+            category_entry.insert(0, entry["category"])
             notes_text.insert("1.0", entry["notes"])
 
+        dialog.category_entry = category_entry
         return dialog, title_entry, username_entry, password_entry, url_entry, notes_text
 
     def _collect_entry_form(self, title_entry, username_entry, password_entry, url_entry, notes_text):
@@ -400,11 +406,14 @@ class MainWindow:
         username = username_entry.get().strip()
         password = password_entry.get().strip()
         url = url_entry.get().strip()
+        category_entry = getattr(title_entry.master, "category_entry", None)
+        category = category_entry.get().strip() if category_entry is not None else ""
         notes = notes_text.get("1.0", tk.END).strip()
 
         if not title or not username or not password:
             raise ValueError("Поля «Название», «Имя пользователя» и «Пароль» обязательны.")
 
+        self._last_entry_category = category
         return title, username, password, url, notes
 
     def _get_selected_entry(self):
@@ -638,6 +647,7 @@ class MainWindow:
                     "username": username,
                     "password": password,
                     "url": url,
+                    "category": getattr(self, "_last_entry_category", ""),
                     "notes": notes,
                     "tags": "",
                 }
@@ -673,6 +683,7 @@ class MainWindow:
                     "username": username,
                     "password": password,
                     "url": url,
+                    "category": getattr(self, "_last_entry_category", ""),
                     "notes": notes,
                 },
             )
