@@ -173,6 +173,7 @@ class MainWindow:
         self.search_var.trace_add("write", lambda *_args: self._apply_entry_filter())
         self.search_entry = ttk.Entry(toolbar, textvariable=self.search_var, width=28)
         self.search_entry.pack(side=tk.LEFT, padx=2)
+        self.search_entry.bind("<Escape>", lambda _event: self._clear_search())
         ttk.Label(toolbar, text="Категория").pack(side=tk.LEFT, padx=(8, 4))
         self.category_filter_var = tk.StringVar(value="Все")
         self.category_filter = ttk.Combobox(
@@ -184,7 +185,9 @@ class MainWindow:
         )
         self.category_filter.pack(side=tk.LEFT, padx=2)
         self.category_filter.bind("<<ComboboxSelected>>", lambda _event: self._apply_entry_filter())
-        ttk.Button(toolbar, text="Очистить", command=self._clear_search).pack(side=tk.LEFT, padx=(2, 8))
+        ttk.Button(toolbar, text="Сбросить", command=self._clear_search).pack(side=tk.LEFT, padx=(2, 8))
+        self.search_status_var = tk.StringVar(value="Найдено: 0")
+        ttk.Label(toolbar, textvariable=self.search_status_var).pack(side=tk.LEFT, padx=(4, 0))
         ttk.Button(toolbar, text="Заблокировать", command=self._lock_vault).pack(side=tk.RIGHT, padx=2)
 
     def _create_main_area(self):
@@ -248,6 +251,8 @@ class MainWindow:
         self.root.bind("<FocusOut>", self._on_focus_out, add="+")
         self.root.bind("<Unmap>", self._on_unmap, add="+")
         self.root.bind("<Map>", self._on_map, add="+")
+        self.root.bind_all("<Control-f>", self._focus_search, add="+")
+        self.root.bind_all("<Control-F>", self._focus_search, add="+")
 
     def _schedule_security_tasks(self):
         self._check_security_timers()
@@ -361,6 +366,8 @@ class MainWindow:
         if not self.auth_service.is_authenticated():
             self._all_entries = []
             self.table.clear()
+            if hasattr(self, "search_status_var"):
+                self.search_status_var.set("Найдено: 0")
             return
 
         entries = self.entry_manager.get_all_entries()
@@ -408,6 +415,8 @@ class MainWindow:
                 filtered_entries.append(entry)
 
         self.table.set_data(filtered_entries)
+        if hasattr(self, "search_status_var"):
+            self.search_status_var.set(f"Найдено: {len(filtered_entries)} из {len(entries)}")
 
     def _update_category_filter_options(self):
         if not hasattr(self, "category_filter"):
@@ -434,6 +443,12 @@ class MainWindow:
             self.category_filter_var.set("Все")
         if hasattr(self, "search_entry"):
             self.search_entry.focus_set()
+
+    def _focus_search(self, _event=None):
+        if hasattr(self, "search_entry"):
+            self.search_entry.focus_set()
+            self.search_entry.selection_range(0, tk.END)
+        return "break"
 
     def _mask_username(self, username: str) -> str:
         if not username:
