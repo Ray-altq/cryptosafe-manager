@@ -205,6 +205,32 @@ class TestEntryManager(unittest.TestCase):
         self.assertEqual(sample_updated["category"], "Updated")
         self.assertEqual(sample_updated["notes"], f"updated-note-{created_ids[10]}")
 
+    def test_future_fields_roundtrip_and_update(self):
+        created = self.manager.create_entry(
+            {
+                "title": "Future-ready",
+                "password": "Secret!123",
+                "totp_secret": "JBSWY3DPEHPK3PXP",
+                "sharing_metadata": {"shared_with": ["alice"], "permission": "read"},
+            }
+        )
+
+        loaded = self.manager.get_entry(created["id"])
+        self.assertEqual(loaded["totp_secret"], "JBSWY3DPEHPK3PXP")
+        self.assertEqual(loaded["sharing_metadata"], {"shared_with": ["alice"], "permission": "read"})
+
+        updated = self.manager.update_entry(
+            created["id"],
+            {
+                "sharing_metadata": {"shared_with": ["alice", "bob"], "permission": "write"},
+                "totp_secret": "NB2W45DFOIZA====",
+            },
+        )
+
+        self.assertEqual(updated["totp_secret"], "NB2W45DFOIZA====")
+        self.assertEqual(updated["sharing_metadata"]["permission"], "write")
+        self.assertEqual(updated["sharing_metadata"]["shared_with"], ["alice", "bob"])
+
 
 if __name__ == "__main__":
     unittest.main()

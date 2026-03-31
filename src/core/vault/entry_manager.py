@@ -73,6 +73,8 @@ class EntryManager:
             "notes": current_data["notes"],
             "category": current_data["category"],
             "tags": current_data["tags"],
+            "totp_secret": current_data["totp_secret"],
+            "sharing_metadata": current_data["sharing_metadata"],
         }
         merged_data.update(data_dict)
 
@@ -130,7 +132,7 @@ class EntryManager:
 
         event_bus.publish(Event(EventType.ENTRY_DELETED, {"id": entry_id, "title": title}))
 
-    def _normalize_entry_data(self, data_dict: Dict[str, Any]) -> Dict[str, str]:
+    def _normalize_entry_data(self, data_dict: Dict[str, Any]) -> Dict[str, Any]:
         normalized = {
             "title": str(data_dict.get("title", "")).strip(),
             "username": str(data_dict.get("username", "")).strip(),
@@ -139,6 +141,8 @@ class EntryManager:
             "notes": str(data_dict.get("notes", "")).strip(),
             "category": str(data_dict.get("category", "")).strip(),
             "tags": self._normalize_tags(data_dict.get("tags", "")),
+            "totp_secret": str(data_dict.get("totp_secret", "")).strip(),
+            "sharing_metadata": self._normalize_sharing_metadata(data_dict.get("sharing_metadata")),
         }
 
         if not normalized["title"]:
@@ -153,7 +157,12 @@ class EntryManager:
             return ",".join(str(tag).strip() for tag in raw_tags if str(tag).strip())
         return str(raw_tags or "").strip()
 
-    def _encrypt_payload(self, data_dict: Dict[str, str], created_at: datetime) -> bytes:
+    def _normalize_sharing_metadata(self, raw_metadata: Any) -> Dict[str, Any]:
+        if isinstance(raw_metadata, dict):
+            return dict(raw_metadata)
+        return {}
+
+    def _encrypt_payload(self, data_dict: Dict[str, Any], created_at: datetime) -> bytes:
         payload = {
             "title": data_dict["title"],
             "username": data_dict["username"],
@@ -161,6 +170,8 @@ class EntryManager:
             "url": data_dict["url"],
             "notes": data_dict["notes"],
             "category": data_dict["category"],
+            "totp_secret": data_dict["totp_secret"],
+            "sharing_metadata": data_dict["sharing_metadata"],
             "version": self.PAYLOAD_VERSION,
             "created_at": created_at.isoformat(),
         }
@@ -177,6 +188,8 @@ class EntryManager:
             "url": payload.get("url", entry.url),
             "notes": payload.get("notes", entry.notes),
             "category": payload.get("category", ""),
+            "totp_secret": payload.get("totp_secret", ""),
+            "sharing_metadata": self._normalize_sharing_metadata(payload.get("sharing_metadata")),
             "version": payload.get("version", self.PAYLOAD_VERSION),
             "tags": entry.tags,
             "created_at": entry.created_at,
@@ -202,6 +215,8 @@ class EntryManager:
                 "url": entry.url,
                 "notes": entry.notes,
                 "category": entry.category,
+                "totp_secret": "",
+                "sharing_metadata": {},
                 "version": self.PAYLOAD_VERSION,
             }
 
