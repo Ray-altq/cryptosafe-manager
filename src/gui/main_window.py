@@ -173,6 +173,7 @@ class MainWindow:
         self.search_var.trace_add("write", lambda *_args: self._apply_entry_filter())
         self.search_entry = ttk.Entry(toolbar, textvariable=self.search_var, width=28)
         self.search_entry.pack(side=tk.LEFT, padx=2)
+        ttk.Button(toolbar, text="Очистить", command=self._clear_search).pack(side=tk.LEFT, padx=(2, 8))
         ttk.Button(toolbar, text="Заблокировать", command=self._lock_vault).pack(side=tk.RIGHT, padx=2)
 
     def _create_main_area(self):
@@ -394,6 +395,12 @@ class MainWindow:
                 filtered_entries.append(entry)
 
         self.table.set_data(filtered_entries)
+
+    def _clear_search(self):
+        if hasattr(self, "search_var"):
+            self.search_var.set("")
+        if hasattr(self, "search_entry"):
+            self.search_entry.focus_set()
 
     def _mask_username(self, username: str) -> str:
         if not username:
