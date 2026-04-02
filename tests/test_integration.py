@@ -465,6 +465,21 @@ class TestMainWindowSearchAndFilter(IntegrationTestCase):
         self.assertEqual(window.search_entry.selection, (0, tk.END))
 
 
+class TestMainWindowDialogHelpers(IntegrationTestCase):
+    def test_build_favicon_request_normalizes_host_and_builds_service_url(self):
+        window = MainWindow.__new__(MainWindow)
+
+        request_data = window._build_favicon_request("github.com/login")
+        self.assertEqual(request_data["host"], "github.com")
+        self.assertIn("google.com/s2/favicons", request_data["service_url"])
+        self.assertIn("github.com", request_data["service_url"])
+
+        request_with_scheme = window._build_favicon_request("https://sub.example.com/path")
+        self.assertEqual(request_with_scheme["host"], "sub.example.com")
+
+        self.assertIsNone(window._build_favicon_request(""))
+
+
 class TestMainWindowSecurityState(IntegrationTestCase):
     def test_lock_vault_clears_decrypted_entries_and_password_visibility_state(self):
         window = MainWindow.__new__(MainWindow)

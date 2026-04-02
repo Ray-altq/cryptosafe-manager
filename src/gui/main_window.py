@@ -2,9 +2,12 @@ import os
 import queue
 import threading
 import tkinter as tk
+from base64 import b64encode
 from datetime import datetime
 from typing import Optional
+from urllib.error import URLError
 from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from ..core.config import Config
@@ -66,6 +69,7 @@ class MainWindow:
         self.passwords_visible = False
         self.password_visibility_overrides = {}
         self.search_history = []
+        self._favicon_cache = {}
         self.audit_logger = AuditLogger(self.db, event_bus)
         self._persist_runtime_settings()
         self._load_password_policy()
@@ -657,6 +661,9 @@ class MainWindow:
         ttk.Label(dialog, text="URL").pack(anchor=tk.W, padx=8, pady=(8, 2))
         url_entry = ttk.Entry(dialog, width=60)
         url_entry.pack(fill=tk.X, padx=8, pady=2)
+        favicon_status = tk.StringVar(value="Иконка сайта: не выбрана")
+        favicon_label = ttk.Label(dialog, textvariable=favicon_status, compound=tk.LEFT)
+        favicon_label.pack(anchor=tk.W, padx=8, pady=(0, 4))
 
         ttk.Label(dialog, text="Категория").pack(anchor=tk.W, padx=8, pady=(8, 2))
         category_entry = ttk.Entry(dialog, width=60)
@@ -678,10 +685,18 @@ class MainWindow:
             "<KeyRelease>",
             lambda _event: self._on_password_entry_changed(dialog, password_entry, strength_var),
         )
+        url_entry.bind("<KeyRelease>", lambda _event: self._schedule_favicon_preview(dialog, url_entry))
+        url_entry.bind("<FocusOut>", lambda _event: self._schedule_favicon_preview(dialog, url_entry))
         self._update_password_strength(password_entry, strength_var)
         dialog.category_entry = category_entry
         dialog.strength_var = strength_var
         dialog.password_was_generated = False
+        dialog.favicon_status = favicon_status
+        dialog.favicon_label = favicon_label
+        dialog.favicon_image = None
+        dialog.favicon_after_id = None
+        dialog.favicon_request_token = None
+        self._schedule_favicon_preview(dialog, url_entry, delay_ms=0)
         return dialog, title_entry, username_entry, password_entry, url_entry, notes_text
 
     def _collect_entry_form(self, title_entry, username_entry, password_entry, url_entry, notes_text):
@@ -707,6 +722,114 @@ class MainWindow:
 
         self._last_entry_category = category
         return title, username, password, url, notes
+
+    def _schedule_favicon_preview(self, dialog, url_entry, delay_ms: int = 250):
+        if not hasattr(dialog, "favicon_status"):
+            return
+        after_id = getattr(dialog, "favicon_after_id", None)
+        if after_id:
+            try:
+                dialog.after_cancel(after_id)
+            except tk.TclError:
+                pass
+
+        def run_preview():
+            dialog.favicon_after_id = None
+            self._update_favicon_preview(dialog, url_entry.get().strip())
+
+        dialog.favicon_after_id = dialog.after(delay_ms, run_preview)
+
+    def _update_favicon_preview(self, dialog, raw_url: str):
+        favicon_request = self._build_favicon_request(raw_url)
+        if favicon_request is None:
+            self._set_dialog_favicon_placeholder(dialog, "Иконка сайта: не выбрана")
+            return
+
+        host = favicon_request["host"]
+        cached_image = self._favicon_cache.get(host)
+        if cached_image is not None:
+            self._set_dialog_favicon_image(dialog, cached_image, host)
+            return
+
+        self._set_dialog_favicon_placeholder(dialog, f"Иконка сайта: {host}")
+        request_token = f"{host}:{raw_url}"
+        dialog.favicon_request_token = request_token
+
+        def worker():
+            image_data = self._download_favicon_image(favicon_request["service_url"])
+
+            def apply_result():
+                if getattr(dialog, "favicon_request_token", None) != request_token:
+                    return
+                if image_data is None:
+                    self._set_dialog_favicon_placeholder(dialog, f"Иконка сайта: {host}")
+                    return
+                self._favicon_cache[host] = image_data
+                self._set_dialog_favicon_image(dialog, image_data, host)
+
+            try:
+                dialog.after(0, apply_result)
+            except tk.TclError:
+                pass
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _build_favicon_request(self, raw_url: str):
+        value = str(raw_url or "").strip()
+        if not value:
+            return None
+
+        candidate = value if "://" in value else f"https://{value}"
+        parsed = urlparse(candidate)
+        host = (parsed.netloc or parsed.path).strip().lower()
+        if not host:
+            return None
+
+        if ":" in host:
+            host = host.split(":", 1)[0]
+
+        if not host:
+            return None
+
+        service_url = f"https://www.google.com/s2/favicons?sz=64&domain_url=https://{host}"
+        return {"host": host, "service_url": service_url}
+
+    def _download_favicon_image(self, service_url: str) -> Optional[str]:
+        try:
+            request = Request(service_url, headers={"User-Agent": "CryptoSafe-Manager/1.0"})
+            with urlopen(request, timeout=3) as response:
+                image_bytes = response.read()
+        except (OSError, URLError, ValueError):
+            return None
+
+        if not image_bytes:
+            return None
+        return b64encode(image_bytes).decode("ascii")
+
+    def _set_dialog_favicon_placeholder(self, dialog, text: str):
+        status_var = getattr(dialog, "favicon_status", None)
+        label = getattr(dialog, "favicon_label", None)
+        if status_var is not None:
+            status_var.set(text)
+        if label is not None:
+            label.configure(image="")
+        dialog.favicon_image = None
+
+    def _set_dialog_favicon_image(self, dialog, image_data: str, host: str):
+        label = getattr(dialog, "favicon_label", None)
+        status_var = getattr(dialog, "favicon_status", None)
+        if label is None or status_var is None:
+            return
+
+        try:
+            image = tk.PhotoImage(data=image_data)
+        except tk.TclError:
+            self._set_dialog_favicon_placeholder(dialog, f"Иконка сайта: {host}")
+            return
+
+        dialog.favicon_image = image
+        label.configure(image=image)
+        status_var.set(f"Иконка сайта: {host}")
 
     def _get_selected_entry(self):
         selected = self.table.get_selected()
