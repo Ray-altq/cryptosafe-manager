@@ -3,6 +3,7 @@ import sys
 import tempfile
 import tkinter as tk
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -317,6 +318,7 @@ class TestMainWindowSearchAndFilter(IntegrationTestCase):
         window.search_history_button = FakeButton()
         window.password_toggle_text = FakeVar("Показать пароли")
         window.passwords_visible = False
+        window.password_visibility_overrides = {}
         window.search_history = []
         window.db = Database(self.make_db_path("search.db"))
         key_manager = KeyManager()
@@ -331,7 +333,8 @@ class TestMainWindowSearchAndFilter(IntegrationTestCase):
                 "password": "Secret!123",
                 "category": "Work",
                 "url": "github.com",
-                "updated_at": "2026-03-31 20:00",
+                "notes": "code hosting",
+                "updated_at": datetime(2026, 3, 31, 20, 0),
                 "_password_plain": "Secret!123",
                 "_search_username": "octocat",
                 "_search_url": "https://github.com",
@@ -344,7 +347,8 @@ class TestMainWindowSearchAndFilter(IntegrationTestCase):
                 "password": "Local!456",
                 "category": "Home",
                 "url": "localhost",
-                "updated_at": "2026-03-31 20:05",
+                "notes": "local server",
+                "updated_at": datetime(2026, 3, 31, 20, 5),
                 "_password_plain": "Local!456",
                 "_search_username": "admin",
                 "_search_url": "http://localhost",
@@ -382,7 +386,7 @@ class TestMainWindowSearchAndFilter(IntegrationTestCase):
 
         result = window._toggle_password_visibility()
         self.assertEqual(result, "break")
-        self.assertEqual(window.table.rows[0]["password"], "Secret!123")
+        self.assertEqual(window.table.rows[0]["password"], "Secret!123  🙈")
         self.assertEqual(window.password_toggle_text.get(), "Скрыть пароли")
 
     def test_search_history_persists_and_reapplies_queries(self):
