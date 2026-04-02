@@ -47,6 +47,38 @@ class FakeLabel:
             self.text = kwargs["text"]
 
 
+class FakeButton:
+    def __init__(self):
+        self.disabled = False
+
+    def state(self, states):
+        if "disabled" in states:
+            self.disabled = True
+        if "!disabled" in states:
+            self.disabled = False
+
+    def winfo_rootx(self):
+        return 100
+
+    def winfo_rooty(self):
+        return 100
+
+    def winfo_height(self):
+        return 24
+
+
+class FakeEntryWidget:
+    def __init__(self):
+        self.focused = False
+        self.selection = None
+
+    def focus_set(self):
+        self.focused = True
+
+    def selection_range(self, start, end):
+        self.selection = (start, end)
+
+
 class FakeTable:
     def __init__(self):
         self.rows = []
@@ -269,6 +301,102 @@ class TestMainWindowIntegration(IntegrationTestCase):
         self.assertTrue(window.auth_service.is_initialized())
         self.assertTrue(window.auth_service.is_authenticated())
         self.assertEqual(window.db.db_path, db_path)
+
+
+class TestMainWindowSearchAndFilter(IntegrationTestCase):
+    def _make_window(self):
+        window = MainWindow.__new__(MainWindow)
+        window.table = FakeTable()
+        window.search_var = FakeVar("")
+        window.category_filter_var = FakeVar("Все")
+        window.search_status_var = FakeVar("")
+        window.search_entry = FakeEntryWidget()
+        window.search_history_button = FakeButton()
+        window.password_toggle_text = FakeVar("Показать пароли")
+        window.passwords_visible = False
+        window.search_history = []
+        window.db = Database(self.make_db_path("search.db"))
+        window.root = FakeRoot()
+        window._all_entries = [
+            {
+                "id": 1,
+                "title": "GitHub",
+                "username": "octocat",
+                "password": "Secret!123",
+                "category": "Work",
+                "url": "github.com",
+                "updated_at": "2026-03-31 20:00",
+                "_password_plain": "Secret!123",
+                "_search_username": "octocat",
+                "_search_url": "https://github.com",
+                "_search_notes": "code hosting",
+            },
+            {
+                "id": 2,
+                "title": "Local Admin",
+                "username": "admin",
+                "password": "Local!456",
+                "category": "Home",
+                "url": "localhost",
+                "updated_at": "2026-03-31 20:05",
+                "_password_plain": "Local!456",
+                "_search_username": "admin",
+                "_search_url": "http://localhost",
+                "_search_notes": "local server",
+            },
+        ]
+        return window
+
+    def test_apply_entry_filter_supports_general_field_and_category_filters(self):
+        window = self._make_window()
+
+        window.search_var.set("github")
+        window._apply_entry_filter()
+        self.assertEqual([row["id"] for row in window.table.rows], [1])
+
+        window.search_var.set("title:local")
+        window._apply_entry_filter()
+        self.assertEqual([row["id"] for row in window.table.rows], [2])
+
+        window.search_var.set("user:octo notes:hosting")
+        window._apply_entry_filter()
+        self.assertEqual([row["id"] for row in window.table.rows], [1])
+
+        window.search_var.set("")
+        window.category_filter_var.set("Home")
+        window._apply_entry_filter()
+        self.assertEqual([row["id"] for row in window.table.rows], [2])
+        self.assertEqual(window.search_status_var.get(), "Найдено: 1 из 2")
+
+    def test_toggle_password_visibility_updates_table_rows(self):
+        window = self._make_window()
+
+        window._apply_entry_filter()
+        self.assertNotEqual(window.table.rows[0]["password"], "Secret!123")
+
+        result = window._toggle_password_visibility()
+        self.assertEqual(result, "break")
+        self.assertEqual(window.table.rows[0]["password"], "Secret!123")
+        self.assertEqual(window.password_toggle_text.get(), "Скрыть пароли")
+
+    def test_search_history_persists_and_reapplies_queries(self):
+        window = self._make_window()
+
+        for query in [f"query-{index}" for index in range(12)]:
+            window._remember_search_query(query)
+
+        self.assertEqual(len(window.search_history), 10)
+        self.assertEqual(window.search_history[0], "query-11")
+        self.assertEqual(window.search_history[-1], "query-2")
+        self.assertFalse(window.search_history_button.disabled)
+
+        stored_history = window.db.get_setting("ui.search_history", [])
+        self.assertEqual(stored_history, window.search_history)
+
+        window._apply_search_history_item("query-5")
+        self.assertEqual(window.search_var.get(), "query-5")
+        self.assertTrue(window.search_entry.focused)
+        self.assertEqual(window.search_entry.selection, (0, tk.END))
 
 
 if __name__ == "__main__":
