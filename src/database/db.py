@@ -1,4 +1,5 @@
 import json
+import queue
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
@@ -11,20 +12,24 @@ from .models import AuditLog, KeyStore, VaultEntry
 class Database:
     SCHEMA_VERSION = 4
 
-    def __init__(self, db_path: str = "cryptosafe.db"):
+    def __init__(self, db_path: str = "cryptosafe.db", pool_size: int = 4):
         self.db_path = db_path
+        self.pool_size = max(1, int(pool_size))
+        self._connection_pool: "queue.LifoQueue[sqlite3.Connection]" = queue.LifoQueue(maxsize=self.pool_size)
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
     @contextmanager
     def _get_connection(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
+        conn = self._acquire_connection()
         try:
             yield conn
             conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
         finally:
-            conn.close()
+            self._release_connection(conn)
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -37,6 +42,40 @@ class Database:
                 raise
             else:
                 conn.commit()
+
+    def _acquire_connection(self) -> sqlite3.Connection:
+        try:
+            return self._connection_pool.get_nowait()
+        except queue.Empty:
+            return self._create_connection()
+
+    def _release_connection(self, conn: sqlite3.Connection):
+        try:
+            self._connection_pool.put_nowait(conn)
+        except queue.Full:
+            conn.close()
+
+    def _create_connection(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA busy_timeout = 5000")
+        conn.execute("PRAGMA journal_mode = WAL")
+        return conn
+
+    def close(self):
+        while True:
+            try:
+                conn = self._connection_pool.get_nowait()
+            except queue.Empty:
+                break
+            conn.close()
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
 
     def _init_db(self):
         with self._get_connection() as conn:

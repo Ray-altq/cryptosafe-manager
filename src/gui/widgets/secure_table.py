@@ -12,6 +12,8 @@ class SecureTable(ttk.Frame):
         self.columns = columns
         self.data: List[Dict[str, Any]] = []
         self._sort_state: Dict[str, bool] = {}
+        self._column_order = [col["id"] for col in columns]
+        self._dragged_column_id: Optional[str] = None
 
         self.tree = ttk.Treeview(
             self,
@@ -27,6 +29,7 @@ class SecureTable(ttk.Frame):
                 command=lambda column_id=col["id"]: self._sort_by(column_id),
             )
             self.tree.column(col["id"], width=col.get("width", 100))
+        self.tree.configure(displaycolumns=self._column_order)
 
         vsb = ttk.Scrollbar(self, orient="vertical", command=self.tree.yview)
         hsb = ttk.Scrollbar(self, orient="horizontal", command=self.tree.xview)
@@ -38,6 +41,8 @@ class SecureTable(ttk.Frame):
 
         self.grid_rowconfigure(0, weight=1)
         self.grid_columnconfigure(0, weight=1)
+        self.tree.bind("<ButtonPress-1>", self._begin_column_drag, add="+")
+        self.tree.bind("<ButtonRelease-1>", self._finish_column_drag, add="+")
 
     def _sort_by(self, column_id: str):
         if not self.data:
@@ -107,6 +112,48 @@ class SecureTable(ttk.Frame):
         """Привязать обработчик левого клика к таблице."""
         self.tree.bind("<Button-1>", callback, add="+")
 
+    def _begin_column_drag(self, event):
+        if self.tree.identify_region(event.x, event.y) != "heading":
+            self._dragged_column_id = None
+            return
+        self._dragged_column_id = self._identify_column_id(event.x)
+
+    def _finish_column_drag(self, event):
+        if self._dragged_column_id is None:
+            return
+        if self.tree.identify_region(event.x, event.y) != "heading":
+            self._dragged_column_id = None
+            return
+
+        target_column_id = self._identify_column_id(event.x)
+        if target_column_id is not None:
+            self._reorder_display_columns(self._dragged_column_id, target_column_id)
+        self._dragged_column_id = None
+
+    def _identify_column_id(self, x: int) -> Optional[str]:
+        column_ref = self.tree.identify_column(x)
+        if not column_ref:
+            return None
+        try:
+            column_index = int(column_ref.lstrip("#")) - 1
+        except ValueError:
+            return None
+        if column_index < 0 or column_index >= len(self._column_order):
+            return None
+        return self._column_order[column_index]
+
+    def _reorder_display_columns(self, source_column_id: str, target_column_id: str):
+        if source_column_id == target_column_id:
+            return
+        if source_column_id not in self._column_order or target_column_id not in self._column_order:
+            return
+
+        updated_order = [column_id for column_id in self._column_order if column_id != source_column_id]
+        target_index = updated_order.index(target_column_id)
+        updated_order.insert(target_index, source_column_id)
+        self._column_order = updated_order
+        self.tree.configure(displaycolumns=self._column_order)
+
     def get_cell_at(self, x: int, y: int) -> Optional[Dict[str, Any]]:
         """Получить информацию о ячейке по координатам внутри таблицы."""
         item_id = self.tree.identify_row(y)
@@ -119,12 +166,14 @@ class SecureTable(ttk.Frame):
         except ValueError:
             return None
 
-        if column_index < 0 or column_index >= len(self.columns):
+        if column_index < 0 or column_index >= len(self._column_order):
             return None
+
+        column_id = self._column_order[column_index]
 
         return {
             "item_id": item_id,
-            "column_id": self.columns[column_index]["id"],
+            "column_id": column_id,
             "row": self.data[int(item_id)],
         }
 

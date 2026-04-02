@@ -1173,6 +1173,7 @@ class MainWindow:
         self.config.set("database.path", new_path)
         if self.audit_logger:
             self.audit_logger.close()
+        self.db.close()
         self.db = Database(new_path)
         self.key_storage = KeyStorage(self.db)
         self.auth_service = AuthenticationService(
@@ -1202,6 +1203,7 @@ class MainWindow:
         self.config.set("database.path", path)
         if self.audit_logger:
             self.audit_logger.close()
+        self.db.close()
         self.db = Database(path)
         self.key_storage = KeyStorage(self.db)
         self.auth_service = AuthenticationService(
@@ -1457,6 +1459,10 @@ class MainWindow:
         self._clear_system_clipboard()
         try:
             self.audit_logger.close()
+        except Exception:
+            pass
+        try:
+            self.db.close()
         except Exception:
             pass
         self.root.destroy()
