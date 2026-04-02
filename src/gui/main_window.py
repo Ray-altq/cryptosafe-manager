@@ -398,8 +398,20 @@ class MainWindow:
             return
 
         entries = self.entry_manager.get_all_entries()
+        self._all_entries = entries
+        self._update_category_filter_options()
+        self._apply_entry_filter()
+
+    def _apply_entry_filter(self):
+        raw_entries = getattr(self, "_all_entries", [])
+        query = getattr(self, "search_var", None)
+        search_text = query.get().strip() if query is not None else ""
+        category_filter = getattr(self, "category_filter_var", None)
+        selected_category = category_filter.get().strip() if category_filter is not None else "Все"
+        filtered_entries = self.entry_manager.search_entries(search_text, selected_category, raw_entries)
+
         data = []
-        for entry in entries:
+        for entry in filtered_entries:
             data.append(
                 {
                     "id": entry["id"],
@@ -415,77 +427,10 @@ class MainWindow:
                     "_search_notes": entry["notes"],
                 }
             )
-        self._all_entries = data
-        self._update_category_filter_options()
-        self._apply_entry_filter()
 
-    def _apply_entry_filter(self):
-        entries = getattr(self, "_all_entries", [])
-        query = getattr(self, "search_var", None)
-        search_text = query.get().strip().lower() if query is not None else ""
-        category_filter = getattr(self, "category_filter_var", None)
-        selected_category = category_filter.get().strip() if category_filter is not None else "Все"
-        general_terms, field_filters = self._parse_search_query(search_text)
-
-        filtered_entries = []
-        for entry in entries:
-            if selected_category not in {"", "Все"} and entry.get("category", "") != selected_category:
-                continue
-
-            if not self._matches_field_filters(entry, field_filters):
-                continue
-
-            if self._matches_general_terms(entry, general_terms):
-                display_entry = dict(entry)
-                display_entry["password"] = self._format_password_for_table(entry.get("_password_plain", ""))
-                filtered_entries.append(display_entry)
-
-        self.table.set_data(filtered_entries)
+        self.table.set_data(data)
         if hasattr(self, "search_status_var"):
-            self.search_status_var.set(f"Найдено: {len(filtered_entries)} из {len(entries)}")
-
-    def _parse_search_query(self, search_text: str):
-        field_aliases = {
-            "title": "title",
-            "user": "_search_username",
-            "username": "_search_username",
-            "category": "category",
-            "url": "_search_url",
-            "notes": "_search_notes",
-        }
-        general_terms = []
-        field_filters = []
-
-        for raw_token in search_text.split():
-            field_name, separator, raw_value = raw_token.partition(":")
-            if separator and field_name in field_aliases and raw_value:
-                field_filters.append((field_aliases[field_name], raw_value))
-            else:
-                general_terms.append(raw_token)
-
-        return general_terms, field_filters
-
-    def _matches_field_filters(self, entry, field_filters) -> bool:
-        for field_name, expected_value in field_filters:
-            field_value = str(entry.get(field_name, "")).lower()
-            if expected_value not in field_value:
-                return False
-        return True
-
-    def _matches_general_terms(self, entry, general_terms) -> bool:
-        if not general_terms:
-            return True
-
-        haystack = " ".join(
-            [
-                str(entry.get("title", "")),
-                str(entry.get("_search_username", "")),
-                str(entry.get("category", "")),
-                str(entry.get("_search_url", "")),
-                str(entry.get("_search_notes", "")),
-            ]
-        ).lower()
-        return all(term in haystack for term in general_terms)
+            self.search_status_var.set(f"Найдено: {len(filtered_entries)} из {len(raw_entries)}")
 
     def _update_category_filter_options(self):
         if not hasattr(self, "category_filter"):

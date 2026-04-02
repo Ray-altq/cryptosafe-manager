@@ -59,6 +59,28 @@ class EntryManager:
         entries = self.database.get_all_entries()
         return [self._deserialize_entry(entry) for entry in entries]
 
+    def search_entries(
+        self,
+        query: str = "",
+        category: str = "",
+        entries: Optional[List[Dict[str, Any]]] = None,
+    ) -> List[Dict[str, Any]]:
+        source_entries = entries if entries is not None else self.get_all_entries()
+        search_text = str(query or "").strip().lower()
+        selected_category = str(category or "").strip()
+        general_terms, field_filters = self._parse_search_query(search_text)
+
+        filtered_entries = []
+        for entry in source_entries:
+            if selected_category not in {"", "Все"} and str(entry.get("category", "")).strip() != selected_category:
+                continue
+            if not self._matches_field_filters(entry, field_filters):
+                continue
+            if self._matches_general_terms(entry, general_terms):
+                filtered_entries.append(entry)
+
+        return filtered_entries
+
     def update_entry(self, entry_id: int, data_dict: Dict[str, Any]) -> Dict[str, Any]:
         current_entry = self.database.get_entry(entry_id)
         if current_entry is None:
@@ -161,6 +183,52 @@ class EntryManager:
         if isinstance(raw_metadata, dict):
             return dict(raw_metadata)
         return {}
+
+    def _parse_search_query(self, search_text: str):
+        field_aliases = {
+            "title": "title",
+            "user": "username",
+            "username": "username",
+            "category": "category",
+            "url": "url",
+            "notes": "notes",
+        }
+        general_terms = []
+        field_filters = []
+
+        for raw_token in search_text.split():
+            field_name, separator, raw_value = raw_token.partition(":")
+            if separator and field_name in field_aliases and raw_value:
+                field_filters.append((field_aliases[field_name], raw_value))
+            else:
+                general_terms.append(raw_token)
+
+        return general_terms, field_filters
+
+    def _matches_field_filters(self, entry: Dict[str, Any], field_filters) -> bool:
+        for field_name, expected_value in field_filters:
+            field_value = self._entry_search_value(entry, field_name)
+            if expected_value not in field_value:
+                return False
+        return True
+
+    def _matches_general_terms(self, entry: Dict[str, Any], general_terms) -> bool:
+        if not general_terms:
+            return True
+
+        haystack = " ".join(
+            [
+                self._entry_search_value(entry, "title"),
+                self._entry_search_value(entry, "username"),
+                self._entry_search_value(entry, "category"),
+                self._entry_search_value(entry, "url"),
+                self._entry_search_value(entry, "notes"),
+            ]
+        )
+        return all(term in haystack for term in general_terms)
+
+    def _entry_search_value(self, entry: Dict[str, Any], field_name: str) -> str:
+        return str(entry.get(field_name, "")).lower()
 
     def _encrypt_payload(self, data_dict: Dict[str, Any], created_at: datetime) -> bytes:
         payload = {

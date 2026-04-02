@@ -2,6 +2,7 @@ import os
 import sys
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -230,6 +231,89 @@ class TestEntryManager(unittest.TestCase):
         self.assertEqual(updated["totp_secret"], "NB2W45DFOIZA====")
         self.assertEqual(updated["sharing_metadata"]["permission"], "write")
         self.assertEqual(updated["sharing_metadata"]["shared_with"], ["alice", "bob"])
+
+    def test_search_entries_supports_general_and_field_specific_filters(self):
+        self.manager.create_entry(
+            {
+                "title": "GitHub",
+                "username": "octocat",
+                "password": "Secret!123",
+                "url": "https://github.com",
+                "notes": "code hosting",
+                "category": "Work",
+            }
+        )
+        self.manager.create_entry(
+            {
+                "title": "Local Admin",
+                "username": "admin",
+                "password": "Secret!456",
+                "url": "http://localhost",
+                "notes": "local server",
+                "category": "Home",
+            }
+        )
+
+        general_results = self.manager.search_entries("github")
+        self.assertEqual([entry["title"] for entry in general_results], ["GitHub"])
+
+        field_results = self.manager.search_entries("title:local notes:server")
+        self.assertEqual([entry["title"] for entry in field_results], ["Local Admin"])
+
+        category_results = self.manager.search_entries("", category="Work")
+        self.assertEqual([entry["title"] for entry in category_results], ["GitHub"])
+
+    def test_concurrent_operations_preserve_entry_integrity(self):
+        def create_entry(index: int):
+            return self.manager.create_entry(
+                {
+                    "title": f"Concurrent {index}",
+                    "username": f"user{index}",
+                    "password": f"Secret!{index:03d}Aa",
+                    "url": f"https://concurrent{index}.example",
+                    "notes": f"note-{index}",
+                    "category": "Parallel",
+                }
+            )["id"]
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            created_ids = list(executor.map(create_entry, range(30)))
+
+        self.assertEqual(len(created_ids), 30)
+        self.assertEqual(len(set(created_ids)), 30)
+
+        def update_entry(entry_id: int):
+            updated = self.manager.update_entry(
+                entry_id,
+                {
+                    "password": f"Updated!{entry_id:03d}Bb",
+                    "notes": f"updated-{entry_id}",
+                },
+            )
+            return updated["id"], updated["notes"]
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            updated_pairs = list(executor.map(update_entry, created_ids[:15]))
+
+        self.assertEqual(len(updated_pairs), 15)
+
+        def read_entry(entry_id: int):
+            entry = self.manager.get_entry(entry_id)
+            return entry["id"], entry["title"], entry["category"]
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            loaded_rows = list(executor.map(read_entry, created_ids))
+
+        self.assertEqual(len(loaded_rows), 30)
+        self.assertEqual({row[0] for row in loaded_rows}, set(created_ids))
+        self.assertTrue(all(row[1].startswith("Concurrent ") for row in loaded_rows))
+        self.assertTrue(all(row[2] == "Parallel" for row in loaded_rows))
+
+        remaining_entries = self.manager.get_all_entries()
+        self.assertEqual(len(remaining_entries), 30)
+        for entry_id, notes in updated_pairs:
+            loaded = self.manager.get_entry(entry_id)
+            self.assertEqual(loaded["notes"], notes)
 
 
 if __name__ == "__main__":
