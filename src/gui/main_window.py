@@ -211,6 +211,27 @@ class MainWindow:
         )
         self.category_filter.pack(side=tk.LEFT, padx=2)
         self.category_filter.bind("<<ComboboxSelected>>", lambda _event: self._apply_entry_filter())
+        ttk.Label(toolbar, text="Дата с").pack(side=tk.LEFT, padx=(8, 4))
+        self.updated_from_var = tk.StringVar()
+        self.updated_from_var.trace_add("write", lambda *_args: self._apply_entry_filter())
+        self.updated_from_entry = ttk.Entry(toolbar, textvariable=self.updated_from_var, width=12)
+        self.updated_from_entry.pack(side=tk.LEFT, padx=2)
+        ttk.Label(toolbar, text="по").pack(side=tk.LEFT, padx=(4, 4))
+        self.updated_to_var = tk.StringVar()
+        self.updated_to_var.trace_add("write", lambda *_args: self._apply_entry_filter())
+        self.updated_to_entry = ttk.Entry(toolbar, textvariable=self.updated_to_var, width=12)
+        self.updated_to_entry.pack(side=tk.LEFT, padx=2)
+        ttk.Label(toolbar, text="Сила").pack(side=tk.LEFT, padx=(8, 4))
+        self.password_strength_filter_var = tk.StringVar(value="Все")
+        self.password_strength_filter = ttk.Combobox(
+            toolbar,
+            textvariable=self.password_strength_filter_var,
+            state="readonly",
+            width=12,
+            values=["Все", "Слабый", "Средний", "Сильный"],
+        )
+        self.password_strength_filter.pack(side=tk.LEFT, padx=2)
+        self.password_strength_filter.bind("<<ComboboxSelected>>", lambda _event: self._apply_entry_filter())
         ttk.Button(toolbar, text="Сбросить", command=self._clear_search).pack(side=tk.LEFT, padx=(2, 8))
         self.search_status_var = tk.StringVar(value="Найдено: 0")
         ttk.Label(toolbar, textvariable=self.search_status_var).pack(side=tk.LEFT, padx=(4, 0))
@@ -413,7 +434,17 @@ class MainWindow:
         search_text = query.get().strip() if query is not None else ""
         category_filter = getattr(self, "category_filter_var", None)
         selected_category = category_filter.get().strip() if category_filter is not None else "Все"
-        filtered_entries = self.entry_manager.search_entries(search_text, selected_category, raw_entries)
+        updated_from_var = getattr(self, "updated_from_var", None)
+        updated_to_var = getattr(self, "updated_to_var", None)
+        password_strength_var = getattr(self, "password_strength_filter_var", None)
+        filtered_entries = self.entry_manager.search_entries(
+            search_text,
+            selected_category,
+            raw_entries,
+            updated_from=updated_from_var.get().strip() if updated_from_var is not None else "",
+            updated_to=updated_to_var.get().strip() if updated_to_var is not None else "",
+            password_strength=password_strength_var.get().strip() if password_strength_var is not None else "",
+        )
 
         data = []
         for entry in filtered_entries:
@@ -460,6 +491,12 @@ class MainWindow:
             self.search_var.set("")
         if hasattr(self, "category_filter_var"):
             self.category_filter_var.set("Все")
+        if hasattr(self, "updated_from_var"):
+            self.updated_from_var.set("")
+        if hasattr(self, "updated_to_var"):
+            self.updated_to_var.set("")
+        if hasattr(self, "password_strength_filter_var"):
+            self.password_strength_filter_var.set("Все")
         if hasattr(self, "search_entry"):
             self.search_entry.focus_set()
 

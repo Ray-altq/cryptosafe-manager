@@ -3,6 +3,7 @@ import sys
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -280,6 +281,47 @@ class TestEntryManager(unittest.TestCase):
 
         fuzzy_field_results = self.manager.search_entries("title:githib")
         self.assertEqual([entry["title"] for entry in fuzzy_field_results], ["GitHub"])
+
+    def test_search_entries_supports_updated_range_and_password_strength_filters(self):
+        weak_entry = self.manager.create_entry(
+            {
+                "title": "Legacy Router",
+                "username": "admin",
+                "password": "123456",
+                "url": "http://router.local",
+                "notes": "old device",
+                "category": "Home",
+            }
+        )
+        strong_entry = self.manager.create_entry(
+            {
+                "title": "Primary Mail",
+                "username": "user@example.com",
+                "password": "BetterPass!2026",
+                "url": "https://mail.example.com",
+                "notes": "main inbox",
+                "category": "Work",
+            }
+        )
+
+        with self.database.transaction() as conn:
+            conn.execute(
+                "UPDATE vault_entries SET updated_at = ? WHERE id = ?",
+                (datetime(2026, 3, 30, 12, 0).isoformat(), weak_entry["id"]),
+            )
+            conn.execute(
+                "UPDATE vault_entries SET updated_at = ? WHERE id = ?",
+                (datetime(2026, 4, 1, 9, 30).isoformat(), strong_entry["id"]),
+            )
+
+        range_results = self.manager.search_entries("", updated_from="2026-04-01", updated_to="2026-04-01")
+        self.assertEqual([entry["title"] for entry in range_results], ["Primary Mail"])
+
+        weak_results = self.manager.search_entries("", password_strength="Слабый")
+        self.assertEqual([entry["title"] for entry in weak_results], ["Legacy Router"])
+
+        strong_results = self.manager.search_entries("", password_strength="Сильный")
+        self.assertEqual([entry["title"] for entry in strong_results], ["Primary Mail"])
 
     def test_concurrent_operations_preserve_entry_integrity(self):
         def create_entry(index: int):

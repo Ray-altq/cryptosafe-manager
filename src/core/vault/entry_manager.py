@@ -1,9 +1,10 @@
 import json
 import re
 from difflib import SequenceMatcher
-from datetime import datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Any, Dict, List, Optional
 
+from ..crypto.password_validator import PasswordValidator
 from ..events import Event, EventType, event_bus
 from .encryption_service import AESGCMEncryptionService, VaultEncryptionError
 
@@ -20,6 +21,7 @@ class EntryManager:
         self.database = database
         self.encryption_service = encryption_service
         self.legacy_encryption_service = legacy_encryption_service
+        self.password_validator = PasswordValidator()
 
     def create_entry(self, data_dict: Dict[str, Any]) -> Dict[str, Any]:
         normalized = self._normalize_entry_data(data_dict)
@@ -67,15 +69,25 @@ class EntryManager:
         query: str = "",
         category: str = "",
         entries: Optional[List[Dict[str, Any]]] = None,
+        updated_from: Optional[Any] = None,
+        updated_to: Optional[Any] = None,
+        password_strength: str = "",
     ) -> List[Dict[str, Any]]:
         source_entries = entries if entries is not None else self.get_all_entries()
         search_text = str(query or "").strip().lower()
         selected_category = str(category or "").strip()
+        updated_from_dt = self._normalize_filter_date(updated_from, is_end=False)
+        updated_to_dt = self._normalize_filter_date(updated_to, is_end=True)
+        selected_strength = str(password_strength or "").strip().lower()
         general_terms, field_filters = self._parse_search_query(search_text)
 
         filtered_entries = []
         for entry in source_entries:
             if selected_category not in {"", "Все"} and str(entry.get("category", "")).strip() != selected_category:
+                continue
+            if not self._matches_updated_range(entry, updated_from_dt, updated_to_dt):
+                continue
+            if not self._matches_password_strength(entry, selected_strength):
                 continue
             if not self._matches_field_filters(entry, field_filters):
                 continue
@@ -229,6 +241,63 @@ class EntryManager:
             ]
         )
         return all(self._matches_search_term(term, haystack) for term in general_terms)
+
+    def _matches_updated_range(
+        self,
+        entry: Dict[str, Any],
+        updated_from: Optional[datetime],
+        updated_to: Optional[datetime],
+    ) -> bool:
+        updated_at = entry.get("updated_at")
+        if not isinstance(updated_at, datetime):
+            return updated_from is None and updated_to is None
+        if updated_from is not None and updated_at < updated_from:
+            return False
+        if updated_to is not None and updated_at > updated_to:
+            return False
+        return True
+
+    def _matches_password_strength(self, entry: Dict[str, Any], selected_strength: str) -> bool:
+        if selected_strength in {"", "все"}:
+            return True
+
+        strength_label = self._get_password_strength_label(str(entry.get("password", "")))
+        strength_aliases = {
+            "слабый": "weak",
+            "weak": "weak",
+            "средний": "medium",
+            "medium": "medium",
+            "сильный": "strong",
+            "strong": "strong",
+        }
+        return strength_label == strength_aliases.get(selected_strength, selected_strength)
+
+    def _normalize_filter_date(self, raw_value: Any, is_end: bool) -> Optional[datetime]:
+        if isinstance(raw_value, datetime):
+            return raw_value
+        if isinstance(raw_value, date):
+            boundary = time.max if is_end else time.min
+            return datetime.combine(raw_value, boundary)
+
+        value = str(raw_value or "").strip()
+        if not value:
+            return None
+
+        try:
+            parsed_date = datetime.strptime(value, "%Y-%m-%d").date()
+        except ValueError:
+            return None
+
+        boundary = time.max if is_end else time.min
+        return datetime.combine(parsed_date, boundary)
+
+    def _get_password_strength_label(self, password: str) -> str:
+        score = self.password_validator.get_strength_score(password)
+        if score < 40:
+            return "weak"
+        if score < 70:
+            return "medium"
+        return "strong"
 
     def _entry_search_value(self, entry: Dict[str, Any], field_name: str) -> str:
         return str(entry.get(field_name, "")).lower()
