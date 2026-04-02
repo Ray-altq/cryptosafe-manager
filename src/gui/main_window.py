@@ -63,6 +63,7 @@ class MainWindow:
         self.entry_manager = EntryManager(self.db, self.vault_crypto, legacy_encryption_service=self.crypto)
         self.password_generator = PasswordGenerator()
         self.passwords_visible = False
+        self.password_visibility_overrides = {}
         self.search_history = []
         self.audit_logger = AuditLogger(self.db, event_bus)
         self._persist_runtime_settings()
@@ -83,6 +84,7 @@ class MainWindow:
             self.audit_logger = AuditLogger(self.db, event_bus)
             self._persist_runtime_settings()
             self._load_password_policy()
+            self.password_visibility_overrides = {}
             self._load_search_history()
 
         self._create_menu()
@@ -228,6 +230,7 @@ class MainWindow:
         ]
         self.table = SecureTable(main_frame, columns)
         self.table.pack(fill=tk.BOTH, expand=True)
+        self.table.bind_primary_click(self._handle_table_click)
         self._create_table_context_menu()
 
     def _create_table_context_menu(self):
@@ -398,6 +401,7 @@ class MainWindow:
             return
 
         entries = self.entry_manager.get_all_entries()
+        self.password_visibility_overrides = {}
         self._all_entries = entries
         self._update_category_filter_options()
         self._apply_entry_filter()
@@ -417,7 +421,7 @@ class MainWindow:
                     "id": entry["id"],
                     "title": entry["title"],
                     "username": self._mask_username(entry["username"]),
-                    "password": self._format_password_for_table(entry["password"]),
+                    "password": self._format_password_for_table(entry["password"], entry["id"]),
                     "category": entry["category"],
                     "url": self._format_url_for_table(entry["url"]),
                     "updated_at": entry["updated_at"].strftime("%Y-%m-%d %H:%M") if entry["updated_at"] else "",
@@ -460,9 +464,22 @@ class MainWindow:
 
     def _toggle_password_visibility(self, _event=None):
         self.passwords_visible = not self.passwords_visible
+        self.password_visibility_overrides = {}
         if hasattr(self, "password_toggle_text"):
             self.password_toggle_text.set("Скрыть пароли" if self.passwords_visible else "Показать пароли")
         self._apply_entry_filter()
+        return "break"
+
+    def _handle_table_click(self, event):
+        cell = self.table.get_cell_at(event.x, event.y)
+        if not cell or cell["column_id"] != "password":
+            return
+
+        entry_id = cell["row"]["id"]
+        current_visibility = self._is_password_visible(entry_id)
+        self.password_visibility_overrides[entry_id] = not current_visibility
+        self._apply_entry_filter()
+        self.table.ensure_row_selected_at_y(event.y)
         return "break"
 
     def _focus_search(self, _event=None):
@@ -530,12 +547,16 @@ class MainWindow:
             return username
         return f"{username[:4]}{'*' * max(4, len(username) - 4)}"
 
-    def _format_password_for_table(self, password: str) -> str:
+    def _is_password_visible(self, entry_id: int) -> bool:
+        return self.password_visibility_overrides.get(entry_id, self.passwords_visible)
+
+    def _format_password_for_table(self, password: str, entry_id: Optional[int] = None) -> str:
         if not password:
             return ""
-        if self.passwords_visible:
-            return password
-        return "•" * max(8, min(len(password), 16))
+        is_visible = self.passwords_visible if entry_id is None else self._is_password_visible(entry_id)
+        if is_visible:
+            return f"{password}  🙈"
+        return f"{'•' * max(8, min(len(password), 16))}  👁"
 
     def _format_url_for_table(self, url: str) -> str:
         if not url:

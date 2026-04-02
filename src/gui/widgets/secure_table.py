@@ -103,6 +103,31 @@ class SecureTable(ttk.Frame):
         """Привязать обработчик контекстного меню к строкам таблицы."""
         self.tree.bind("<Button-3>", callback, add="+")
 
+    def bind_primary_click(self, callback: Callable):
+        """Привязать обработчик левого клика к таблице."""
+        self.tree.bind("<Button-1>", callback, add="+")
+
+    def get_cell_at(self, x: int, y: int) -> Optional[Dict[str, Any]]:
+        """Получить информацию о ячейке по координатам внутри таблицы."""
+        item_id = self.tree.identify_row(y)
+        column_ref = self.tree.identify_column(x)
+        if not item_id or not column_ref:
+            return None
+
+        try:
+            column_index = int(column_ref.lstrip("#")) - 1
+        except ValueError:
+            return None
+
+        if column_index < 0 or column_index >= len(self.columns):
+            return None
+
+        return {
+            "item_id": item_id,
+            "column_id": self.columns[column_index]["id"],
+            "row": self.data[int(item_id)],
+        }
+
     def clear(self):
         """Очистить таблицу."""
         for item in self.tree.get_children():
