@@ -383,6 +383,7 @@ class TestMainWindowSearchAndFilter(IntegrationTestCase):
         window.table = FakeTable()
         window.search_var = FakeVar("")
         window.category_filter_var = FakeVar("Все")
+        window.tag_filter_var = FakeVar("")
         window.updated_from_var = FakeVar("")
         window.updated_to_var = FakeVar("")
         window.password_strength_filter_var = FakeVar("Все")
@@ -394,6 +395,7 @@ class TestMainWindowSearchAndFilter(IntegrationTestCase):
         window.password_visibility_overrides = {}
         window.search_history = []
         window.db = Database(self.make_db_path("search.db"))
+        self.addCleanup(window.db.close)
         key_manager = KeyManager()
         key_manager.store_key("active", b"x" * 32)
         window.entry_manager = EntryManager(window.db, AESGCMEncryptionService(key_manager))
@@ -405,6 +407,7 @@ class TestMainWindowSearchAndFilter(IntegrationTestCase):
                 "username": "octocat",
                 "password": "Secret!123",
                 "category": "Work",
+                "tags": "dev,code",
                 "url": "github.com",
                 "notes": "code hosting",
                 "updated_at": datetime(2026, 3, 31, 20, 0),
@@ -419,6 +422,7 @@ class TestMainWindowSearchAndFilter(IntegrationTestCase):
                 "username": "admin",
                 "password": "Local!456",
                 "category": "Home",
+                "tags": "infra,local",
                 "url": "localhost",
                 "notes": "local server",
                 "updated_at": datetime(2026, 3, 31, 20, 5),
@@ -450,6 +454,11 @@ class TestMainWindowSearchAndFilter(IntegrationTestCase):
         window._apply_entry_filter()
         self.assertEqual([row["id"] for row in window.table.rows], [2])
         self.assertEqual(window.search_status_var.get(), "Найдено: 1 из 2")
+
+        window.category_filter_var.set("Все")
+        window.tag_filter_var.set("dev")
+        window._apply_entry_filter()
+        self.assertEqual([row["id"] for row in window.table.rows], [1])
 
     def test_apply_entry_filter_supports_date_range_and_password_strength_filters(self):
         window = self._make_window()
@@ -523,6 +532,21 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
 
         self.assertEqual(window.root.clipboard, "Secret!123")
         self.assertEqual(window.root.update_calls, 1)
+
+    def test_suggest_usernames_prefers_existing_domain_matches_and_domain_patterns(self):
+        window = MainWindow.__new__(MainWindow)
+        window._all_entries = [
+            {"username": "deploy@example.com", "url": "https://app.example.com"},
+            {"username": "admin", "url": "http://localhost"},
+        ]
+
+        suggestions = window._suggest_usernames_for_url("https://mail.example.com/login")
+        self.assertEqual(suggestions[0], "deploy@example.com")
+        self.assertIn("admin@example.com", suggestions)
+
+        localhost_suggestions = window._suggest_usernames_for_url("localhost")
+        self.assertEqual(localhost_suggestions[0], "admin")
+        self.assertIn("root", localhost_suggestions)
 
 
 class TestMainWindowSecurityState(IntegrationTestCase):

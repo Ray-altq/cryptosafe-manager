@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 from ..crypto.password_validator import PasswordValidator
 from ..events import Event, EventType, event_bus
 from .encryption_service import AESGCMEncryptionService, VaultEncryptionError
+from .search_index import SearchIndex
 
 
 class EntryNotFoundError(Exception):
@@ -22,6 +23,8 @@ class EntryManager:
         self.encryption_service = encryption_service
         self.legacy_encryption_service = legacy_encryption_service
         self.password_validator = PasswordValidator()
+        self.search_index = SearchIndex()
+        self._search_index_ready = False
 
     def create_entry(self, data_dict: Dict[str, Any]) -> Dict[str, Any]:
         normalized = self._normalize_entry_data(data_dict)
@@ -51,6 +54,7 @@ class EntryManager:
             entry_id = cursor.lastrowid
 
         entry = self.get_entry(entry_id)
+        self._update_search_index_entry(entry)
         event_bus.publish(Event(EventType.ENTRY_ADDED, {"id": entry_id, "title": entry["title"]}))
         return entry
 
@@ -62,7 +66,10 @@ class EntryManager:
 
     def get_all_entries(self) -> List[Dict[str, Any]]:
         entries = self.database.get_all_entries()
-        return [self._deserialize_entry(entry) for entry in entries]
+        decrypted_entries = [self._deserialize_entry(entry) for entry in entries]
+        if not self._search_index_ready:
+            self._rebuild_search_index(decrypted_entries)
+        return decrypted_entries
 
     def search_entries(
         self,
@@ -72,18 +79,29 @@ class EntryManager:
         updated_from: Optional[Any] = None,
         updated_to: Optional[Any] = None,
         password_strength: str = "",
+        tag: str = "",
     ) -> List[Dict[str, Any]]:
         source_entries = entries if entries is not None else self.get_all_entries()
         search_text = str(query or "").strip().lower()
         selected_category = str(category or "").strip()
+        selected_tag = str(tag or "").strip().lower()
         updated_from_dt = self._normalize_filter_date(updated_from, is_end=False)
         updated_to_dt = self._normalize_filter_date(updated_to, is_end=True)
         selected_strength = str(password_strength or "").strip().lower()
         general_terms, field_filters = self._parse_search_query(search_text)
+        indexed_candidate_ids = None if entries is not None else self._candidate_entry_ids_for_search(
+            general_terms,
+            field_filters,
+            selected_tag,
+        )
 
         filtered_entries = []
         for entry in source_entries:
+            if indexed_candidate_ids is not None and entry.get("id") not in indexed_candidate_ids:
+                continue
             if selected_category not in {"", "Все"} and str(entry.get("category", "")).strip() != selected_category:
+                continue
+            if not self._matches_tag_filter(entry, selected_tag):
                 continue
             if not self._matches_updated_range(entry, updated_from_dt, updated_to_dt):
                 continue
@@ -141,6 +159,7 @@ class EntryManager:
             )
 
         entry = self.get_entry(entry_id)
+        self._update_search_index_entry(entry)
         event_bus.publish(Event(EventType.ENTRY_UPDATED, {"id": entry_id, "title": entry["title"]}))
         return entry
 
@@ -168,6 +187,7 @@ class EntryManager:
             conn.execute("DELETE FROM vault_entries WHERE id = ?", (entry_id,))
 
         event_bus.publish(Event(EventType.ENTRY_DELETED, {"id": entry_id, "title": title}))
+        self._remove_search_index_entry(entry_id)
 
     def _normalize_entry_data(self, data_dict: Dict[str, Any]) -> Dict[str, Any]:
         normalized = {
@@ -205,6 +225,8 @@ class EntryManager:
             "user": "username",
             "username": "username",
             "category": "category",
+            "tag": "tags",
+            "tags": "tags",
             "url": "url",
             "notes": "notes",
         }
@@ -236,11 +258,18 @@ class EntryManager:
                 self._entry_search_value(entry, "title"),
                 self._entry_search_value(entry, "username"),
                 self._entry_search_value(entry, "category"),
+                self._entry_search_value(entry, "tags"),
                 self._entry_search_value(entry, "url"),
                 self._entry_search_value(entry, "notes"),
             ]
         )
         return all(self._matches_search_term(term, haystack) for term in general_terms)
+
+    def _matches_tag_filter(self, entry: Dict[str, Any], selected_tag: str) -> bool:
+        if selected_tag in {"", "все"}:
+            return True
+        entry_tags = self._split_tags(entry.get("tags", ""))
+        return any(self._matches_search_term(selected_tag, tag) for tag in entry_tags)
 
     def _matches_updated_range(
         self,
@@ -300,6 +329,8 @@ class EntryManager:
         return "strong"
 
     def _entry_search_value(self, entry: Dict[str, Any], field_name: str) -> str:
+        if field_name == "tags":
+            return " ".join(self._split_tags(entry.get("tags", ""))).lower()
         return str(entry.get(field_name, "")).lower()
 
     def _matches_search_term(self, term: str, haystack: str) -> bool:
@@ -324,6 +355,53 @@ class EntryManager:
         if abs(len(term) - len(token)) > 2:
             return False
         return SequenceMatcher(None, term, token).ratio() >= self.FUZZY_MATCH_THRESHOLD
+
+    def _rebuild_search_index(self, entries: List[Dict[str, Any]]):
+        self.search_index.replace_scope(
+            "entries",
+            ((entry["id"], self._search_index_fields(entry)) for entry in entries),
+        )
+        self._search_index_ready = True
+
+    def _update_search_index_entry(self, entry: Dict[str, Any]):
+        self.search_index.index_document(entry["id"], self._search_index_fields(entry), scope="entries")
+        self._search_index_ready = True
+
+    def _remove_search_index_entry(self, entry_id: int):
+        self.search_index.remove_document(entry_id, scope="entries")
+
+    def _search_index_fields(self, entry: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "title": entry.get("title", ""),
+            "username": entry.get("username", ""),
+            "category": entry.get("category", ""),
+            "tags": " ".join(self._split_tags(entry.get("tags", ""))),
+            "url": entry.get("url", ""),
+            "notes": entry.get("notes", ""),
+        }
+
+    def _candidate_entry_ids_for_search(self, general_terms, field_filters, selected_tag: str) -> Optional[set[int]]:
+        candidate_ids: Optional[set[int]] = None
+
+        if selected_tag:
+            candidate_ids = self.search_index.search(selected_tag, fields=["tags"], scope="entries")
+
+        for term in general_terms:
+            current_ids = self.search_index.search(term, scope="entries")
+            if not current_ids:
+                return None
+            candidate_ids = current_ids if candidate_ids is None else candidate_ids & current_ids
+
+        for field_name, expected_value in field_filters:
+            current_ids = self.search_index.search(expected_value, fields=[field_name], scope="entries")
+            if not current_ids:
+                return None
+            candidate_ids = current_ids if candidate_ids is None else candidate_ids & current_ids
+
+        return candidate_ids
+
+    def _split_tags(self, raw_tags: Any) -> List[str]:
+        return [tag.strip().lower() for tag in str(raw_tags or "").split(",") if tag.strip()]
 
     def _encrypt_payload(self, data_dict: Dict[str, Any], created_at: datetime) -> bytes:
         payload = {

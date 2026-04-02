@@ -245,6 +245,7 @@ class TestEntryManager(unittest.TestCase):
                 "url": "https://github.com",
                 "notes": "code hosting",
                 "category": "Work",
+                "tags": ["dev", "code"],
             }
         )
         self.manager.create_entry(
@@ -255,6 +256,7 @@ class TestEntryManager(unittest.TestCase):
                 "url": "http://localhost",
                 "notes": "local server",
                 "category": "Home",
+                "tags": ["infra", "local"],
             }
         )
 
@@ -266,6 +268,12 @@ class TestEntryManager(unittest.TestCase):
 
         category_results = self.manager.search_entries("", category="Work")
         self.assertEqual([entry["title"] for entry in category_results], ["GitHub"])
+
+        tag_results = self.manager.search_entries("tags:infra")
+        self.assertEqual([entry["title"] for entry in tag_results], ["Local Admin"])
+
+        explicit_tag_filter_results = self.manager.search_entries("", tag="dev")
+        self.assertEqual([entry["title"] for entry in explicit_tag_filter_results], ["GitHub"])
 
     def test_search_entries_supports_fuzzy_matching_for_typos(self):
         self.manager.create_entry(

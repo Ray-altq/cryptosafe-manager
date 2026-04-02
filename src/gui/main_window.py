@@ -191,6 +191,8 @@ class MainWindow:
 
         actions_row = ttk.Frame(toolbar)
         actions_row.pack(fill=tk.X, pady=(0, 4))
+        search_row = ttk.Frame(toolbar)
+        search_row.pack(fill=tk.X, pady=(0, 4))
         filters_row = ttk.Frame(toolbar)
         filters_row.pack(fill=tk.X)
 
@@ -205,27 +207,35 @@ class MainWindow:
         )
         ttk.Button(actions_row, text="Заблокировать", command=self._lock_vault).pack(side=tk.RIGHT, padx=2)
 
-        ttk.Label(filters_row, text="Поиск").pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Label(search_row, text="Поиск").pack(side=tk.LEFT, padx=(0, 4))
         self.search_var = tk.StringVar()
         self.search_var.trace_add("write", lambda *_args: self._apply_entry_filter())
-        self.search_entry = ttk.Entry(filters_row, textvariable=self.search_var, width=24)
+        self.search_entry = ttk.Entry(search_row, textvariable=self.search_var, width=28)
         self.search_entry.pack(side=tk.LEFT, padx=2)
         self.search_entry.bind("<Escape>", lambda _event: self._clear_search())
         self.search_entry.bind("<Return>", self._commit_search_query)
         self.search_entry.bind("<FocusOut>", self._remember_current_search)
-        self.search_history_button = ttk.Button(filters_row, text="История", command=self._show_search_history_menu)
+        self.search_history_button = ttk.Button(search_row, text="История", command=self._show_search_history_menu)
         self.search_history_button.pack(side=tk.LEFT, padx=(2, 4))
-        ttk.Label(filters_row, text="Категория").pack(side=tk.LEFT, padx=(8, 4))
+        ttk.Button(search_row, text="Сбросить", command=self._clear_search).pack(side=tk.LEFT, padx=(2, 8))
+        self.search_status_var = tk.StringVar(value="Найдено: 0")
+        ttk.Label(search_row, textvariable=self.search_status_var).pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Label(filters_row, text="Категория").pack(side=tk.LEFT, padx=(0, 4))
         self.category_filter_var = tk.StringVar(value="Все")
         self.category_filter = ttk.Combobox(
             filters_row,
             textvariable=self.category_filter_var,
             state="readonly",
-            width=14,
+            width=12,
             values=["Все"],
         )
         self.category_filter.pack(side=tk.LEFT, padx=2)
         self.category_filter.bind("<<ComboboxSelected>>", lambda _event: self._apply_entry_filter())
+        ttk.Label(filters_row, text="Тег").pack(side=tk.LEFT, padx=(8, 4))
+        self.tag_filter_var = tk.StringVar()
+        self.tag_filter_var.trace_add("write", lambda *_args: self._apply_entry_filter())
+        self.tag_filter_entry = ttk.Entry(filters_row, textvariable=self.tag_filter_var, width=12)
+        self.tag_filter_entry.pack(side=tk.LEFT, padx=2)
         ttk.Label(filters_row, text="Дата с").pack(side=tk.LEFT, padx=(8, 4))
         self.updated_from_var = tk.StringVar()
         self.updated_from_var.trace_add("write", lambda *_args: self._apply_entry_filter())
@@ -247,9 +257,6 @@ class MainWindow:
         )
         self.password_strength_filter.pack(side=tk.LEFT, padx=2)
         self.password_strength_filter.bind("<<ComboboxSelected>>", lambda _event: self._apply_entry_filter())
-        ttk.Button(filters_row, text="Сбросить", command=self._clear_search).pack(side=tk.LEFT, padx=(2, 8))
-        self.search_status_var = tk.StringVar(value="Найдено: 0")
-        ttk.Label(filters_row, textvariable=self.search_status_var).pack(side=tk.LEFT, padx=(4, 0))
         self._update_search_history_button()
 
     def _create_main_area(self):
@@ -527,6 +534,7 @@ class MainWindow:
         search_text = query.get().strip() if query is not None else ""
         category_filter = getattr(self, "category_filter_var", None)
         selected_category = category_filter.get().strip() if category_filter is not None else "Все"
+        tag_filter_var = getattr(self, "tag_filter_var", None)
         updated_from_var = getattr(self, "updated_from_var", None)
         updated_to_var = getattr(self, "updated_to_var", None)
         password_strength_var = getattr(self, "password_strength_filter_var", None)
@@ -537,6 +545,7 @@ class MainWindow:
             updated_from=updated_from_var.get().strip() if updated_from_var is not None else "",
             updated_to=updated_to_var.get().strip() if updated_to_var is not None else "",
             password_strength=password_strength_var.get().strip() if password_strength_var is not None else "",
+            tag=tag_filter_var.get().strip() if tag_filter_var is not None else "",
         )
 
         data = []
@@ -584,6 +593,8 @@ class MainWindow:
             self.search_var.set("")
         if hasattr(self, "category_filter_var"):
             self.category_filter_var.set("Все")
+        if hasattr(self, "tag_filter_var"):
+            self.tag_filter_var.set("")
         if hasattr(self, "updated_from_var"):
             self.updated_from_var.set("")
         if hasattr(self, "updated_to_var"):
@@ -712,7 +723,7 @@ class MainWindow:
     def _build_entry_dialog(self, title: str, entry=None):
         dialog = tk.Toplevel(self.root)
         dialog.title(title)
-        dialog.geometry("520x460")
+        dialog.geometry("520x560")
         dialog.transient(self.root)
         dialog.grab_set()
 
@@ -723,6 +734,13 @@ class MainWindow:
         ttk.Label(dialog, text="Имя пользователя").pack(anchor=tk.W, padx=8, pady=(8, 2))
         username_entry = ttk.Entry(dialog, width=60)
         username_entry.pack(fill=tk.X, padx=8, pady=2)
+        ttk.Label(dialog, text="Подсказка логина").pack(anchor=tk.W, padx=8, pady=(4, 2))
+        username_suggestion = ttk.Combobox(dialog, state="readonly", width=57, values=[])
+        username_suggestion.pack(fill=tk.X, padx=8, pady=(0, 2))
+        username_suggestion.bind(
+            "<<ComboboxSelected>>",
+            lambda _event: self._apply_username_suggestion(username_entry, username_suggestion.get()),
+        )
 
         ttk.Label(dialog, text="Пароль").pack(anchor=tk.W, padx=8, pady=(8, 2))
         password_entry = PasswordEntry(dialog, width=50)
@@ -745,6 +763,9 @@ class MainWindow:
         ttk.Label(dialog, text="Категория").pack(anchor=tk.W, padx=8, pady=(8, 2))
         category_entry = ttk.Entry(dialog, width=60)
         category_entry.pack(fill=tk.X, padx=8, pady=2)
+        ttk.Label(dialog, text="Теги").pack(anchor=tk.W, padx=8, pady=(8, 2))
+        tags_entry = ttk.Entry(dialog, width=60)
+        tags_entry.pack(fill=tk.X, padx=8, pady=2)
 
         ttk.Label(dialog, text="Заметки").pack(anchor=tk.W, padx=8, pady=(8, 2))
         notes_text = tk.Text(dialog, height=7, width=60)
@@ -756,6 +777,7 @@ class MainWindow:
             password_entry.set(entry["password"])
             url_entry.insert(0, entry["url"])
             category_entry.insert(0, entry["category"])
+            tags_entry.insert(0, entry.get("tags", ""))
             notes_text.insert("1.0", entry["notes"])
 
         password_entry.entry.bind(
@@ -764,8 +786,19 @@ class MainWindow:
         )
         url_entry.bind("<KeyRelease>", lambda _event: self._schedule_favicon_preview(dialog, url_entry))
         url_entry.bind("<FocusOut>", lambda _event: self._schedule_favicon_preview(dialog, url_entry))
+        url_entry.bind(
+            "<KeyRelease>",
+            lambda _event: self._schedule_username_suggestions(dialog, url_entry, username_entry),
+            add="+",
+        )
+        url_entry.bind(
+            "<FocusOut>",
+            lambda _event: self._schedule_username_suggestions(dialog, url_entry, username_entry),
+            add="+",
+        )
         self._update_password_strength(password_entry, strength_var)
         dialog.category_entry = category_entry
+        dialog.tags_entry = tags_entry
         dialog.strength_var = strength_var
         dialog.password_was_generated = False
         dialog.favicon_status = favicon_status
@@ -773,7 +806,10 @@ class MainWindow:
         dialog.favicon_image = None
         dialog.favicon_after_id = None
         dialog.favicon_request_token = None
+        dialog.username_suggestion = username_suggestion
+        dialog.username_suggestion_after_id = None
         self._schedule_favicon_preview(dialog, url_entry, delay_ms=0)
+        self._schedule_username_suggestions(dialog, url_entry, username_entry, delay_ms=0)
         return dialog, title_entry, username_entry, password_entry, url_entry, notes_text
 
     def _collect_entry_form(self, title_entry, username_entry, password_entry, url_entry, notes_text):
@@ -784,6 +820,8 @@ class MainWindow:
         url = url_entry.get().strip()
         category_entry = getattr(title_entry.master, "category_entry", None)
         category = category_entry.get().strip() if category_entry is not None else ""
+        tags_entry = getattr(title_entry.master, "tags_entry", None)
+        tags = tags_entry.get().strip() if tags_entry is not None else ""
         notes = notes_text.get("1.0", tk.END).strip()
 
         if not title or not password:
@@ -797,8 +835,106 @@ class MainWindow:
                 "Слишком слабый пароль. Усильте его вручную или воспользуйтесь генератором паролей."
             )
 
-        self._last_entry_category = category
-        return title, username, password, url, notes
+        return title, username, password, url, notes, category, tags
+
+    def _schedule_username_suggestions(self, dialog, url_entry, username_entry, delay_ms: int = 250):
+        if not hasattr(dialog, "username_suggestion"):
+            return
+        after_id = getattr(dialog, "username_suggestion_after_id", None)
+        if after_id:
+            try:
+                dialog.after_cancel(after_id)
+            except tk.TclError:
+                pass
+
+        def run_suggestions():
+            dialog.username_suggestion_after_id = None
+            self._update_username_suggestions(dialog, url_entry.get().strip(), username_entry)
+
+        dialog.username_suggestion_after_id = dialog.after(delay_ms, run_suggestions)
+
+    def _update_username_suggestions(self, dialog, raw_url: str, username_entry):
+        suggestion_widget = getattr(dialog, "username_suggestion", None)
+        if suggestion_widget is None:
+            return
+
+        suggestions = self._suggest_usernames_for_url(raw_url)
+        suggestion_widget.configure(values=suggestions)
+        if suggestions:
+            suggestion_widget.set(suggestions[0])
+            if not username_entry.get().strip() and self._has_existing_domain_username(raw_url):
+                self._apply_username_suggestion(username_entry, suggestions[0])
+        else:
+            suggestion_widget.set("")
+
+    def _apply_username_suggestion(self, username_entry, suggestion: str):
+        value = str(suggestion or "").strip()
+        if not value:
+            return
+        username_entry.delete(0, tk.END)
+        username_entry.insert(0, value)
+
+    def _suggest_usernames_for_url(self, raw_url: str):
+        host = self._extract_normalized_host(raw_url)
+        if not host:
+            return []
+
+        base_domain = self._extract_base_domain(host)
+        suggestions = []
+
+        for entry in getattr(self, "_all_entries", []):
+            entry_host = self._extract_normalized_host(entry.get("url", ""))
+            if not entry_host:
+                continue
+            if entry_host == host or self._extract_base_domain(entry_host) == base_domain:
+                username = str(entry.get("username", "")).strip()
+                if username and username not in suggestions:
+                    suggestions.append(username)
+
+        if host == "localhost" or host.endswith(".local"):
+            generated = ["admin", "root", "user"]
+        else:
+            generated = [
+                f"admin@{base_domain}",
+                f"support@{base_domain}",
+                f"info@{base_domain}",
+                base_domain.split(".", 1)[0],
+                "admin",
+            ]
+
+        for item in generated:
+            if item and item not in suggestions:
+                suggestions.append(item)
+        return suggestions[:5]
+
+    def _has_existing_domain_username(self, raw_url: str) -> bool:
+        host = self._extract_normalized_host(raw_url)
+        if not host:
+            return False
+        base_domain = self._extract_base_domain(host)
+        for entry in getattr(self, "_all_entries", []):
+            entry_host = self._extract_normalized_host(entry.get("url", ""))
+            if entry_host and (entry_host == host or self._extract_base_domain(entry_host) == base_domain):
+                if str(entry.get("username", "")).strip():
+                    return True
+        return False
+
+    def _extract_normalized_host(self, raw_url: str) -> str:
+        value = str(raw_url or "").strip()
+        if not value:
+            return ""
+        candidate = value if "://" in value else f"https://{value}"
+        parsed = urlparse(candidate)
+        host = (parsed.netloc or parsed.path).strip().lower()
+        if ":" in host:
+            host = host.split(":", 1)[0]
+        return host
+
+    def _extract_base_domain(self, host: str) -> str:
+        parts = [part for part in str(host or "").split(".") if part]
+        if len(parts) >= 2:
+            return ".".join(parts[-2:])
+        return str(host or "")
 
     def _schedule_favicon_preview(self, dialog, url_entry, delay_ms: int = 250):
         if not hasattr(dialog, "favicon_status"):
@@ -1244,7 +1380,7 @@ class MainWindow:
 
         def save():
             try:
-                title, username, password, url, notes = self._collect_entry_form(
+                title, username, password, url, notes, category, tags = self._collect_entry_form(
                     title_entry, username_entry, password_entry, url_entry, notes_text
                 )
             except ValueError as error:
@@ -1257,9 +1393,9 @@ class MainWindow:
                     "username": username,
                     "password": password,
                     "url": url,
-                    "category": getattr(self, "_last_entry_category", ""),
+                    "category": category,
                     "notes": notes,
-                    "tags": "",
+                    "tags": tags,
                 }
             )
             dialog.destroy()
@@ -1279,7 +1415,7 @@ class MainWindow:
 
         def save():
             try:
-                title, username, password, url, notes = self._collect_entry_form(
+                title, username, password, url, notes, category, tags = self._collect_entry_form(
                     title_entry, username_entry, password_entry, url_entry, notes_text
                 )
             except ValueError as error:
@@ -1293,8 +1429,9 @@ class MainWindow:
                     "username": username,
                     "password": password,
                     "url": url,
-                    "category": getattr(self, "_last_entry_category", ""),
+                    "category": category,
                     "notes": notes,
+                    "tags": tags,
                 },
             )
             dialog.destroy()
