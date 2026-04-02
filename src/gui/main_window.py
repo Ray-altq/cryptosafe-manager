@@ -3,6 +3,7 @@ import queue
 import threading
 import tkinter as tk
 from datetime import datetime
+from typing import Optional
 from urllib.parse import urlparse
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
