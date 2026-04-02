@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 import unittest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -92,6 +93,37 @@ class TestPasswordGenerator(unittest.TestCase):
 
         self.assertEqual(len(generated_passwords), len(set(generated_passwords)))
         self.assertEqual(generator.recent_passwords(), generated_passwords[-20:])
+
+    def test_generate_10000_passwords_without_duplicates_and_with_required_strength(self):
+        generator = PasswordGenerator(history_limit=20)
+        options = PasswordGeneratorOptions(
+            length=20,
+            include_uppercase=True,
+            include_lowercase=True,
+            include_digits=True,
+            include_symbols=True,
+            exclude_ambiguous=True,
+        )
+        generated_passwords = []
+
+        started_at = time.perf_counter()
+        for _ in range(10000):
+            password = generator.generate(options)
+            generated_passwords.append(password)
+
+            self.assertEqual(len(password), 20)
+            self.assertTrue(any(char.isupper() for char in password))
+            self.assertTrue(any(char.islower() for char in password))
+            self.assertTrue(any(char.isdigit() for char in password))
+            self.assertTrue(any(char in SYMBOLS for char in password))
+            self.assertTrue(all(char not in AMBIGUOUS_CHARACTERS for char in password))
+            self.assertTrue(generator.is_strong_enough(password))
+
+        elapsed = time.perf_counter() - started_at
+
+        self.assertEqual(len(generated_passwords), len(set(generated_passwords)))
+        self.assertEqual(generator.recent_passwords(), generated_passwords[-20:])
+        self.assertLess(elapsed, 15.0)
 
 
 if __name__ == "__main__":

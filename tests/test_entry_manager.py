@@ -1,6 +1,8 @@
 import os
 import sys
 import tempfile
+import time
+import tracemalloc
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -24,6 +26,7 @@ class TestEntryManager(unittest.TestCase):
 
     def tearDown(self):
         self.key_manager.clear_key()
+        self.database.close()
         try:
             os.unlink(self.temp_file.name)
         except OSError:
@@ -374,6 +377,55 @@ class TestEntryManager(unittest.TestCase):
         for entry_id, notes in updated_pairs:
             loaded = self.manager.get_entry(entry_id)
             self.assertEqual(loaded["notes"], notes)
+
+    def test_loading_1000_entries_meets_time_and_memory_requirements(self):
+        for index in range(1000):
+            self.manager.create_entry(
+                {
+                    "title": f"Entry {index}",
+                    "username": f"user{index}@example.com",
+                    "password": f"Strong!{index:04d}AaBb",
+                    "url": f"https://example{index}.com",
+                    "notes": f"note-{index} github portal",
+                    "category": "Work" if index % 2 == 0 else "Personal",
+                    "tags": [f"tag-{index % 10}", "bulk"],
+                }
+            )
+
+        tracemalloc.start()
+        started_at = time.perf_counter()
+        entries = self.manager.get_all_entries()
+        elapsed = time.perf_counter() - started_at
+        _current, peak_memory = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+
+        self.assertEqual(len(entries), 1000)
+        self.assertLess(elapsed, 2.0)
+        self.assertLess(peak_memory, 50 * 1024 * 1024)
+
+    def test_searching_across_1000_entries_meets_response_budget(self):
+        for index in range(1000):
+            self.manager.create_entry(
+                {
+                    "title": f"Portal {index}",
+                    "username": f"user{index}@example.com",
+                    "password": f"Strong!{index:04d}AaBb",
+                    "url": f"https://service{index}.example.com",
+                    "notes": "github integration" if index % 2 == 0 else "local access",
+                    "category": "Work" if index % 2 == 0 else "Personal",
+                    "tags": [f"tag-{index % 10}", "bulk"],
+                }
+            )
+
+        entries = self.manager.get_all_entries()
+
+        started_at = time.perf_counter()
+        results = self.manager.search_entries("github", entries=entries)
+        elapsed = time.perf_counter() - started_at
+
+        self.assertEqual(len(entries), 1000)
+        self.assertEqual(len(results), 500)
+        self.assertLess(elapsed, 0.2)
 
 
 if __name__ == "__main__":

@@ -127,6 +127,14 @@ class FakeKeyManager:
         pass
 
 
+class FakeKeyStorage:
+    def is_cache_expired(self):
+        return False
+
+    def touch_cached_key(self, _timeout_seconds):
+        pass
+
+
 class FakeStateManager:
     def __init__(self):
         self.clipboard_cleared = False
@@ -599,6 +607,7 @@ class TestMainWindowSecurityState(IntegrationTestCase):
         window.auth_service = FakeAuthService()
         window.auth_service.authenticated = True
         window.config = Config()
+        window.key_storage = FakeKeyStorage()
         window.state = FakeStateManager()
         window.state.application_active = False
         window.state.clipboard_timer = object()
