@@ -101,12 +101,16 @@ class FakeAuthService:
     def __init__(self):
         self.logged_out = False
         self.authenticated = False
+        self.initialized = True
 
     def logout(self):
         self.logged_out = True
 
     def is_authenticated(self):
         return self.authenticated
+
+    def is_initialized(self):
+        return self.initialized
 
     def get_active_key(self):
         return b"x" * 32
@@ -126,9 +130,26 @@ class FakeKeyManager:
 class FakeStateManager:
     def __init__(self):
         self.clipboard_cleared = False
+        self.application_active = True
+        self.clipboard_content = None
+        self.clipboard_timer = None
 
     def clear_clipboard(self):
         self.clipboard_cleared = True
+        self.clipboard_content = None
+        self.clipboard_timer = None
+
+    def set_application_active(self, is_active):
+        self.application_active = is_active
+
+    def get_clipboard(self):
+        return self.clipboard_content
+
+    def should_auto_lock(self):
+        return False
+
+    def should_expire_key_cache(self):
+        return False
 
 
 class FakeRoot:
@@ -136,6 +157,9 @@ class FakeRoot:
         self.protocols = {}
         self.destroyed = False
         self.clipboard = ""
+        self.update_calls = 0
+        self.after_calls = []
+        self.window_state = "normal"
 
     def title(self, _value):
         pass
@@ -153,10 +177,11 @@ class FakeRoot:
         pass
 
     def after(self, _delay, _callback):
-        pass
+        self.after_calls.append((_delay, _callback))
+        return len(self.after_calls)
 
     def state(self):
-        return "normal"
+        return self.window_state
 
     def focus_displayof(self):
         return object()
@@ -166,6 +191,9 @@ class FakeRoot:
 
     def clipboard_append(self, value):
         self.clipboard = value
+
+    def update(self):
+        self.update_calls += 1
 
     def config(self, **_kwargs):
         pass
@@ -479,6 +507,15 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
 
         self.assertIsNone(window._build_favicon_request(""))
 
+    def test_set_system_clipboard_flushes_event_loop(self):
+        window = MainWindow.__new__(MainWindow)
+        window.root = FakeRoot()
+
+        window._set_system_clipboard("Secret!123")
+
+        self.assertEqual(window.root.clipboard, "Secret!123")
+        self.assertEqual(window.root.update_calls, 1)
+
 
 class TestMainWindowSecurityState(IntegrationTestCase):
     def test_lock_vault_clears_decrypted_entries_and_password_visibility_state(self):
@@ -510,6 +547,72 @@ class TestMainWindowSecurityState(IntegrationTestCase):
         self.assertEqual(window.table.rows, [])
         self.assertEqual(window._status_value, "Заблокировано")
         self.assertFalse(require_login.called)
+
+    def test_lock_if_window_minimized_locks_authenticated_session(self):
+        window = MainWindow.__new__(MainWindow)
+        window.auth_service = FakeAuthService()
+        window.auth_service.authenticated = True
+        window.config = Config()
+        window.state = FakeStateManager()
+        window.root = FakeRoot()
+        window.root.window_state = "iconic"
+        window._lock_vault = lambda show_dialog=True: setattr(window, "_locked_with", show_dialog)
+
+        window._lock_if_window_minimized()
+
+        self.assertFalse(window.state.application_active)
+        self.assertEqual(window._locked_with, False)
+
+    def test_prompt_unlock_if_needed_reloads_entries_after_restore(self):
+        window = MainWindow.__new__(MainWindow)
+        window.auth_service = FakeAuthService()
+        window.auth_service.authenticated = False
+        window.key_manager = FakeKeyManager()
+        window._initial_login_completed = True
+        window._login_prompt_active = False
+        window._require_login = lambda initial=False: setattr(window.auth_service, "authenticated", True)
+        window._load_entries = lambda: setattr(window, "_entries_reloaded", True)
+
+        window._prompt_unlock_if_needed()
+
+        self.assertTrue(window.auth_service.authenticated)
+        self.assertTrue(window._entries_reloaded)
+
+    def test_focus_loss_lock_is_delayed_while_temporary_clipboard_is_active(self):
+        window = MainWindow.__new__(MainWindow)
+        window.auth_service = FakeAuthService()
+        window.auth_service.authenticated = True
+        window.config = Config()
+        window.state = FakeStateManager()
+        window.state.application_active = False
+        window.state.clipboard_content = "Secret!123"
+        window.root = FakeRoot()
+        window.root.focus_displayof = lambda: None
+        window._lock_vault = lambda show_dialog=True: setattr(window, "_locked_with", show_dialog)
+
+        window._lock_if_application_inactive()
+
+        self.assertFalse(hasattr(window, "_locked_with"))
+
+    def test_clipboard_expiration_locks_unfocused_window_when_focus_lock_is_enabled(self):
+        window = MainWindow.__new__(MainWindow)
+        window.auth_service = FakeAuthService()
+        window.auth_service.authenticated = True
+        window.config = Config()
+        window.state = FakeStateManager()
+        window.state.application_active = False
+        window.state.clipboard_timer = object()
+        window.state.clipboard_content = None
+        window.root = FakeRoot()
+        window.clipboard_label = FakeLabel()
+        window._lock_vault = lambda show_dialog=True: setattr(window, "_locked_with", show_dialog)
+        window._clear_system_clipboard = lambda: setattr(window, "_clipboard_cleared", True)
+
+        with patch("src.gui.main_window.event_bus.publish"):
+            window._check_security_timers()
+
+        self.assertTrue(window._clipboard_cleared)
+        self.assertEqual(window._locked_with, False)
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@ import os
 import queue
 import threading
 import tkinter as tk
+import ctypes
 from base64 import b64encode
 from datetime import datetime
 from typing import Optional
@@ -70,6 +71,8 @@ class MainWindow:
         self.password_visibility_overrides = {}
         self.search_history = []
         self._favicon_cache = {}
+        self._login_prompt_active = False
+        self._initial_login_completed = False
         self.audit_logger = AuditLogger(self.db, event_bus)
         self._persist_runtime_settings()
         self._load_password_policy()
@@ -100,6 +103,7 @@ class MainWindow:
         self._setup_activity_tracking()
 
         self._require_login(initial=True)
+        self._initial_login_completed = True
         if not self.auth_service.is_authenticated():
             return
         self._load_entries()
@@ -185,61 +189,67 @@ class MainWindow:
         toolbar = ttk.Frame(self.root)
         toolbar.pack(side=tk.TOP, fill=tk.X, padx=6, pady=6)
 
-        ttk.Button(toolbar, text="Добавить", command=self.add_entry).pack(side=tk.LEFT, padx=2)
-        ttk.Button(toolbar, text="Изменить", command=self.edit_entry).pack(side=tk.LEFT, padx=2)
-        ttk.Button(toolbar, text="Удалить", command=self.delete_entry).pack(side=tk.LEFT, padx=2)
-        ttk.Button(toolbar, text="Показать пароль", command=self.show_selected_password).pack(side=tk.LEFT, padx=10)
-        ttk.Button(toolbar, text="Скопировать пароль", command=self.copy_selected_password).pack(side=tk.LEFT, padx=2)
+        actions_row = ttk.Frame(toolbar)
+        actions_row.pack(fill=tk.X, pady=(0, 4))
+        filters_row = ttk.Frame(toolbar)
+        filters_row.pack(fill=tk.X)
+
+        ttk.Button(actions_row, text="Добавить", command=self.add_entry).pack(side=tk.LEFT, padx=2)
+        ttk.Button(actions_row, text="Изменить", command=self.edit_entry).pack(side=tk.LEFT, padx=2)
+        ttk.Button(actions_row, text="Удалить", command=self.delete_entry).pack(side=tk.LEFT, padx=2)
+        ttk.Button(actions_row, text="Показать пароль", command=self.show_selected_password).pack(side=tk.LEFT, padx=(10, 2))
+        ttk.Button(actions_row, text="Скопировать пароль", command=self.copy_selected_password).pack(side=tk.LEFT, padx=2)
         self.password_toggle_text = tk.StringVar(value="Показать пароли")
-        ttk.Button(toolbar, textvariable=self.password_toggle_text, command=self._toggle_password_visibility).pack(
+        ttk.Button(actions_row, textvariable=self.password_toggle_text, command=self._toggle_password_visibility).pack(
             side=tk.LEFT, padx=(8, 2)
         )
-        ttk.Label(toolbar, text="Поиск").pack(side=tk.LEFT, padx=(16, 4))
+        ttk.Button(actions_row, text="Заблокировать", command=self._lock_vault).pack(side=tk.RIGHT, padx=2)
+
+        ttk.Label(filters_row, text="Поиск").pack(side=tk.LEFT, padx=(0, 4))
         self.search_var = tk.StringVar()
         self.search_var.trace_add("write", lambda *_args: self._apply_entry_filter())
-        self.search_entry = ttk.Entry(toolbar, textvariable=self.search_var, width=28)
+        self.search_entry = ttk.Entry(filters_row, textvariable=self.search_var, width=24)
         self.search_entry.pack(side=tk.LEFT, padx=2)
         self.search_entry.bind("<Escape>", lambda _event: self._clear_search())
         self.search_entry.bind("<Return>", self._commit_search_query)
         self.search_entry.bind("<FocusOut>", self._remember_current_search)
-        self.search_history_button = ttk.Button(toolbar, text="История", command=self._show_search_history_menu)
+        self.search_history_button = ttk.Button(filters_row, text="История", command=self._show_search_history_menu)
         self.search_history_button.pack(side=tk.LEFT, padx=(2, 4))
-        ttk.Label(toolbar, text="Категория").pack(side=tk.LEFT, padx=(8, 4))
+        ttk.Label(filters_row, text="Категория").pack(side=tk.LEFT, padx=(8, 4))
         self.category_filter_var = tk.StringVar(value="Все")
         self.category_filter = ttk.Combobox(
-            toolbar,
+            filters_row,
             textvariable=self.category_filter_var,
             state="readonly",
-            width=18,
+            width=14,
             values=["Все"],
         )
         self.category_filter.pack(side=tk.LEFT, padx=2)
         self.category_filter.bind("<<ComboboxSelected>>", lambda _event: self._apply_entry_filter())
-        ttk.Label(toolbar, text="Дата с").pack(side=tk.LEFT, padx=(8, 4))
+        ttk.Label(filters_row, text="Дата с").pack(side=tk.LEFT, padx=(8, 4))
         self.updated_from_var = tk.StringVar()
         self.updated_from_var.trace_add("write", lambda *_args: self._apply_entry_filter())
-        self.updated_from_entry = ttk.Entry(toolbar, textvariable=self.updated_from_var, width=12)
+        self.updated_from_entry = ttk.Entry(filters_row, textvariable=self.updated_from_var, width=10)
         self.updated_from_entry.pack(side=tk.LEFT, padx=2)
-        ttk.Label(toolbar, text="по").pack(side=tk.LEFT, padx=(4, 4))
+        ttk.Label(filters_row, text="по").pack(side=tk.LEFT, padx=(4, 4))
         self.updated_to_var = tk.StringVar()
         self.updated_to_var.trace_add("write", lambda *_args: self._apply_entry_filter())
-        self.updated_to_entry = ttk.Entry(toolbar, textvariable=self.updated_to_var, width=12)
+        self.updated_to_entry = ttk.Entry(filters_row, textvariable=self.updated_to_var, width=10)
         self.updated_to_entry.pack(side=tk.LEFT, padx=2)
-        ttk.Label(toolbar, text="Сила").pack(side=tk.LEFT, padx=(8, 4))
+        ttk.Label(filters_row, text="Сила").pack(side=tk.LEFT, padx=(8, 4))
         self.password_strength_filter_var = tk.StringVar(value="Все")
         self.password_strength_filter = ttk.Combobox(
-            toolbar,
+            filters_row,
             textvariable=self.password_strength_filter_var,
             state="readonly",
-            width=12,
+            width=10,
             values=["Все", "Слабый", "Средний", "Сильный"],
         )
         self.password_strength_filter.pack(side=tk.LEFT, padx=2)
         self.password_strength_filter.bind("<<ComboboxSelected>>", lambda _event: self._apply_entry_filter())
-        ttk.Button(toolbar, text="Сбросить", command=self._clear_search).pack(side=tk.LEFT, padx=(2, 8))
+        ttk.Button(filters_row, text="Сбросить", command=self._clear_search).pack(side=tk.LEFT, padx=(2, 8))
         self.search_status_var = tk.StringVar(value="Найдено: 0")
-        ttk.Label(toolbar, textvariable=self.search_status_var).pack(side=tk.LEFT, padx=(4, 0))
-        ttk.Button(toolbar, text="Заблокировать", command=self._lock_vault).pack(side=tk.RIGHT, padx=2)
+        ttk.Label(filters_row, textvariable=self.search_status_var).pack(side=tk.LEFT, padx=(4, 0))
         self._update_search_history_button()
 
     def _create_main_area(self):
@@ -318,11 +328,10 @@ class MainWindow:
         if self.state.should_auto_lock() or self.state.should_expire_key_cache() or self.key_storage.is_cache_expired():
             self._lock_vault(show_dialog=False)
         if self.state.clipboard_timer and self.state.get_clipboard() is None:
-            try:
-                self.root.clipboard_clear()
-            except tk.TclError:
-                pass
+            self._clear_system_clipboard()
             event_bus.publish(Event(EventType.CLIPBOARD_CLEARED, {}))
+            if self._should_lock_after_clipboard_clear():
+                self._lock_vault(show_dialog=False)
         self._refresh_clipboard_status()
 
     def _on_activity(self, _event=None):
@@ -338,17 +347,13 @@ class MainWindow:
         self.root.after(150, self._lock_if_application_inactive)
 
     def _on_unmap(self, _event=None):
-        try:
-            is_iconic = self.root.state() == "iconic"
-        except tk.TclError:
-            is_iconic = False
-        if is_iconic:
-            self.state.set_application_active(False)
-            if self.config.get("security.lock_on_minimize", True) and self.auth_service.is_authenticated():
-                self._lock_vault(show_dialog=False)
+        self.state.set_application_active(False)
+        self.root.after(100, self._lock_if_window_minimized)
 
     def _on_map(self, _event=None):
         self.state.set_application_active(True)
+        if getattr(self, "_initial_login_completed", False):
+            self.root.after(100, self._prompt_unlock_if_needed)
 
     def _lock_if_application_inactive(self):
         try:
@@ -362,7 +367,44 @@ class MainWindow:
 
         self.state.set_application_active(False)
         if self.config.get("security.lock_on_focus_loss", True) and self.auth_service.is_authenticated():
+            if self.state.get_clipboard() is not None:
+                return
             self._lock_vault(show_dialog=False)
+
+    def _lock_if_window_minimized(self):
+        try:
+            window_state = self.root.state()
+        except tk.TclError:
+            return
+
+        if window_state not in {"iconic", "withdrawn"}:
+            return
+
+        self.state.set_application_active(False)
+        if self.config.get("security.lock_on_minimize", True) and self.auth_service.is_authenticated():
+            self._lock_vault(show_dialog=False)
+
+    def _prompt_unlock_if_needed(self):
+        if self._login_prompt_active:
+            return
+        if not getattr(self, "_initial_login_completed", False):
+            return
+        if not self.auth_service.is_initialized():
+            return
+        if self.auth_service.is_authenticated():
+            return
+
+        self._require_login()
+        if self.auth_service.is_authenticated():
+            self.key_manager.store_key("active", self.auth_service.get_active_key())
+            self._load_entries()
+
+    def _should_lock_after_clipboard_clear(self) -> bool:
+        if self.state.application_active:
+            return False
+        if not self.config.get("security.lock_on_focus_loss", True):
+            return False
+        return self.auth_service.is_authenticated()
 
     def _set_status(self, text: str):
         self.status_label.config(text=text)
@@ -383,7 +425,40 @@ class MainWindow:
             status_text = "Буфер обмена: содержит пароль"
         self.clipboard_label.config(text=status_text)
 
+    def _set_system_clipboard(self, value: str):
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(value)
+            self.root.update()
+        except tk.TclError:
+            pass
+
+    def _clear_system_clipboard(self):
+        try:
+            self.root.clipboard_clear()
+            self.root.update()
+        except tk.TclError:
+            pass
+        self._clear_windows_clipboard()
+
+    def _clear_windows_clipboard(self):
+        if os.name != "nt":
+            return
+
+        try:
+            user32 = ctypes.windll.user32
+        except AttributeError:
+            return
+
+        if not user32.OpenClipboard(None):
+            return
+        try:
+            user32.EmptyClipboard()
+        finally:
+            user32.CloseClipboard()
+
     def _require_login(self, initial: bool = False):
+        self._login_prompt_active = True
         while not self.auth_service.is_authenticated():
             password = simpledialog.askstring(
                 "Мастер-пароль",
@@ -394,6 +469,7 @@ class MainWindow:
             if password is None:
                 if initial:
                     self._on_close()
+                self._login_prompt_active = False
                 return
 
             try:
@@ -417,6 +493,7 @@ class MainWindow:
         self._set_status("Разблокировано")
         self.state.update_activity()
         self.key_storage.touch_cached_key(self.state.key_cache_timeout)
+        self._login_prompt_active = False
 
     def _load_entries(self):
         if not self.auth_service.is_authenticated():
@@ -1251,8 +1328,7 @@ class MainWindow:
             messagebox.showwarning("Предупреждение", "Сначала выберите запись.")
             return
         password = self._decrypt_password(entry.encrypted_password)
-        self.root.clipboard_clear()
-        self.root.clipboard_append(password)
+        self._set_system_clipboard(password)
         self.state.set_clipboard(password, self.config.get("security.clipboard_timeout", 30))
         event_bus.publish(Event(EventType.CLIPBOARD_COPIED, {"entry_id": entry.id}))
         self._on_activity()
@@ -1360,10 +1436,7 @@ class MainWindow:
         self.auth_service.logout()
         self.key_manager.clear_key()
         self.state.clear_clipboard()
-        try:
-            self.root.clipboard_clear()
-        except tk.TclError:
-            pass
+        self._clear_system_clipboard()
         event_bus.publish(Event(EventType.VAULT_LOCKED, {}))
         self._clear_sensitive_view_state()
         self._set_status("Заблокировано")
@@ -1381,10 +1454,7 @@ class MainWindow:
         self.key_manager.clear_key()
         self.state.clear_clipboard()
         self._clear_sensitive_view_state()
-        try:
-            self.root.clipboard_clear()
-        except tk.TclError:
-            pass
+        self._clear_system_clipboard()
         try:
             self.audit_logger.close()
         except Exception:
