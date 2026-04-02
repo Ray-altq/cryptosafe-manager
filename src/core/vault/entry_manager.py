@@ -1,4 +1,6 @@
 import json
+import re
+from difflib import SequenceMatcher
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
@@ -12,6 +14,7 @@ class EntryNotFoundError(Exception):
 
 class EntryManager:
     PAYLOAD_VERSION = 1
+    FUZZY_MATCH_THRESHOLD = 0.78
 
     def __init__(self, database, encryption_service: AESGCMEncryptionService, legacy_encryption_service=None):  #класс для управления записями в хранилище, который взаимодействует с базой данных и службой шифрования для создания, получения, обновления и удаления записей
         self.database = database
@@ -208,7 +211,7 @@ class EntryManager:
     def _matches_field_filters(self, entry: Dict[str, Any], field_filters) -> bool:
         for field_name, expected_value in field_filters:
             field_value = self._entry_search_value(entry, field_name)
-            if expected_value not in field_value:
+            if not self._matches_search_term(expected_value, field_value):
                 return False
         return True
 
@@ -225,10 +228,33 @@ class EntryManager:
                 self._entry_search_value(entry, "notes"),
             ]
         )
-        return all(term in haystack for term in general_terms)
+        return all(self._matches_search_term(term, haystack) for term in general_terms)
 
     def _entry_search_value(self, entry: Dict[str, Any], field_name: str) -> str:
         return str(entry.get(field_name, "")).lower()
+
+    def _matches_search_term(self, term: str, haystack: str) -> bool:
+        normalized_term = str(term or "").strip().lower()
+        if not normalized_term:
+            return True
+
+        normalized_haystack = str(haystack or "").lower()
+        if normalized_term in normalized_haystack:
+            return True
+
+        if len(normalized_term) < 4:
+            return False
+
+        tokens = self._tokenize_search_text(normalized_haystack)
+        return any(self._is_fuzzy_match(normalized_term, token) for token in tokens)
+
+    def _tokenize_search_text(self, value: str) -> List[str]:
+        return [token for token in re.split(r"[^a-zа-я0-9_@.-]+", value.lower()) if token]
+
+    def _is_fuzzy_match(self, term: str, token: str) -> bool:
+        if abs(len(term) - len(token)) > 2:
+            return False
+        return SequenceMatcher(None, term, token).ratio() >= self.FUZZY_MATCH_THRESHOLD
 
     def _encrypt_payload(self, data_dict: Dict[str, Any], created_at: datetime) -> bytes:
         payload = {

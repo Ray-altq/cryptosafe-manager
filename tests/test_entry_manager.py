@@ -263,6 +263,24 @@ class TestEntryManager(unittest.TestCase):
         category_results = self.manager.search_entries("", category="Work")
         self.assertEqual([entry["title"] for entry in category_results], ["GitHub"])
 
+    def test_search_entries_supports_fuzzy_matching_for_typos(self):
+        self.manager.create_entry(
+            {
+                "title": "GitHub",
+                "username": "octocat",
+                "password": "Secret!123",
+                "url": "https://github.com",
+                "notes": "repository hosting",
+                "category": "Work",
+            }
+        )
+
+        fuzzy_title_results = self.manager.search_entries("githib")
+        self.assertEqual([entry["title"] for entry in fuzzy_title_results], ["GitHub"])
+
+        fuzzy_field_results = self.manager.search_entries("title:githib")
+        self.assertEqual([entry["title"] for entry in fuzzy_field_results], ["GitHub"])
+
     def test_concurrent_operations_preserve_entry_integrity(self):
         def create_entry(index: int):
             return self.manager.create_entry(
