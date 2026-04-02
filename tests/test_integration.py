@@ -97,6 +97,40 @@ class FakeTable:
         return None
 
 
+class FakeAuthService:
+    def __init__(self):
+        self.logged_out = False
+        self.authenticated = False
+
+    def logout(self):
+        self.logged_out = True
+
+    def is_authenticated(self):
+        return self.authenticated
+
+    def get_active_key(self):
+        return b"x" * 32
+
+
+class FakeKeyManager:
+    def __init__(self):
+        self.cleared = False
+
+    def clear_key(self):
+        self.cleared = True
+
+    def store_key(self, _key_type, _value):
+        pass
+
+
+class FakeStateManager:
+    def __init__(self):
+        self.clipboard_cleared = False
+
+    def clear_clipboard(self):
+        self.clipboard_cleared = True
+
+
 class FakeRoot:
     def __init__(self):
         self.protocols = {}
@@ -429,6 +463,38 @@ class TestMainWindowSearchAndFilter(IntegrationTestCase):
         self.assertEqual(window.search_var.get(), "query-5")
         self.assertTrue(window.search_entry.focused)
         self.assertEqual(window.search_entry.selection, (0, tk.END))
+
+
+class TestMainWindowSecurityState(IntegrationTestCase):
+    def test_lock_vault_clears_decrypted_entries_and_password_visibility_state(self):
+        window = MainWindow.__new__(MainWindow)
+        window.auth_service = FakeAuthService()
+        window.key_manager = FakeKeyManager()
+        window.state = FakeStateManager()
+        window.root = FakeRoot()
+        window.table = FakeTable()
+        window.table.set_data([{"id": 1, "title": "Visible"}])
+        window.password_toggle_text = FakeVar("Скрыть пароли")
+        window.search_status_var = FakeVar("Найдено: 1")
+        window.passwords_visible = True
+        window.password_visibility_overrides = {1: True}
+        window._all_entries = [{"id": 1, "password": "Secret!123"}]
+        window._set_status = lambda value: setattr(window, "_status_value", value)
+
+        with patch("src.gui.main_window.event_bus.publish"), patch.object(MainWindow, "_require_login") as require_login:
+            window._lock_vault(show_dialog=False)
+
+        self.assertTrue(window.auth_service.logged_out)
+        self.assertTrue(window.key_manager.cleared)
+        self.assertTrue(window.state.clipboard_cleared)
+        self.assertEqual(window._all_entries, [])
+        self.assertFalse(window.passwords_visible)
+        self.assertEqual(window.password_visibility_overrides, {})
+        self.assertEqual(window.password_toggle_text.get(), "Показать пароли")
+        self.assertEqual(window.search_status_var.get(), "Найдено: 0")
+        self.assertEqual(window.table.rows, [])
+        self.assertEqual(window._status_value, "Заблокировано")
+        self.assertFalse(require_login.called)
 
 
 if __name__ == "__main__":

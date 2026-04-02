@@ -428,6 +428,18 @@ class MainWindow:
         self._update_category_filter_options()
         self._apply_entry_filter()
 
+    def _clear_sensitive_view_state(self):
+        # Очищаем расшифрованные данные и состояние показа паролей при блокировке.
+        self._all_entries = []
+        self.passwords_visible = False
+        self.password_visibility_overrides = {}
+        if hasattr(self, "table"):
+            self.table.clear()
+        if hasattr(self, "password_toggle_text"):
+            self.password_toggle_text.set("Показать пароли")
+        if hasattr(self, "search_status_var"):
+            self.search_status_var.set("Найдено: 0")
+
     def _apply_entry_filter(self):
         raw_entries = getattr(self, "_all_entries", [])
         query = getattr(self, "search_var", None)
@@ -1230,7 +1242,7 @@ class MainWindow:
         except tk.TclError:
             pass
         event_bus.publish(Event(EventType.VAULT_LOCKED, {}))
-        self.table.clear()
+        self._clear_sensitive_view_state()
         self._set_status("Заблокировано")
         if show_dialog:
             self._require_login()
@@ -1245,6 +1257,7 @@ class MainWindow:
             pass
         self.key_manager.clear_key()
         self.state.clear_clipboard()
+        self._clear_sensitive_view_state()
         try:
             self.root.clipboard_clear()
         except tk.TclError:
