@@ -386,7 +386,7 @@ class TestMainWindowSearchAndFilter(IntegrationTestCase):
 
         window.updated_from_var.set("2026-03-31")
         window.updated_to_var.set("2026-03-31")
-        window.password_strength_filter_var.set("Сильный")
+        window.password_strength_filter_var.set("Средний")
         window._apply_entry_filter()
         self.assertEqual([row["id"] for row in window.table.rows], [1, 2])
 
