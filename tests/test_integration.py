@@ -1,6 +1,7 @@
 import os
 import sys
 import tempfile
+import tkinter as tk
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -13,6 +14,8 @@ from src.core.crypto.key_derivation import KeyDerivation
 from src.core.crypto.key_storage import KeyStorage
 from src.core.crypto.placeholder import AES256Placeholder
 from src.core.crypto.password_validator import PasswordValidator
+from src.core.key_manager import KeyManager
+from src.core.vault import AESGCMEncryptionService, EntryManager
 from src.database.db import Database
 from src.database.models import VaultEntry
 from src.gui.main_window import MainWindow
@@ -316,6 +319,9 @@ class TestMainWindowSearchAndFilter(IntegrationTestCase):
         window.passwords_visible = False
         window.search_history = []
         window.db = Database(self.make_db_path("search.db"))
+        key_manager = KeyManager()
+        key_manager.store_key("active", b"x" * 32)
+        window.entry_manager = EntryManager(window.db, AESGCMEncryptionService(key_manager))
         window.root = FakeRoot()
         window._all_entries = [
             {
