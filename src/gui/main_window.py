@@ -1773,6 +1773,68 @@ class MainWindow:
             return False
         return True
 
+    def _parse_audit_details(self, details: str) -> dict[str, str]:
+        parsed_details: dict[str, str] = {}
+        for chunk in str(details or "").split(", "):
+            if "=" not in chunk:
+                continue
+            key, value = chunk.split("=", 1)
+            parsed_details[str(key).strip()] = str(value).strip()
+        return parsed_details
+
+    def _format_audit_action(self, action: str) -> str:
+        action_labels = {
+            "entry_added": "Добавление записи",
+            "entry_updated": "Обновление записи",
+            "entry_deleted": "Удаление записи",
+            "user_logged_in": "Вход в vault",
+            "user_logged_out": "Выход из vault",
+            "clipboard_copied": "Копирование в буфер обмена",
+            "clipboard_cleared": "Очистка буфера обмена",
+            "vault_locked": "Блокировка vault",
+            "vault_unlocked": "Разблокировка vault",
+        }
+        return action_labels.get(str(action or "").strip(), str(action or ""))
+
+    def _format_audit_details(self, action: str, details: str) -> str:
+        parsed_details = self._parse_audit_details(details)
+        if not parsed_details:
+            return str(details or "")
+
+        if action == "clipboard_copied":
+            detail_parts = []
+            if parsed_details.get("data_type"):
+                detail_parts.append(f"тип={self._format_clipboard_data_type(parsed_details['data_type'])}")
+            if parsed_details.get("entry_id") not in {None, "", "None"}:
+                detail_parts.append(f"entry={parsed_details['entry_id']}")
+            if parsed_details.get("source_label"):
+                detail_parts.append(f"источник={parsed_details['source_label']}")
+            if parsed_details.get("timeout_seconds"):
+                detail_parts.append(f"таймаут={parsed_details['timeout_seconds']} сек")
+            return ", ".join(detail_parts)
+
+        if action == "clipboard_cleared":
+            clear_reason = parsed_details.get("reason", "")
+            detail_parts = [self._format_clipboard_clear_reason(clear_reason)]
+            if parsed_details.get("data_type"):
+                detail_parts.append(f"тип={self._format_clipboard_data_type(parsed_details['data_type'])}")
+            if parsed_details.get("entry_id") not in {None, "", "None"}:
+                detail_parts.append(f"entry={parsed_details['entry_id']}")
+            if parsed_details.get("observed_length"):
+                detail_parts.append(f"наблюдаемая длина={parsed_details['observed_length']}")
+            return " | ".join(part for part in detail_parts if part)
+
+        return str(details or "")
+
+    def _format_audit_log_line(self, log) -> str:
+        timestamp = log.timestamp.strftime("%Y-%m-%d %H:%M:%S") if log.timestamp else ""
+        action_text = self._format_audit_action(log.action)
+        details_text = self._format_audit_details(log.action, log.details)
+        entry_text = f"entry={log.entry_id}" if log.entry_id is not None else "entry=-"
+        if details_text:
+            return f"{timestamp} | {action_text} | {entry_text} | {details_text}"
+        return f"{timestamp} | {action_text} | {entry_text}"
+
     def show_logs(self):
         dialog = tk.Toplevel(self.root)
         dialog.title("Журнал аудита")
@@ -1780,8 +1842,7 @@ class MainWindow:
         text = tk.Text(dialog, wrap=tk.NONE)
         text.pack(fill=tk.BOTH, expand=True)
         for log in self.db.get_audit_logs():
-            timestamp = log.timestamp.strftime("%Y-%m-%d %H:%M:%S") if log.timestamp else ""
-            text.insert("end", f"{timestamp} | {log.action} | entry={log.entry_id} | {log.details}\n")
+            text.insert("end", f"{self._format_audit_log_line(log)}\n")
         text.config(state=tk.DISABLED)
 
     def show_settings(self):

@@ -799,6 +799,48 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
         self.assertIn("root", localhost_suggestions)
 
 
+    def test_format_audit_log_line_for_clipboard_copy_is_human_readable(self):
+        window = MainWindow.__new__(MainWindow)
+
+        class AuditLogRecord:
+            action = "clipboard_copied"
+            timestamp = datetime(2026, 4, 7, 12, 30, 0)
+            entry_id = 7
+            details = "entry_id=7, data_type=password, timeout_seconds=30, source_label=GitHub"
+
+        line = window._format_audit_log_line(AuditLogRecord())
+
+        self.assertIn("Копирование в буфер обмена", line)
+        self.assertIn("entry=7", line)
+        self.assertIn("тип=пароль", line)
+        self.assertIn("источник=GitHub", line)
+        self.assertIn("таймаут=30 сек", line)
+
+    def test_format_audit_log_line_for_clipboard_clear_expands_reason(self):
+        window = MainWindow.__new__(MainWindow)
+
+        class AuditLogRecord:
+            action = "clipboard_cleared"
+            timestamp = datetime(2026, 4, 7, 12, 30, 1)
+            entry_id = 7
+            details = "reason=monitor_warning, entry_id=7, data_type=password, observed_length=21"
+
+        line = window._format_audit_log_line(AuditLogRecord())
+
+        self.assertIn("Очистка буфера обмена", line)
+        self.assertIn("Буфер обмена очищен из-за подозрительной активности", line)
+        self.assertIn("тип=пароль", line)
+        self.assertIn("наблюдаемая длина=21", line)
+
+    def test_format_clipboard_clear_reason_handles_manual_and_replacement(self):
+        window = MainWindow.__new__(MainWindow)
+
+        self.assertEqual(window._format_clipboard_clear_reason("manual"), "Буфер обмена очищен вручную")
+        self.assertEqual(
+            window._format_clipboard_clear_reason("replacement"),
+            "Буфер обмена заменён новым содержимым",
+        )
+
 class TestMainWindowSecurityState(IntegrationTestCase):
     def test_lock_vault_clears_decrypted_entries_and_password_visibility_state(self):
         window = MainWindow.__new__(MainWindow)
