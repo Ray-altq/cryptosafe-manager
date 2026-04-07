@@ -19,7 +19,7 @@ from src.core.key_manager import KeyManager
 from src.core.vault import AESGCMEncryptionService, EntryManager
 from src.database.db import Database
 from src.database.models import VaultEntry
-from src.gui.main_window import MainWindow
+from src.gui.main_window import EntryView, MainWindow
 from src.gui.setup_wizard import SetupWizard
 
 
@@ -95,6 +95,14 @@ class FakeTable:
 
     def get_selected(self):
         return None
+
+
+class FakeClipboardService:
+    def __init__(self):
+        self.calls = []
+
+    def copy_text(self, value, **kwargs):
+        self.calls.append((value, kwargs))
 
 
 class FakeAuthService:
@@ -532,6 +540,53 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
 
         self.assertEqual(window.root.clipboard, "Secret!123")
         self.assertEqual(window.root.update_calls, 1)
+
+    def test_copy_selected_username_uses_clipboard_service(self):
+        window = MainWindow.__new__(MainWindow)
+        window.clipboard_service = FakeClipboardService()
+        window._on_activity = lambda: setattr(window, "_activity_called", True)
+        entry = EntryView(
+            {
+                "id": 10,
+                "title": "Example",
+                "username": "demo-user",
+                "encrypted_password": "Secret!123",
+                "url": "",
+                "notes": "",
+            }
+        )
+        window._get_single_selected_entry = lambda _action: entry
+
+        window.copy_selected_username()
+
+        self.assertEqual(window.clipboard_service.calls[0][0], "demo-user")
+        self.assertEqual(window.clipboard_service.calls[0][1]["data_type"], "username")
+        self.assertTrue(window._activity_called)
+
+    def test_copy_selected_all_uses_clipboard_service(self):
+        window = MainWindow.__new__(MainWindow)
+        window.clipboard_service = FakeClipboardService()
+        window._on_activity = lambda: setattr(window, "_activity_called", True)
+        window._decrypt_password = lambda _value: "Secret!123"
+        entry = EntryView(
+            {
+                "id": 11,
+                "title": "Example",
+                "username": "demo-user",
+                "encrypted_password": "encrypted",
+                "url": "https://example.com",
+                "notes": "note",
+            }
+        )
+        window._get_single_selected_entry = lambda _action: entry
+
+        window.copy_selected_all()
+
+        copied_text = window.clipboard_service.calls[0][0]
+        self.assertIn("Title: Example", copied_text)
+        self.assertIn("Password: Secret!123", copied_text)
+        self.assertEqual(window.clipboard_service.calls[0][1]["data_type"], "entry")
+        self.assertTrue(window._activity_called)
 
     def test_suggest_usernames_prefers_existing_domain_matches_and_domain_patterns(self):
         window = MainWindow.__new__(MainWindow)

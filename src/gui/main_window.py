@@ -1,4 +1,4 @@
-import os
+﻿import os
 import queue
 import threading
 import tkinter as tk
@@ -185,6 +185,9 @@ class MainWindow:
         entry_menu.add_command(label="Показать пароль", command=self.show_selected_password)
         entry_menu.add_command(label="Скопировать пароль", command=self.copy_selected_password)
 
+        entry_menu.add_command(label="Copy Username", command=self.copy_selected_username)
+        entry_menu.add_command(label="Copy All", command=self.copy_selected_all)
+
         security_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Безопасность", menu=security_menu)
         security_menu.add_command(label="Сменить мастер-пароль", command=self.change_master_password)
@@ -212,6 +215,8 @@ class MainWindow:
         ttk.Button(actions_row, text="Показать пароль", command=self.show_selected_password).pack(side=tk.LEFT, padx=(10, 2))
         ttk.Button(actions_row, text="Скопировать пароль", command=self.copy_selected_password).pack(side=tk.LEFT, padx=2)
         self.password_toggle_text = tk.StringVar(value="Показать пароли")
+        ttk.Button(actions_row, text="Copy Username", command=self.copy_selected_username).pack(side=tk.LEFT, padx=2)
+        ttk.Button(actions_row, text="Copy All", command=self.copy_selected_all).pack(side=tk.LEFT, padx=2)
         ttk.Button(actions_row, textvariable=self.password_toggle_text, command=self._toggle_password_visibility).pack(
             side=tk.LEFT, padx=(8, 2)
         )
@@ -293,6 +298,8 @@ class MainWindow:
         self.table_menu.add_separator()
         self.table_menu.add_command(label="Показать пароль", command=self.show_selected_password)
         self.table_menu.add_command(label="Скопировать пароль", command=self.copy_selected_password)
+        self.table_menu.add_command(label="Copy Username", command=self.copy_selected_username)
+        self.table_menu.add_command(label="Copy All", command=self.copy_selected_all)
         self.table.bind_context_menu(self._show_table_context_menu)
 
     def _show_table_context_menu(self, event):
@@ -1496,9 +1503,66 @@ class MainWindow:
                 source_label=entry.title,
             )
         except ClipboardAccessError as error:
-            messagebox.showerror("РћС€РёР±РєР° Р±СѓС„РµСЂР° РѕР±РјРµРЅР°", str(error))
+            messagebox.showerror("Ошибка буфера обмена", str(error))
             return
         self._on_activity()
+
+    def copy_selected_username(self):
+        entry = self._get_single_selected_entry("Copy Username")
+        if not entry:
+            messagebox.showwarning("Предупреждение", "Сначала выберите запись.")
+            return
+        username = str(entry.get("username", "")).strip()
+        if not self._copy_entry_to_clipboard(
+            username,
+            data_type="username",
+            entry=entry,
+            action_name="Copy Username",
+        ):
+            return
+        self._on_activity()
+
+    def copy_selected_all(self):
+        entry = self._get_single_selected_entry("Copy All")
+        if not entry:
+            messagebox.showwarning("Предупреждение", "Сначала выберите запись.")
+            return
+
+        payload_parts = [
+            f"Title: {entry.title}",
+            f"Username: {entry.username}",
+            f"Password: {self._decrypt_password(entry.encrypted_password)}",
+        ]
+        if entry.get("url"):
+            payload_parts.append(f"URL: {entry.url}")
+        if entry.get("notes"):
+            payload_parts.append(f"Notes: {entry.notes}")
+
+        if not self._copy_entry_to_clipboard(
+            "\n".join(payload_parts),
+            data_type="entry",
+            entry=entry,
+            action_name="Copy All",
+        ):
+            return
+        self._on_activity()
+
+    def _copy_entry_to_clipboard(self, value: str, *, data_type: str, entry, action_name: str) -> bool:
+        normalized_value = str(value or "")
+        if not normalized_value.strip():
+            messagebox.showwarning("Предупреждение", f"Для действия «{action_name}» нет данных.")
+            return False
+        try:
+            self.clipboard_service.copy_text(
+                normalized_value,
+                data_type=data_type,
+                source_entry_id=entry.id,
+                source_label=entry.title,
+            )
+        except ClipboardAccessError as error:
+            messagebox.showerror("Ошибка буфера обмена", str(error))
+            return False
+        return True
 
     def show_logs(self):
         dialog = tk.Toplevel(self.root)
