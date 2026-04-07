@@ -449,6 +449,7 @@ class MainWindow:
         self._clipboard_status_snapshot = status
         self._sync_clipboard_row_marker(previous_status, status)
         self._update_clipboard_notice(previous_status, status)
+        self._handle_clipboard_security_alert(previous_status, status)
         self._refresh_clipboard_status(status)
 
     def _refresh_clipboard_status(self, status: Optional[ClipboardStatus] = None):
@@ -473,6 +474,8 @@ class MainWindow:
             details_parts.append(f"Просмотр: {status.preview}")
         if status.suspicious_activity:
             details_parts.append("Обнаружена подозрительная активность")
+        if status.blocked_future_copies:
+            details_parts.append("Дальнейшее копирование временно заблокировано")
         elif status.warning_emitted and status.remaining_seconds > 0:
             details_parts.append(f"Скоро очистка: {status.remaining_seconds} сек")
         if hasattr(self, "clipboard_details_label"):
@@ -593,6 +596,29 @@ class MainWindow:
             return bool(self.clipboard_service.get_settings().get("notifications_enabled", True))
         return bool(self.config.get("security.clipboard_notifications", True))
 
+    def _format_clipboard_clear_reason(self, clear_reason: str) -> str:
+        normalized_reason = str(clear_reason or "").strip().lower()
+        reason_map = {
+            "monitor_warning": "Буфер обмена очищен из-за подозрительной активности",
+            "timeout": "Буфер обмена очищен автоматически",
+            "vault_locked": "Буфер обмена очищен при блокировке vault",
+            "replacement": "Буфер обмена заменён новым содержимым",
+            "manual": "Буфер обмена очищен вручную",
+        }
+        return reason_map.get(normalized_reason, "Буфер обмена очищен")
+
+    def _build_clipboard_security_alert_text(self, status: ClipboardStatus) -> str:
+        message_parts = ["Обнаружена подозрительная активность вокруг буфера обмена."]
+        if status.source_label:
+            message_parts.append(f"Источник: {status.source_label}.")
+        if status.preview:
+            message_parts.append(f"Текущее содержимое: {status.preview}.")
+        if status.blocked_future_copies:
+            message_parts.append("Следующие операции копирования временно заблокированы настройками безопасности.")
+        else:
+            message_parts.append("Время жизни содержимого буфера обмена сокращено до минимума.")
+        return " ".join(message_parts)
+
     def _update_clipboard_notice(self, previous_status: ClipboardStatus, status: ClipboardStatus):
         if not hasattr(self, "clipboard_notice_label"):
             return
@@ -609,18 +635,22 @@ class MainWindow:
             clear_reason = ""
             if hasattr(self, "clipboard_service"):
                 clear_reason = self.clipboard_service.get_last_clear_reason() or ""
-            if clear_reason == "monitor_warning":
-                notice_text = "Буфер обмена очищен из-за подозрительной активности"
-            elif clear_reason == "timeout":
-                notice_text = "Буфер обмена очищен автоматически"
-            elif clear_reason == "vault_locked":
-                notice_text = "Буфер обмена очищен при блокировке vault"
-            else:
-                notice_text = "Буфер обмена очищен"
+            notice_text = self._format_clipboard_clear_reason(clear_reason)
         elif status.blocked_future_copies and not previous_status.blocked_future_copies:
             notice_text = "Копирование временно заблокировано настройками безопасности"
 
         self.clipboard_notice_label.config(text=notice_text)
+
+    def _handle_clipboard_security_alert(self, previous_status: ClipboardStatus, status: ClipboardStatus):
+        if not self._clipboard_notifications_enabled():
+            return
+        if not status.suspicious_activity or previous_status.suspicious_activity:
+            return
+        messagebox.showwarning(
+            "Безопасность буфера обмена",
+            self._build_clipboard_security_alert_text(status),
+            parent=self.root if hasattr(self, "root") else None,
+        )
 
     def _sync_clipboard_row_marker(self, previous_status: ClipboardStatus, status: ClipboardStatus):
         previous_entry_id = previous_status.source_entry_id if previous_status.active else None

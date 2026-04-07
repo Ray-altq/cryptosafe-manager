@@ -727,6 +727,62 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
         window._update_clipboard_notice(previous_status, current_status)
         self.assertEqual(window.clipboard_notice_label.text, "Скопировано: пароль")
 
+    def test_update_clipboard_notice_shows_monitor_warning_reason(self):
+        window = MainWindow.__new__(MainWindow)
+        window.clipboard_service = FakeClipboardService()
+        window.clipboard_notice_label = FakeLabel()
+        window.clipboard_service.last_clear_reason = "monitor_warning"
+
+        previous_status = ClipboardStatus(active=True, data_type="password")
+        current_status = ClipboardStatus(active=False)
+
+        window._update_clipboard_notice(previous_status, current_status)
+
+        self.assertEqual(window.clipboard_notice_label.text, "Буфер обмена очищен из-за подозрительной активности")
+
+    def test_handle_clipboard_security_alert_shows_warning_once_per_transition(self):
+        window = MainWindow.__new__(MainWindow)
+        window.root = FakeRoot()
+        window.clipboard_service = FakeClipboardService()
+        previous_status = ClipboardStatus(active=True, suspicious_activity=False)
+        current_status = ClipboardStatus(
+            active=True,
+            data_type="password",
+            source_label="GitHub",
+            preview="Sec*****",
+            suspicious_activity=True,
+            blocked_future_copies=True,
+        )
+
+        with patch("src.gui.main_window.messagebox.showwarning") as showwarning:
+            window._handle_clipboard_security_alert(previous_status, current_status)
+            window._handle_clipboard_security_alert(current_status, current_status)
+
+        self.assertEqual(showwarning.call_count, 1)
+        warning_text = showwarning.call_args.args[1]
+        self.assertIn("подозрительная активность", warning_text)
+        self.assertIn("GitHub", warning_text)
+        self.assertIn("временно заблокированы", warning_text)
+
+    def test_refresh_clipboard_status_shows_copy_block_message(self):
+        window = MainWindow.__new__(MainWindow)
+        window.clipboard_service = FakeClipboardService()
+        window.clipboard_label = FakeLabel()
+        window.clipboard_details_label = FakeLabel()
+        window.clipboard_service.status = ClipboardStatus(
+            active=True,
+            data_type="entry",
+            source_label="Example",
+            preview="E******e",
+            suspicious_activity=True,
+            blocked_future_copies=True,
+        )
+
+        window._refresh_clipboard_status()
+
+        self.assertIn("Обнаружена подозрительная активность", window.clipboard_details_label.text)
+        self.assertIn("Дальнейшее копирование временно заблокировано", window.clipboard_details_label.text)
+
     def test_suggest_usernames_prefers_existing_domain_matches_and_domain_patterns(self):
         window = MainWindow.__new__(MainWindow)
         window._all_entries = [
