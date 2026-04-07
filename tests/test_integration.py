@@ -103,6 +103,14 @@ class FakeClipboardService:
         self.calls = []
         self.status = ClipboardStatus(active=False)
         self.last_clear_reason = None
+        self.settings = {
+            "timeout_seconds": 30,
+            "notifications_enabled": True,
+            "security_level": "basic",
+            "blocked_on_suspicious": False,
+            "preset": "standard",
+        }
+        self.configure_calls = []
 
     def copy_text(self, value, **kwargs):
         self.calls.append((value, kwargs))
@@ -112,6 +120,13 @@ class FakeClipboardService:
 
     def get_last_clear_reason(self):
         return self.last_clear_reason
+
+    def get_settings(self):
+        return dict(self.settings)
+
+    def configure(self, **kwargs):
+        self.configure_calls.append(kwargs)
+        self.settings.update(kwargs)
 
 
 class FakeAuthService:
@@ -655,6 +670,62 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
 
         self.assertEqual(marked_title, "Example [В буфере]")
         self.assertEqual(plain_title, "Another")
+
+    def test_detect_clipboard_preset_returns_matching_profile_or_custom(self):
+        window = MainWindow.__new__(MainWindow)
+
+        secure_preset = window._detect_clipboard_preset(
+            timeout_seconds=15,
+            notifications_enabled=True,
+            security_level="advanced",
+            blocked_on_suspicious=False,
+        )
+        custom_preset = window._detect_clipboard_preset(
+            timeout_seconds=42,
+            notifications_enabled=False,
+            security_level="advanced",
+            blocked_on_suspicious=True,
+        )
+
+        self.assertEqual(secure_preset, "secure")
+        self.assertEqual(custom_preset, "custom")
+
+    def test_apply_clipboard_preset_to_vars_updates_all_fields(self):
+        window = MainWindow.__new__(MainWindow)
+        timeout_var = FakeVar(30)
+        notifications_var = FakeVar(True)
+        security_level_var = FakeVar("basic")
+        blocked_var = FakeVar(False)
+
+        applied = window._apply_clipboard_preset_to_vars(
+            "public_computer",
+            timeout_var=timeout_var,
+            notifications_var=notifications_var,
+            security_level_var=security_level_var,
+            blocked_var=blocked_var,
+        )
+
+        self.assertTrue(applied)
+        self.assertEqual(timeout_var.get(), 5)
+        self.assertTrue(notifications_var.get())
+        self.assertEqual(security_level_var.get(), "paranoid")
+        self.assertTrue(blocked_var.get())
+
+    def test_update_clipboard_notice_respects_notification_setting(self):
+        window = MainWindow.__new__(MainWindow)
+        window.clipboard_service = FakeClipboardService()
+        window.clipboard_notice_label = FakeLabel()
+
+        previous_status = ClipboardStatus(active=False)
+        current_status = ClipboardStatus(active=True, data_type="password", remaining_seconds=30)
+
+        window.clipboard_service.settings["notifications_enabled"] = False
+        window._update_clipboard_notice(previous_status, current_status)
+        self.assertEqual(window.clipboard_notice_label.text, "")
+
+        window.clipboard_service.settings["notifications_enabled"] = True
+        window._update_clipboard_notice(previous_status, current_status)
+        self.assertEqual(window.clipboard_notice_label.text, "Скопировано: пароль")
 
     def test_suggest_usernames_prefers_existing_domain_matches_and_domain_patterns(self):
         window = MainWindow.__new__(MainWindow)

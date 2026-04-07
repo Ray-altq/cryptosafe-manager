@@ -509,8 +509,95 @@ class MainWindow:
         }
         return mapping.get(str(data_type or "").strip().lower(), "данные")
 
+    def _get_clipboard_preset_labels(self) -> dict[str, str]:
+        return {
+            "standard": "Стандартный",
+            "secure": "Безопасный",
+            "public_computer": "Публичный компьютер",
+            "custom": "Пользовательский",
+        }
+
+    def _get_clipboard_preset_key_from_label(self, label: str) -> str:
+        normalized_label = str(label or "").strip()
+        for preset_key, preset_label in self._get_clipboard_preset_labels().items():
+            if preset_label == normalized_label:
+                return preset_key
+        return "custom"
+
+    def _get_clipboard_preset_label(self, preset: str) -> str:
+        preset_key = str(preset or "custom").strip().lower() or "custom"
+        return self._get_clipboard_preset_labels().get(preset_key, self._get_clipboard_preset_labels()["custom"])
+
+    def _detect_clipboard_preset(
+        self,
+        *,
+        timeout_seconds: int,
+        notifications_enabled: bool,
+        security_level: str,
+        blocked_on_suspicious: bool,
+    ) -> str:
+        for preset_key, preset_settings in ClipboardService.PRESETS.items():
+            if (
+                preset_settings["timeout_seconds"] == int(timeout_seconds)
+                and preset_settings["notifications_enabled"] == bool(notifications_enabled)
+                and preset_settings["security_level"] == str(security_level).strip().lower()
+                and preset_settings["blocked_on_suspicious"] == bool(blocked_on_suspicious)
+            ):
+                return preset_key
+        return "custom"
+
+    def _apply_clipboard_preset_to_vars(
+        self,
+        preset: str,
+        *,
+        timeout_var,
+        notifications_var,
+        security_level_var,
+        blocked_var,
+    ) -> bool:
+        normalized_preset = str(preset or "").strip().lower()
+        preset_settings = ClipboardService.PRESETS.get(normalized_preset)
+        if preset_settings is None:
+            return False
+        timeout_var.set(preset_settings["timeout_seconds"])
+        notifications_var.set(preset_settings["notifications_enabled"])
+        security_level_var.set(preset_settings["security_level"])
+        blocked_var.set(preset_settings["blocked_on_suspicious"])
+        return True
+
+    def _build_clipboard_settings_summary(
+        self,
+        *,
+        timeout_seconds: int,
+        notifications_enabled: bool,
+        security_level: str,
+        blocked_on_suspicious: bool,
+    ) -> str:
+        security_labels = {
+            "basic": "базовый",
+            "advanced": "повышенный",
+            "paranoid": "параноидальный",
+        }
+        notifications_text = "включены" if notifications_enabled else "выключены"
+        blocked_text = "с блокировкой копирования" if blocked_on_suspicious else "без блокировки копирования"
+        level_text = security_labels.get(str(security_level or "").strip().lower(), "базовый")
+        return (
+            f"Автоочистка: {int(timeout_seconds)} сек | "
+            f"Уведомления: {notifications_text} | "
+            f"Уровень: {level_text} | "
+            f"{blocked_text}"
+        )
+
+    def _clipboard_notifications_enabled(self) -> bool:
+        if hasattr(self, "clipboard_service"):
+            return bool(self.clipboard_service.get_settings().get("notifications_enabled", True))
+        return bool(self.config.get("security.clipboard_notifications", True))
+
     def _update_clipboard_notice(self, previous_status: ClipboardStatus, status: ClipboardStatus):
         if not hasattr(self, "clipboard_notice_label"):
+            return
+        if not self._clipboard_notifications_enabled():
+            self.clipboard_notice_label.config(text="")
             return
 
         notice_text = ""
@@ -1670,17 +1757,84 @@ class MainWindow:
     def show_settings(self):
         dialog = tk.Toplevel(self.root)
         dialog.title("Настройки")
-        dialog.geometry("460x450")
+        dialog.geometry("460x620")
 
-        clipboard_timeout = tk.IntVar(value=self.config.get("security.clipboard_timeout", 30))
+        clipboard_settings = (
+            self.clipboard_service.get_settings()
+            if hasattr(self, "clipboard_service")
+            else {
+                "timeout_seconds": self.config.get("security.clipboard_timeout", 30),
+                "notifications_enabled": self.config.get("security.clipboard_notifications", True),
+                "security_level": self.config.get("security.clipboard_security_level", "basic"),
+                "blocked_on_suspicious": self.config.get("security.clipboard_blocked_on_suspicious", False),
+                "preset": "standard",
+            }
+        )
+
+        clipboard_timeout = tk.IntVar(value=clipboard_settings.get("timeout_seconds", 30))
+        clipboard_notifications_enabled = tk.BooleanVar(
+            value=clipboard_settings.get("notifications_enabled", True)
+        )
+        clipboard_security_level = tk.StringVar(value=clipboard_settings.get("security_level", "basic"))
+        clipboard_blocked_on_suspicious = tk.BooleanVar(
+            value=clipboard_settings.get("blocked_on_suspicious", False)
+        )
+        detected_clipboard_preset = self._detect_clipboard_preset(
+            timeout_seconds=clipboard_timeout.get(),
+            notifications_enabled=clipboard_notifications_enabled.get(),
+            security_level=clipboard_security_level.get(),
+            blocked_on_suspicious=clipboard_blocked_on_suspicious.get(),
+        )
+        stored_clipboard_preset = str(clipboard_settings.get("preset", detected_clipboard_preset)).strip().lower()
+        if stored_clipboard_preset not in self._get_clipboard_preset_labels():
+            stored_clipboard_preset = detected_clipboard_preset
+        initial_clipboard_preset = (
+            stored_clipboard_preset if stored_clipboard_preset == detected_clipboard_preset else detected_clipboard_preset
+        )
+        clipboard_preset = tk.StringVar(value=self._get_clipboard_preset_label(initial_clipboard_preset))
+        clipboard_summary = tk.StringVar()
         auto_lock_minutes = tk.IntVar(value=self.config.get("security.auto_lock_minutes", 5))
         min_password_length = tk.IntVar(value=self.config.get("security.min_password_length", 12))
         key_cache_timeout_minutes = tk.IntVar(value=self.config.get("security.key_cache_timeout_minutes", 60))
         lock_on_focus_loss = tk.BooleanVar(value=self.config.get("security.lock_on_focus_loss", True))
         lock_on_minimize = tk.BooleanVar(value=self.config.get("security.lock_on_minimize", True))
 
+        ttk.Label(dialog, text="Профиль буфера обмена").pack(anchor=tk.W, padx=10, pady=(12, 2))
+        clipboard_preset_box = ttk.Combobox(
+            dialog,
+            textvariable=clipboard_preset,
+            state="readonly",
+            values=list(self._get_clipboard_preset_labels().values()),
+        )
+        clipboard_preset_box.pack(fill=tk.X, padx=10, pady=2)
+
         ttk.Label(dialog, text="Таймаут буфера обмена (сек)").pack(anchor=tk.W, padx=10, pady=(12, 2))
         ttk.Spinbox(dialog, from_=5, to=300, textvariable=clipboard_timeout).pack(fill=tk.X, padx=10, pady=2)
+
+        ttk.Checkbutton(
+            dialog,
+            text="Показывать уведомления буфера обмена",
+            variable=clipboard_notifications_enabled,
+        ).pack(anchor=tk.W, padx=10, pady=(8, 2))
+
+        ttk.Label(dialog, text="Уровень защиты буфера обмена").pack(anchor=tk.W, padx=10, pady=(12, 2))
+        clipboard_security_level_box = ttk.Combobox(
+            dialog,
+            textvariable=clipboard_security_level,
+            state="readonly",
+            values=["basic", "advanced", "paranoid"],
+        )
+        clipboard_security_level_box.pack(fill=tk.X, padx=10, pady=2)
+
+        ttk.Checkbutton(
+            dialog,
+            text="Блокировать будущие копирования при подозрительной активности",
+            variable=clipboard_blocked_on_suspicious,
+        ).pack(anchor=tk.W, padx=10, pady=(8, 2))
+
+        ttk.Label(dialog, textvariable=clipboard_summary, wraplength=420, justify=tk.LEFT).pack(
+            anchor=tk.W, padx=10, pady=(4, 8)
+        )
 
         ttk.Label(dialog, text="Таймаут авто-блокировки (мин)").pack(anchor=tk.W, padx=10, pady=(12, 2))
         ttk.Spinbox(dialog, from_=1, to=120, textvariable=auto_lock_minutes).pack(fill=tk.X, padx=10, pady=2)
@@ -1706,13 +1860,71 @@ class MainWindow:
             anchor=tk.W, padx=10, pady=2
         )
 
+        def refresh_clipboard_summary(*_args):
+            detected_preset = self._detect_clipboard_preset(
+                timeout_seconds=clipboard_timeout.get(),
+                notifications_enabled=clipboard_notifications_enabled.get(),
+                security_level=clipboard_security_level.get(),
+                blocked_on_suspicious=clipboard_blocked_on_suspicious.get(),
+            )
+            selected_preset = self._get_clipboard_preset_key_from_label(clipboard_preset.get())
+            if selected_preset != detected_preset:
+                clipboard_preset.set(self._get_clipboard_preset_label(detected_preset))
+            clipboard_summary.set(
+                self._build_clipboard_settings_summary(
+                    timeout_seconds=clipboard_timeout.get(),
+                    notifications_enabled=clipboard_notifications_enabled.get(),
+                    security_level=clipboard_security_level.get(),
+                    blocked_on_suspicious=clipboard_blocked_on_suspicious.get(),
+                )
+            )
+
+        def apply_selected_clipboard_preset(_event=None):
+            selected_preset = self._get_clipboard_preset_key_from_label(clipboard_preset.get())
+            if self._apply_clipboard_preset_to_vars(
+                selected_preset,
+                timeout_var=clipboard_timeout,
+                notifications_var=clipboard_notifications_enabled,
+                security_level_var=clipboard_security_level,
+                blocked_var=clipboard_blocked_on_suspicious,
+            ):
+                clipboard_preset.set(self._get_clipboard_preset_label(selected_preset))
+            refresh_clipboard_summary()
+
+        clipboard_preset_box.bind("<<ComboboxSelected>>", apply_selected_clipboard_preset)
+        for variable in (
+            clipboard_timeout,
+            clipboard_notifications_enabled,
+            clipboard_security_level,
+            clipboard_blocked_on_suspicious,
+        ):
+            variable.trace_add("write", refresh_clipboard_summary)
+        refresh_clipboard_summary()
+
         def save():
             self.config.set("security.clipboard_timeout", clipboard_timeout.get())
+            self.config.set("security.clipboard_notifications", clipboard_notifications_enabled.get())
+            self.config.set("security.clipboard_security_level", clipboard_security_level.get())
+            self.config.set("security.clipboard_blocked_on_suspicious", clipboard_blocked_on_suspicious.get())
             self.config.set("security.auto_lock_minutes", auto_lock_minutes.get())
             self.config.set("security.min_password_length", min_password_length.get())
             self.config.set("security.key_cache_timeout_minutes", key_cache_timeout_minutes.get())
             self.config.set("security.lock_on_focus_loss", lock_on_focus_loss.get())
             self.config.set("security.lock_on_minimize", lock_on_minimize.get())
+            selected_preset = self._detect_clipboard_preset(
+                timeout_seconds=clipboard_timeout.get(),
+                notifications_enabled=clipboard_notifications_enabled.get(),
+                security_level=clipboard_security_level.get(),
+                blocked_on_suspicious=clipboard_blocked_on_suspicious.get(),
+            )
+            if hasattr(self, "clipboard_service"):
+                self.clipboard_service.configure(
+                    timeout_seconds=clipboard_timeout.get(),
+                    notifications_enabled=clipboard_notifications_enabled.get(),
+                    security_level=clipboard_security_level.get(),
+                    blocked_on_suspicious=clipboard_blocked_on_suspicious.get(),
+                    preset=selected_preset,
+                )
             self.password_validator.min_length = min_password_length.get()
             self.db.set_setting(
                 "security.password_policy",
@@ -1727,6 +1939,7 @@ class MainWindow:
             self.state.set_inactivity_timeout(auto_lock_minutes.get() * 60)
             self.state.set_key_cache_timeout(key_cache_timeout_minutes.get() * 60)
             self._persist_runtime_settings()
+            self._refresh_clipboard_status()
             messagebox.showinfo("Настройки", "Настройки сохранены.", parent=dialog)
             dialog.destroy()
 

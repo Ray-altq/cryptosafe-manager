@@ -117,6 +117,19 @@ class ClipboardServiceTestCase(unittest.TestCase):
         self.assertEqual(stored["security_level"], "paranoid")
         self.assertTrue(stored["blocked_on_suspicious"])
 
+    def test_custom_preset_name_is_persisted_for_manual_profile(self):
+        self.service.configure(
+            timeout_seconds=42,
+            notifications_enabled=False,
+            security_level="advanced",
+            blocked_on_suspicious=True,
+            preset="custom",
+        )
+
+        stored = self.database.get_setting("security.clipboard", {})
+        self.assertEqual(stored["preset"], "custom")
+        self.assertEqual(stored["timeout_seconds"], 42)
+
 
 if __name__ == "__main__":
     unittest.main()

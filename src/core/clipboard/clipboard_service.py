@@ -131,7 +131,7 @@ class ClipboardService:
                 normalized_preset = str(preset).strip().lower()
                 if normalized_preset in self.PRESETS:
                     self._settings.update(self.PRESETS[normalized_preset])
-                    self._settings["preset"] = normalized_preset
+                self._settings["preset"] = normalized_preset or "standard"
 
             if timeout_seconds is not None:
                 self._settings["timeout_seconds"] = self._normalize_timeout(timeout_seconds)
