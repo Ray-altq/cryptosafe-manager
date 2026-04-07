@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+from src.core.clipboard import ClipboardStatus
 from src.core.config import Config
 from src.core.crypto.authentication import AuthenticationService
 from src.core.crypto.key_derivation import KeyDerivation
@@ -100,9 +101,17 @@ class FakeTable:
 class FakeClipboardService:
     def __init__(self):
         self.calls = []
+        self.status = ClipboardStatus(active=False)
+        self.last_clear_reason = None
 
     def copy_text(self, value, **kwargs):
         self.calls.append((value, kwargs))
+
+    def get_status(self):
+        return self.status
+
+    def get_last_clear_reason(self):
+        return self.last_clear_reason
 
 
 class FakeAuthService:
@@ -583,10 +592,69 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
         window.copy_selected_all()
 
         copied_text = window.clipboard_service.calls[0][0]
-        self.assertIn("Title: Example", copied_text)
-        self.assertIn("Password: Secret!123", copied_text)
+        self.assertIn("Название: Example", copied_text)
+        self.assertIn("Пароль: Secret!123", copied_text)
         self.assertEqual(window.clipboard_service.calls[0][1]["data_type"], "entry")
         self.assertTrue(window._activity_called)
+
+    def test_refresh_clipboard_status_shows_preview_and_warning(self):
+        window = MainWindow.__new__(MainWindow)
+        window.clipboard_service = FakeClipboardService()
+        window.clipboard_label = FakeLabel()
+        window.clipboard_details_label = FakeLabel()
+        window.clipboard_service.status = ClipboardStatus(
+            active=True,
+            data_type="password",
+            source_entry_id=11,
+            source_label="Example",
+            preview="Sec*****",
+            remaining_seconds=4,
+            warning_emitted=True,
+        )
+
+        window._refresh_clipboard_status()
+
+        self.assertEqual(window.clipboard_label.text, "Буфер обмена: пароль (4 сек)")
+        self.assertIn("Источник: Example", window.clipboard_details_label.text)
+        self.assertIn("Просмотр: Sec*****", window.clipboard_details_label.text)
+        self.assertIn("Скоро очистка: 4 сек", window.clipboard_details_label.text)
+
+    def test_on_clipboard_status_changed_updates_notice_and_table_marker(self):
+        window = MainWindow.__new__(MainWindow)
+        window.table = object()
+        window.entry_manager = object()
+        window.clipboard_service = FakeClipboardService()
+        window.clipboard_notice_label = FakeLabel()
+        window.clipboard_label = FakeLabel()
+        window.clipboard_details_label = FakeLabel()
+        window._clipboard_status_snapshot = ClipboardStatus(active=False)
+        window._apply_entry_filter = lambda: setattr(window, "_filter_refreshed", True)
+
+        status = ClipboardStatus(
+            active=True,
+            data_type="username",
+            source_entry_id=12,
+            source_label="GitHub",
+            preview="d*****r",
+            remaining_seconds=12,
+        )
+
+        window._on_clipboard_status_changed(status)
+
+        self.assertEqual(window.clipboard_notice_label.text, "Скопировано: логин")
+        self.assertEqual(window.clipboard_label.text, "Буфер обмена: логин (12 сек)")
+        self.assertTrue(window._filter_refreshed)
+
+    def test_format_entry_title_for_table_marks_active_clipboard_entry(self):
+        window = MainWindow.__new__(MainWindow)
+        window.clipboard_service = FakeClipboardService()
+        window.clipboard_service.status = ClipboardStatus(active=True, source_entry_id=42, data_type="entry")
+
+        marked_title = window._format_entry_title_for_table({"id": 42, "title": "Example"})
+        plain_title = window._format_entry_title_for_table({"id": 41, "title": "Another"})
+
+        self.assertEqual(marked_title, "Example [В буфере]")
+        self.assertEqual(plain_title, "Another")
 
     def test_suggest_usernames_prefers_existing_domain_matches_and_domain_patterns(self):
         window = MainWindow.__new__(MainWindow)

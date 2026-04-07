@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
-from ..core.clipboard import ClipboardAccessError, ClipboardMonitor, ClipboardService, create_platform_adapter
+from ..core.clipboard import ClipboardAccessError, ClipboardMonitor, ClipboardService, ClipboardStatus, create_platform_adapter
 from ..core.config import Config
 from ..core.crypto.authentication import AuthenticationError, AuthenticationService
 from ..core.crypto.key_derivation import KeyDerivation
@@ -82,6 +82,7 @@ class MainWindow:
             state_manager=self.state,
         )
         self.clipboard_monitor = ClipboardMonitor(self.clipboard_service.adapter, self.clipboard_service)
+        self._clipboard_status_snapshot = ClipboardStatus(active=False)
         self.clipboard_service.subscribe(self._on_clipboard_status_changed)
         self._persist_runtime_settings()
         self._load_password_policy()
@@ -185,8 +186,8 @@ class MainWindow:
         entry_menu.add_command(label="Показать пароль", command=self.show_selected_password)
         entry_menu.add_command(label="Скопировать пароль", command=self.copy_selected_password)
 
-        entry_menu.add_command(label="Copy Username", command=self.copy_selected_username)
-        entry_menu.add_command(label="Copy All", command=self.copy_selected_all)
+        entry_menu.add_command(label="Скопировать логин", command=self.copy_selected_username)
+        entry_menu.add_command(label="Скопировать запись", command=self.copy_selected_all)
 
         security_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Безопасность", menu=security_menu)
@@ -215,8 +216,8 @@ class MainWindow:
         ttk.Button(actions_row, text="Показать пароль", command=self.show_selected_password).pack(side=tk.LEFT, padx=(10, 2))
         ttk.Button(actions_row, text="Скопировать пароль", command=self.copy_selected_password).pack(side=tk.LEFT, padx=2)
         self.password_toggle_text = tk.StringVar(value="Показать пароли")
-        ttk.Button(actions_row, text="Copy Username", command=self.copy_selected_username).pack(side=tk.LEFT, padx=2)
-        ttk.Button(actions_row, text="Copy All", command=self.copy_selected_all).pack(side=tk.LEFT, padx=2)
+        ttk.Button(actions_row, text="Скопировать логин", command=self.copy_selected_username).pack(side=tk.LEFT, padx=2)
+        ttk.Button(actions_row, text="Скопировать запись", command=self.copy_selected_all).pack(side=tk.LEFT, padx=2)
         ttk.Button(actions_row, textvariable=self.password_toggle_text, command=self._toggle_password_visibility).pack(
             side=tk.LEFT, padx=(8, 2)
         )
@@ -298,8 +299,8 @@ class MainWindow:
         self.table_menu.add_separator()
         self.table_menu.add_command(label="Показать пароль", command=self.show_selected_password)
         self.table_menu.add_command(label="Скопировать пароль", command=self.copy_selected_password)
-        self.table_menu.add_command(label="Copy Username", command=self.copy_selected_username)
-        self.table_menu.add_command(label="Copy All", command=self.copy_selected_all)
+        self.table_menu.add_command(label="Скопировать логин", command=self.copy_selected_username)
+        self.table_menu.add_command(label="Скопировать запись", command=self.copy_selected_all)
         self.table.bind_context_menu(self._show_table_context_menu)
 
     def _show_table_context_menu(self, event):
@@ -320,6 +321,10 @@ class MainWindow:
 
         self.clipboard_label = ttk.Label(statusbar, text="Буфер обмена: пуст")
         self.clipboard_label.pack(side=tk.LEFT, padx=20)
+        self.clipboard_details_label = ttk.Label(statusbar, text="")
+        self.clipboard_details_label.pack(side=tk.LEFT, padx=5)
+        self.clipboard_notice_label = ttk.Label(statusbar, text="")
+        self.clipboard_notice_label.pack(side=tk.LEFT, padx=10)
 
         ttk.Label(statusbar, text="v2.0").pack(side=tk.RIGHT, padx=5)
 
@@ -439,24 +444,107 @@ class MainWindow:
     def _set_status(self, text: str):
         self.status_label.config(text=text)
 
-    def _on_clipboard_status_changed(self, _status):
+    def _on_clipboard_status_changed(self, status: ClipboardStatus):
+        previous_status = getattr(self, "_clipboard_status_snapshot", ClipboardStatus(active=False))
+        self._clipboard_status_snapshot = status
+        self._sync_clipboard_row_marker(previous_status, status)
+        self._update_clipboard_notice(previous_status, status)
         self._refresh_clipboard_status()
 
     def _refresh_clipboard_status(self):
+        status = self._get_clipboard_status()
+        if not status.active:
+            self.clipboard_label.config(text="Буфер обмена: пуст")
+            if hasattr(self, "clipboard_details_label"):
+                self.clipboard_details_label.config(text="")
+            return
+
+        data_type_label = self._format_clipboard_data_type(status.data_type)
+        if status.remaining_seconds > 0:
+            status_text = f"Буфер обмена: {data_type_label} ({status.remaining_seconds} сек)"
+        else:
+            status_text = f"Буфер обмена: {data_type_label}"
+        self.clipboard_label.config(text=status_text)
+
+        details_parts = []
+        if status.source_label:
+            details_parts.append(f"Источник: {status.source_label}")
+        if status.preview:
+            details_parts.append(f"Просмотр: {status.preview}")
+        if status.suspicious_activity:
+            details_parts.append("Обнаружена подозрительная активность")
+        elif status.warning_emitted and status.remaining_seconds > 0:
+            details_parts.append(f"Скоро очистка: {status.remaining_seconds} сек")
+        if hasattr(self, "clipboard_details_label"):
+            self.clipboard_details_label.config(text=" | ".join(details_parts))
+
+    def _get_clipboard_status(self) -> ClipboardStatus:
+        if hasattr(self, "clipboard_service"):
+            return self.clipboard_service.get_status()
+
         clipboard_value = self.state.get_clipboard()
         if not clipboard_value:
-            self.clipboard_label.config(text="Буфер обмена: пуст")
-            return
+            return ClipboardStatus(active=False)
 
         remaining_seconds = 0
         if self.state.clipboard_timer is not None:
             remaining_seconds = max(0, int((self.state.clipboard_timer - datetime.now()).total_seconds()))
+        return ClipboardStatus(
+            active=True,
+            data_type="password",
+            preview="***",
+            remaining_seconds=remaining_seconds,
+        )
 
-        if remaining_seconds > 0:
-            status_text = f"Буфер обмена: содержит пароль ({remaining_seconds} сек)"
-        else:
-            status_text = "Буфер обмена: содержит пароль"
-        self.clipboard_label.config(text=status_text)
+    def _format_clipboard_data_type(self, data_type: str) -> str:
+        mapping = {
+            "password": "пароль",
+            "username": "логин",
+            "entry": "запись",
+            "text": "текст",
+        }
+        return mapping.get(str(data_type or "").strip().lower(), "данные")
+
+    def _update_clipboard_notice(self, previous_status: ClipboardStatus, status: ClipboardStatus):
+        if not hasattr(self, "clipboard_notice_label"):
+            return
+
+        notice_text = ""
+        if status.active and not previous_status.active:
+            notice_text = f"Скопировано: {self._format_clipboard_data_type(status.data_type)}"
+        elif status.active and status.warning_emitted and not previous_status.warning_emitted:
+            notice_text = f"Буфер обмена будет очищен через {status.remaining_seconds} сек"
+        elif not status.active and previous_status.active:
+            clear_reason = ""
+            if hasattr(self, "clipboard_service"):
+                clear_reason = self.clipboard_service.get_last_clear_reason() or ""
+            if clear_reason == "monitor_warning":
+                notice_text = "Буфер обмена очищен из-за подозрительной активности"
+            elif clear_reason == "timeout":
+                notice_text = "Буфер обмена очищен автоматически"
+            elif clear_reason == "vault_locked":
+                notice_text = "Буфер обмена очищен при блокировке vault"
+            else:
+                notice_text = "Буфер обмена очищен"
+        elif status.blocked_future_copies and not previous_status.blocked_future_copies:
+            notice_text = "Копирование временно заблокировано настройками безопасности"
+
+        self.clipboard_notice_label.config(text=notice_text)
+
+    def _sync_clipboard_row_marker(self, previous_status: ClipboardStatus, status: ClipboardStatus):
+        previous_entry_id = previous_status.source_entry_id if previous_status.active else None
+        current_entry_id = status.source_entry_id if status.active else None
+        if previous_entry_id == current_entry_id and previous_status.active == status.active:
+            return
+        if hasattr(self, "table") and hasattr(self, "entry_manager"):
+            self._apply_entry_filter()
+
+    def _format_entry_title_for_table(self, entry) -> str:
+        title = str(entry.get("title", ""))
+        status = self._get_clipboard_status()
+        if status.active and status.source_entry_id == entry.get("id"):
+            return f"{title} [В буфере]"
+        return title
 
     def _set_system_clipboard(self, value: str):
         try:
@@ -581,7 +669,7 @@ class MainWindow:
             data.append(
                 {
                     "id": entry["id"],
-                    "title": entry["title"],
+                    "title": self._format_entry_title_for_table(entry),
                     "username": self._mask_username(entry["username"]),
                     "password": self._format_password_for_table(entry["password"], entry["id"]),
                     "category": entry["category"],
@@ -1508,7 +1596,7 @@ class MainWindow:
         self._on_activity()
 
     def copy_selected_username(self):
-        entry = self._get_single_selected_entry("Copy Username")
+        entry = self._get_single_selected_entry("Скопировать логин")
         if not entry:
             messagebox.showwarning("Предупреждение", "Сначала выберите запись.")
             return
@@ -1517,32 +1605,32 @@ class MainWindow:
             username,
             data_type="username",
             entry=entry,
-            action_name="Copy Username",
+            action_name="Скопировать логин",
         ):
             return
         self._on_activity()
 
     def copy_selected_all(self):
-        entry = self._get_single_selected_entry("Copy All")
+        entry = self._get_single_selected_entry("Скопировать запись")
         if not entry:
             messagebox.showwarning("Предупреждение", "Сначала выберите запись.")
             return
 
         payload_parts = [
-            f"Title: {entry.title}",
-            f"Username: {entry.username}",
-            f"Password: {self._decrypt_password(entry.encrypted_password)}",
+            f"Название: {entry.title}",
+            f"Логин: {entry.username}",
+            f"Пароль: {self._decrypt_password(entry.encrypted_password)}",
         ]
         if entry.get("url"):
             payload_parts.append(f"URL: {entry.url}")
         if entry.get("notes"):
-            payload_parts.append(f"Notes: {entry.notes}")
+            payload_parts.append(f"Заметки: {entry.notes}")
 
         if not self._copy_entry_to_clipboard(
             "\n".join(payload_parts),
             data_type="entry",
             entry=entry,
-            action_name="Copy All",
+            action_name="Скопировать запись",
         ):
             return
         self._on_activity()
