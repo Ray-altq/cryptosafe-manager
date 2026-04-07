@@ -449,10 +449,10 @@ class MainWindow:
         self._clipboard_status_snapshot = status
         self._sync_clipboard_row_marker(previous_status, status)
         self._update_clipboard_notice(previous_status, status)
-        self._refresh_clipboard_status()
+        self._refresh_clipboard_status(status)
 
-    def _refresh_clipboard_status(self):
-        status = self._get_clipboard_status()
+    def _refresh_clipboard_status(self, status: Optional[ClipboardStatus] = None):
+        status = status or self._get_clipboard_status()
         if not status.active:
             self.clipboard_label.config(text="Буфер обмена: пуст")
             if hasattr(self, "clipboard_details_label"):
@@ -482,13 +482,17 @@ class MainWindow:
         if hasattr(self, "clipboard_service"):
             return self.clipboard_service.get_status()
 
-        clipboard_value = self.state.get_clipboard()
+        state = getattr(self, "state", None)
+        if state is None:
+            return getattr(self, "_clipboard_status_snapshot", ClipboardStatus(active=False))
+
+        clipboard_value = state.get_clipboard()
         if not clipboard_value:
             return ClipboardStatus(active=False)
 
         remaining_seconds = 0
-        if self.state.clipboard_timer is not None:
-            remaining_seconds = max(0, int((self.state.clipboard_timer - datetime.now()).total_seconds()))
+        if state.clipboard_timer is not None:
+            remaining_seconds = max(0, int((state.clipboard_timer - datetime.now()).total_seconds()))
         return ClipboardStatus(
             active=True,
             data_type="password",
