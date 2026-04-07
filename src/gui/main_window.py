@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
+from ..core.clipboard import ClipboardAccessError, ClipboardMonitor, ClipboardService, create_platform_adapter
 from ..core.config import Config
 from ..core.crypto.authentication import AuthenticationError, AuthenticationService
 from ..core.crypto.key_derivation import KeyDerivation
@@ -74,6 +75,14 @@ class MainWindow:
         self._login_prompt_active = False
         self._initial_login_completed = False
         self.audit_logger = AuditLogger(self.db, event_bus)
+        self.clipboard_service = ClipboardService(
+            create_platform_adapter(self.root),
+            database=self.db,
+            config=self.config,
+            state_manager=self.state,
+        )
+        self.clipboard_monitor = ClipboardMonitor(self.clipboard_service.adapter, self.clipboard_service)
+        self.clipboard_service.subscribe(self._on_clipboard_status_changed)
         self._persist_runtime_settings()
         self._load_password_policy()
         self._load_search_history()
@@ -126,6 +135,7 @@ class MainWindow:
         self.db.set_setting("security.key_cache_timeout_minutes", self.config.get("security.key_cache_timeout_minutes", 60))
         self.db.set_setting("security.lock_on_focus_loss", self.config.get("security.lock_on_focus_loss", True))
         self.db.set_setting("security.lock_on_minimize", self.config.get("security.lock_on_minimize", True))
+        self.db.set_setting("security.clipboard", self.clipboard_service.get_settings(), encrypted=True)
 
     def _load_password_policy(self):
         policy = self.db.get_setting("security.password_policy", {})
@@ -314,6 +324,7 @@ class MainWindow:
         event_bus.subscribe(EventType.USER_LOGGED_OUT, lambda _event: self._set_status("Заблокировано"))
         event_bus.subscribe(EventType.CLIPBOARD_COPIED, lambda _event: self._refresh_clipboard_status())
         event_bus.subscribe(EventType.CLIPBOARD_CLEARED, lambda _event: self._refresh_clipboard_status())
+        event_bus.subscribe(EventType.VAULT_LOCKED, lambda _event: self.clipboard_service.clear(reason="vault_locked"))
 
     def _setup_activity_tracking(self):
         for sequence in ("<Any-KeyPress>", "<Any-ButtonPress>", "<Motion>"):
@@ -334,11 +345,16 @@ class MainWindow:
     def _check_security_timers(self):
         if self.state.should_auto_lock() or self.state.should_expire_key_cache() or self.key_storage.is_cache_expired():
             self._lock_vault(show_dialog=False)
-        if self.state.clipboard_timer and self.state.get_clipboard() is None:
+        clipboard_tick_result = None
+        if hasattr(self, "clipboard_service") and hasattr(self, "clipboard_monitor"):
+            clipboard_tick_result = self.clipboard_service.tick()
+            self.clipboard_monitor.poll()
+        elif self.state.clipboard_timer and self.state.get_clipboard() is None:
             self._clear_system_clipboard()
             event_bus.publish(Event(EventType.CLIPBOARD_CLEARED, {}))
-            if self._should_lock_after_clipboard_clear():
-                self._lock_vault(show_dialog=False)
+            clipboard_tick_result = "timeout"
+        if clipboard_tick_result == "timeout" and self._should_lock_after_clipboard_clear():
+            self._lock_vault(show_dialog=False)
         self._refresh_clipboard_status()
 
     def _on_activity(self, _event=None):
@@ -416,6 +432,9 @@ class MainWindow:
     def _set_status(self, text: str):
         self.status_label.config(text=text)
 
+    def _on_clipboard_status_changed(self, _status):
+        self._refresh_clipboard_status()
+
     def _refresh_clipboard_status(self):
         clipboard_value = self.state.get_clipboard()
         if not clipboard_value:
@@ -447,6 +466,8 @@ class MainWindow:
         except tk.TclError:
             pass
         self._clear_windows_clipboard()
+        if hasattr(self, "clipboard_service"):
+            self.clipboard_service.clear(reason="manual", publish_event=False)
 
     def _clear_windows_clipboard(self):
         if os.name != "nt":
@@ -1467,9 +1488,16 @@ class MainWindow:
             messagebox.showwarning("Предупреждение", "Сначала выберите запись.")
             return
         password = self._decrypt_password(entry.encrypted_password)
-        self._set_system_clipboard(password)
-        self.state.set_clipboard(password, self.config.get("security.clipboard_timeout", 30))
-        event_bus.publish(Event(EventType.CLIPBOARD_COPIED, {"entry_id": entry.id}))
+        try:
+            self.clipboard_service.copy_text(
+                password,
+                data_type="password",
+                source_entry_id=entry.id,
+                source_label=entry.title,
+            )
+        except ClipboardAccessError as error:
+            messagebox.showerror("РћС€РёР±РєР° Р±СѓС„РµСЂР° РѕР±РјРµРЅР°", str(error))
+            return
         self._on_activity()
 
     def show_logs(self):

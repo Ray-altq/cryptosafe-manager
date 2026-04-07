@@ -78,6 +78,8 @@ class StateManager:  #управление состоянием
         self.clipboard_content = content
         if timeout_seconds > 0:
             self.clipboard_timer = datetime.now() + timedelta(seconds=timeout_seconds)
+        else:
+            self.clipboard_timer = None
 
     def get_clipboard(self) -> Optional[str]:  #получение содержимого буфера
         if self.clipboard_timer and datetime.now() >= self.clipboard_timer:
@@ -88,3 +90,9 @@ class StateManager:  #управление состоянием
     def clear_clipboard(self):  #принудительная очистка буфера
         self.clipboard_content = None
         self.clipboard_timer = None
+
+    def get_clipboard_remaining_seconds(self) -> int:
+        if self.clipboard_timer is None:
+            return 0
+        remaining = int((self.clipboard_timer - datetime.now()).total_seconds())
+        return max(0, remaining)

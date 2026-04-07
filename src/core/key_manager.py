@@ -23,7 +23,6 @@ class KeyManager:  #класс для управления ключами шиф
     def store_key(self, key_id: str, key: bytes):  #метод для хранения ключа в памяти
         self.clear_key()
         self.current_key = bytearray(key)
-        print(f"Key {key_id} stored")
 
     def load_key(self, key_id: str) -> Optional[bytes]:  #метод для загрузки ключа из памяти
         if self.current_key is None:
