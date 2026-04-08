@@ -103,6 +103,7 @@ class FakeClipboardService:
         self.calls = []
         self.status = ClipboardStatus(active=False)
         self.last_clear_reason = None
+        self.last_clear_failed = False
         self.settings = {
             "timeout_seconds": 30,
             "notifications_enabled": True,
@@ -121,6 +122,9 @@ class FakeClipboardService:
 
     def get_last_clear_reason(self):
         return self.last_clear_reason
+
+    def did_last_clear_fail(self):
+        return self.last_clear_failed
 
     def get_settings(self):
         return dict(self.settings)
@@ -915,6 +919,35 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
             window._format_clipboard_clear_reason("replacement"),
             "Буфер обмена заменён новым содержимым",
         )
+
+    def test_update_clipboard_notice_mentions_failed_system_clear(self):
+        window = MainWindow.__new__(MainWindow)
+        window.clipboard_service = FakeClipboardService()
+        window.clipboard_notice_label = FakeLabel()
+        window.clipboard_service.last_clear_reason = "timeout"
+        window.clipboard_service.last_clear_failed = True
+
+        previous_status = ClipboardStatus(active=True, data_type="password")
+        current_status = ClipboardStatus(active=False)
+
+        window._update_clipboard_notice(previous_status, current_status)
+
+        self.assertIn("системный буфер обмена мог сохраниться", window.clipboard_notice_label.text)
+        self.assertIn("Очистите буфер обмена вручную", window.clipboard_notice_label.text)
+
+    def test_handle_clipboard_clear_failure_shows_warning_for_failed_service_clear(self):
+        window = MainWindow.__new__(MainWindow)
+        window.root = FakeRoot()
+        window.clipboard_service = FakeClipboardService()
+        window.clipboard_notice_label = FakeLabel()
+        window.clipboard_service.last_clear_reason = "vault_locked"
+        window.clipboard_service.last_clear_failed = True
+
+        with patch("src.gui.main_window.messagebox.showwarning") as showwarning:
+            window._handle_clipboard_clear_failure()
+
+        self.assertIn("Очистите буфер обмена вручную", showwarning.call_args.args[1])
+        self.assertIn("системный буфер обмена мог сохраниться", window.clipboard_notice_label.text)
 
 class TestMainWindowSecurityState(IntegrationTestCase):
     def test_lock_vault_clears_decrypted_entries_and_password_visibility_state(self):

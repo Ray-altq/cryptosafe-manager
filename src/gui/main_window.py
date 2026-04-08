@@ -382,6 +382,8 @@ class MainWindow:
             clipboard_tick_result = "timeout"
         if clipboard_tick_result == "timeout" and self._should_lock_after_clipboard_clear():
             self._lock_vault(show_dialog=False)
+        if clipboard_tick_result == "timeout":
+            self._handle_clipboard_clear_failure()
         self._refresh_clipboard_status()
 
     def _on_activity(self, _event=None):
@@ -634,6 +636,13 @@ class MainWindow:
             message_parts.append("Время жизни содержимого буфера обмена сокращено до минимума.")
         return " ".join(message_parts)
 
+    def _build_clipboard_clear_failure_text(self, clear_reason: str) -> str:
+        reason_text = self._format_clipboard_clear_reason(clear_reason)
+        return (
+            f"{reason_text}, но системный буфер обмена мог сохраниться. "
+            "Очистите буфер обмена вручную в системе."
+        )
+
     def _update_clipboard_notice(self, previous_status: ClipboardStatus, status: ClipboardStatus):
         if not hasattr(self, "clipboard_notice_label"):
             return
@@ -651,6 +660,8 @@ class MainWindow:
             if hasattr(self, "clipboard_service"):
                 clear_reason = self.clipboard_service.get_last_clear_reason() or ""
             notice_text = self._format_clipboard_clear_reason(clear_reason)
+            if hasattr(self, "clipboard_service") and self.clipboard_service.did_last_clear_fail():
+                notice_text = self._build_clipboard_clear_failure_text(clear_reason)
         elif status.blocked_future_copies and not previous_status.blocked_future_copies:
             notice_text = "Копирование временно заблокировано настройками безопасности"
 
@@ -664,6 +675,21 @@ class MainWindow:
         messagebox.showwarning(
             "Безопасность буфера обмена",
             self._build_clipboard_security_alert_text(status),
+            parent=self.root if hasattr(self, "root") else None,
+        )
+
+    def _handle_clipboard_clear_failure(self):
+        if not hasattr(self, "clipboard_service"):
+            return
+        if not self.clipboard_service.did_last_clear_fail():
+            return
+        clear_reason = self.clipboard_service.get_last_clear_reason() or ""
+        warning_text = self._build_clipboard_clear_failure_text(clear_reason)
+        if hasattr(self, "clipboard_notice_label") and self._clipboard_notifications_enabled():
+            self.clipboard_notice_label.config(text=warning_text)
+        messagebox.showwarning(
+            "Очистка буфера обмена",
+            warning_text,
             parent=self.root if hasattr(self, "root") else None,
         )
 
@@ -733,6 +759,7 @@ class MainWindow:
         if self._clear_system_clipboard(sync_service=False):
             if hasattr(self, "clipboard_service"):
                 self.clipboard_service.clear(reason="manual")
+                self._handle_clipboard_clear_failure()
             else:
                 self._update_clipboard_notice(ClipboardStatus(active=True), ClipboardStatus(active=False))
             self._refresh_clipboard_status()
@@ -2108,6 +2135,7 @@ class MainWindow:
         self.key_manager.clear_key()
         self.state.clear_clipboard()
         self._clear_system_clipboard()
+        self._handle_clipboard_clear_failure()
         event_bus.publish(Event(EventType.VAULT_LOCKED, {}))
         self._clear_sensitive_view_state()
         self._set_status("Заблокировано")
