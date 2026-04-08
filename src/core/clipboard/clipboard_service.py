@@ -108,6 +108,7 @@ class ClipboardService:
         self._suspicious_activity = False
         self._blocked_future_copies = False
         self._last_clear_reason: Optional[str] = None
+        self._last_clear_failed = False
         self._settings = self._load_settings()
 
     def subscribe(self, callback: Callable[[ClipboardStatus], None]):
@@ -183,6 +184,7 @@ class ClipboardService:
             self._warning_emitted = False
             self._suspicious_activity = False
             self._last_clear_reason = None
+            self._last_clear_failed = False
 
             if self.state_manager is not None and hasattr(self.state_manager, "set_clipboard"):
                 self.state_manager.set_clipboard(normalized_value, self._settings["timeout_seconds"])
@@ -203,18 +205,25 @@ class ClipboardService:
     def clear(self, reason: str = "manual", publish_event: bool = True) -> bool:
         with self._lock:
             had_content = self._current_item is not None
+            adapter_cleared = True
             if had_content:
-                self.adapter.clear_clipboard()
+                try:
+                    adapter_cleared = bool(self.adapter.clear_clipboard())
+                except Exception:
+                    adapter_cleared = False
                 self._current_item.secure_wipe()
                 self._current_item = None
 
             self._warning_emitted = False
             self._last_clear_reason = reason
+            self._last_clear_failed = had_content and not adapter_cleared
             if self.state_manager is not None and hasattr(self.state_manager, "clear_clipboard"):
                 self.state_manager.clear_clipboard()
 
             if had_content and publish_event:
-                self.event_bus.publish(Event(EventType.CLIPBOARD_CLEARED, {"reason": reason}))
+                self.event_bus.publish(
+                    Event(EventType.CLIPBOARD_CLEARED, {"reason": reason, "clear_failed": self._last_clear_failed})
+                )
             self._notify()
             return had_content
 
@@ -288,6 +297,9 @@ class ClipboardService:
 
     def get_last_clear_reason(self) -> Optional[str]:
         return self._last_clear_reason
+
+    def did_last_clear_fail(self) -> bool:
+        return self._last_clear_failed
 
     def has_active_content(self) -> bool:
         return self._current_item is not None

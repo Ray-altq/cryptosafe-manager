@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from src.core.clipboard import ClipboardAccessError, ClipboardMonitor, ClipboardService
 from src.core.config import Config
-from src.core.events import EventBus
+from src.core.events import EventBus, EventType
 from src.core.state_manager import StateManager
 from src.database.db import Database
 
@@ -32,6 +32,18 @@ class FakeClipboardAdapter:
 
     def get_clipboard_content(self):
         return self.value
+
+
+class FailingCopyClipboardAdapter(FakeClipboardAdapter):
+    def copy_to_clipboard(self, data: str) -> bool:
+        self.copy_calls += 1
+        return False
+
+
+class FailingClearClipboardAdapter(FakeClipboardAdapter):
+    def clear_clipboard(self) -> bool:
+        self.clear_calls += 1
+        return False
 
 
 class ClipboardServiceTestCase(unittest.TestCase):
@@ -129,6 +141,57 @@ class ClipboardServiceTestCase(unittest.TestCase):
         stored = self.database.get_setting("security.clipboard", {})
         self.assertEqual(stored["preset"], "custom")
         self.assertEqual(stored["timeout_seconds"], 42)
+
+    def test_replacement_copy_clears_previous_clipboard_content(self):
+        self.service.copy_text("first-secret", source_entry_id=1)
+        self.service.copy_text("second-secret", source_entry_id=2)
+
+        status = self.service.get_status()
+        self.assertTrue(status.active)
+        self.assertEqual(status.source_entry_id, 2)
+        self.assertEqual(self.adapter.value, "second-secret")
+        self.assertEqual(self.adapter.clear_calls, 1)
+
+    def test_copy_text_raises_error_when_adapter_write_fails(self):
+        self.service = ClipboardService(
+            FailingCopyClipboardAdapter(),
+            database=self.database,
+            config=self.config,
+            state_manager=self.state,
+            bus=self.bus,
+        )
+
+        with self.assertRaises(ClipboardAccessError):
+            self.service.copy_text("Secret!123")
+
+        self.assertFalse(self.service.get_status().active)
+
+    def test_suspicious_activity_can_block_future_copies(self):
+        self.service.configure(blocked_on_suspicious=True)
+        self.service.copy_text("Secret!123")
+        self.service.register_suspicious_activity(reason="external_change", observed_value="changed")
+
+        with self.assertRaises(ClipboardAccessError):
+            self.service.copy_text("AnotherSecret!456")
+
+    def test_clear_event_marks_failed_system_clear(self):
+        received_events = []
+        self.bus.subscribe(EventType.CLIPBOARD_CLEARED, received_events.append)
+        self.service = ClipboardService(
+            FailingClearClipboardAdapter(),
+            database=self.database,
+            config=self.config,
+            state_manager=self.state,
+            bus=self.bus,
+        )
+        self.service.copy_text("Secret!123")
+
+        result = self.service.clear(reason="manual")
+
+        self.assertTrue(result)
+        self.assertTrue(self.service.did_last_clear_fail())
+        self.assertEqual(received_events[-1].data["reason"], "manual")
+        self.assertTrue(received_events[-1].data["clear_failed"])
 
 
 if __name__ == "__main__":
