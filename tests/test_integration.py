@@ -111,6 +111,7 @@ class FakeClipboardService:
             "preset": "standard",
         }
         self.configure_calls = []
+        self.clear_calls = []
 
     def copy_text(self, value, **kwargs):
         self.calls.append((value, kwargs))
@@ -127,6 +128,16 @@ class FakeClipboardService:
     def configure(self, **kwargs):
         self.configure_calls.append(kwargs)
         self.settings.update(kwargs)
+
+    def clear(self, reason="manual", publish_event=True):
+        self.clear_calls.append({"reason": reason, "publish_event": publish_event})
+        self.last_clear_reason = reason
+        self.status = ClipboardStatus(
+            active=False,
+            suspicious_activity=self.status.suspicious_activity,
+            blocked_future_copies=self.status.blocked_future_copies,
+        )
+        return True
 
 
 class FakeAuthService:
@@ -564,6 +575,70 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
 
         self.assertEqual(window.root.clipboard, "Secret!123")
         self.assertEqual(window.root.update_calls, 1)
+
+    def test_clear_clipboard_from_ui_clears_active_content(self):
+        window = MainWindow.__new__(MainWindow)
+        window.root = FakeRoot()
+        window.state = FakeStateManager()
+        window.clipboard_service = FakeClipboardService()
+        window.clipboard_service.status = ClipboardStatus(active=True, data_type="password")
+        window.clipboard_label = FakeLabel()
+        window.clipboard_details_label = FakeLabel()
+        window.clipboard_notice_label = FakeLabel()
+
+        with patch("src.gui.main_window.messagebox.showinfo") as showinfo:
+            window.clear_clipboard_from_ui()
+
+        self.assertEqual(window.clipboard_service.clear_calls[-1]["reason"], "manual")
+        self.assertEqual(window.clipboard_label.text, "Буфер обмена: пуст")
+        self.assertIn("очищен вручную", showinfo.call_args.args[1])
+
+    def test_clear_clipboard_from_ui_reports_empty_state(self):
+        window = MainWindow.__new__(MainWindow)
+        window.root = FakeRoot()
+        window.state = FakeStateManager()
+        window.clipboard_service = FakeClipboardService()
+
+        with patch("src.gui.main_window.messagebox.showinfo") as showinfo:
+            window.clear_clipboard_from_ui()
+
+        self.assertIn("уже пуст", showinfo.call_args.args[1])
+
+    def test_clear_clipboard_from_ui_warns_when_system_clear_fails(self):
+        window = MainWindow.__new__(MainWindow)
+        window.root = FakeRoot()
+        window.state = FakeStateManager()
+        window.clipboard_service = FakeClipboardService()
+        window.clipboard_service.status = ClipboardStatus(active=True, data_type="password")
+        window._clear_system_clipboard = lambda sync_service=False: False
+
+        with patch("src.gui.main_window.messagebox.showwarning") as showwarning:
+            window.clear_clipboard_from_ui()
+
+        self.assertIn("Очистите его вручную", showwarning.call_args.args[1])
+
+    def test_check_security_timers_warns_once_when_monitoring_fails(self):
+        window = MainWindow.__new__(MainWindow)
+        window.state = FakeStateManager()
+        window.config = Config()
+        window.key_storage = FakeKeyStorage()
+        window.root = FakeRoot()
+        window.clipboard_service = FakeClipboardService()
+        window._clipboard_monitor_warning_shown = False
+        window._refresh_clipboard_status = lambda: None
+        window.clipboard_service.tick = lambda: None
+
+        class FailingMonitor:
+            def poll(self):
+                raise RuntimeError("monitor failed")
+
+        window.clipboard_monitor = FailingMonitor()
+
+        with patch("src.gui.main_window.messagebox.showwarning") as showwarning:
+            window._check_security_timers()
+            window._check_security_timers()
+
+        self.assertEqual(showwarning.call_count, 1)
 
     def test_copy_selected_username_uses_clipboard_service(self):
         window = MainWindow.__new__(MainWindow)

@@ -74,6 +74,7 @@ class MainWindow:
         self._favicon_cache = {}
         self._login_prompt_active = False
         self._initial_login_completed = False
+        self._clipboard_monitor_warning_shown = False
         self.audit_logger = AuditLogger(self.db, event_bus)
         self.clipboard_service = ClipboardService(
             create_platform_adapter(self.root),
@@ -191,6 +192,8 @@ class MainWindow:
 
         security_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Безопасность", menu=security_menu)
+        security_menu.add_command(label="Очистить буфер обмена", command=self.clear_clipboard_from_ui)
+        security_menu.add_separator()
         security_menu.add_command(label="Сменить мастер-пароль", command=self.change_master_password)
         security_menu.add_command(label="Настройки", command=self.show_settings)
         security_menu.add_command(label="Журнал аудита", command=self.show_logs)
@@ -218,6 +221,7 @@ class MainWindow:
         self.password_toggle_text = tk.StringVar(value="Показать пароли")
         ttk.Button(actions_row, text="Скопировать логин", command=self.copy_selected_username).pack(side=tk.LEFT, padx=2)
         ttk.Button(actions_row, text="Скопировать запись", command=self.copy_selected_all).pack(side=tk.LEFT, padx=2)
+        ttk.Button(actions_row, text="Очистить буфер", command=self.clear_clipboard_from_ui).pack(side=tk.LEFT, padx=(8, 2))
         ttk.Button(actions_row, textvariable=self.password_toggle_text, command=self._toggle_password_visibility).pack(
             side=tk.LEFT, padx=(8, 2)
         )
@@ -301,6 +305,7 @@ class MainWindow:
         self.table_menu.add_command(label="Скопировать пароль", command=self.copy_selected_password)
         self.table_menu.add_command(label="Скопировать логин", command=self.copy_selected_username)
         self.table_menu.add_command(label="Скопировать запись", command=self.copy_selected_all)
+        self.table_menu.add_command(label="Очистить буфер обмена", command=self.clear_clipboard_from_ui)
         self.table.bind_context_menu(self._show_table_context_menu)
 
     def _show_table_context_menu(self, event):
@@ -360,7 +365,17 @@ class MainWindow:
         clipboard_tick_result = None
         if hasattr(self, "clipboard_service") and hasattr(self, "clipboard_monitor"):
             clipboard_tick_result = self.clipboard_service.tick()
-            self.clipboard_monitor.poll()
+            try:
+                self.clipboard_monitor.poll()
+                self._clipboard_monitor_warning_shown = False
+            except Exception:
+                if not self._clipboard_monitor_warning_shown:
+                    self._clipboard_monitor_warning_shown = True
+                    messagebox.showwarning(
+                        "Мониторинг буфера обмена",
+                        "Не удалось проверить состояние буфера обмена. Защита продолжит работу в ограниченном режиме.",
+                        parent=self.root,
+                    )
         elif self.state.clipboard_timer and self.state.get_clipboard() is None:
             self._clear_system_clipboard()
             event_bus.publish(Event(EventType.CLIPBOARD_CLEARED, {}))
@@ -675,31 +690,60 @@ class MainWindow:
         except tk.TclError:
             pass
 
-    def _clear_system_clipboard(self):
+    def _clear_system_clipboard(self, *, sync_service: bool = True) -> bool:
+        cleared = False
+        root_error = False
         try:
             self.root.clipboard_clear()
             self.root.update()
+            cleared = True
         except tk.TclError:
-            pass
-        self._clear_windows_clipboard()
-        if hasattr(self, "clipboard_service"):
+            root_error = True
+        windows_cleared = self._clear_windows_clipboard()
+        cleared = cleared or windows_cleared
+        if sync_service and hasattr(self, "clipboard_service"):
             self.clipboard_service.clear(reason="manual", publish_event=False)
+        if root_error and not windows_cleared:
+            return False
+        return cleared
 
-    def _clear_windows_clipboard(self):
+    def _clear_windows_clipboard(self) -> bool:
         if os.name != "nt":
-            return
+            return False
 
         try:
             user32 = ctypes.windll.user32
         except AttributeError:
-            return
+            return False
 
         if not user32.OpenClipboard(None):
-            return
+            return False
         try:
             user32.EmptyClipboard()
         finally:
             user32.CloseClipboard()
+        return True
+
+    def clear_clipboard_from_ui(self):
+        status = self._get_clipboard_status()
+        if not status.active and not getattr(self.state, "get_clipboard", lambda: None)():
+            messagebox.showinfo("Буфер обмена", "Буфер обмена уже пуст.", parent=self.root)
+            return
+
+        if self._clear_system_clipboard(sync_service=False):
+            if hasattr(self, "clipboard_service"):
+                self.clipboard_service.clear(reason="manual")
+            else:
+                self._update_clipboard_notice(ClipboardStatus(active=True), ClipboardStatus(active=False))
+            self._refresh_clipboard_status()
+            messagebox.showinfo("Буфер обмена", "Буфер обмена очищен вручную.", parent=self.root)
+            return
+
+        messagebox.showwarning(
+            "Буфер обмена",
+            "Не удалось очистить буфер обмена автоматически. Очистите его вручную в системе.",
+            parent=self.root,
+        )
 
     def _require_login(self, initial: bool = False):
         self._login_prompt_active = True
