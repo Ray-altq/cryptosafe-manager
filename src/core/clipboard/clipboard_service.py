@@ -125,6 +125,7 @@ class ClipboardService:
         notifications_enabled: Optional[bool] = None,
         security_level: Optional[str] = None,
         blocked_on_suspicious: Optional[bool] = None,
+        allowed_applications=None,
         preset: Optional[str] = None,
     ):
         with self._lock:
@@ -142,6 +143,8 @@ class ClipboardService:
                 self._settings["security_level"] = self._normalize_security_level(security_level)
             if blocked_on_suspicious is not None:
                 self._settings["blocked_on_suspicious"] = bool(blocked_on_suspicious)
+            if allowed_applications is not None:
+                self._settings["allowed_applications"] = self._normalize_allowed_applications(allowed_applications)
 
             self._persist_settings()
             self._notify()
@@ -366,6 +369,15 @@ class ClipboardService:
                 return value in {None, ""}
             return value == self._current_item.reveal()
 
+    def is_application_allowed(self, application_name: str) -> bool:
+        normalized_name = self._normalize_application_name(application_name)
+        if not normalized_name:
+            return False
+        allowed_applications = self.get_settings().get("allowed_applications", [])
+        if not allowed_applications:
+            return True
+        return normalized_name in allowed_applications
+
     def _notify(self):
         status = self.get_status()
         for callback in list(self._observers):
@@ -379,6 +391,7 @@ class ClipboardService:
             "notifications_enabled": True,
             "security_level": "basic",
             "blocked_on_suspicious": False,
+            "allowed_applications": [],
             "preset": "standard",
         }
 
@@ -392,6 +405,9 @@ class ClipboardService:
         defaults["security_level"] = self._normalize_security_level(defaults.get("security_level", "basic"))
         defaults["notifications_enabled"] = bool(defaults.get("notifications_enabled", True))
         defaults["blocked_on_suspicious"] = bool(defaults.get("blocked_on_suspicious", False))
+        defaults["allowed_applications"] = self._normalize_allowed_applications(
+            defaults.get("allowed_applications", [])
+        )
         defaults["preset"] = str(defaults.get("preset", "standard")).strip().lower() or "standard"
         return defaults
 
@@ -415,6 +431,30 @@ class ClipboardService:
         normalized = str(security_level or "basic").strip().lower()
         if normalized not in {"basic", "advanced", "paranoid"}:
             return "basic"
+        return normalized
+
+    def _normalize_allowed_applications(self, allowed_applications) -> list[str]:
+        if isinstance(allowed_applications, str):
+            raw_items = allowed_applications.replace(";", ",").replace("\n", ",").split(",")
+        elif isinstance(allowed_applications, (list, tuple, set)):
+            raw_items = list(allowed_applications)
+        else:
+            raw_items = []
+
+        normalized_items = []
+        seen_items = set()
+        for item in raw_items:
+            normalized_item = self._normalize_application_name(item)
+            if not normalized_item or normalized_item in seen_items:
+                continue
+            seen_items.add(normalized_item)
+            normalized_items.append(normalized_item)
+        return normalized_items
+
+    def _normalize_application_name(self, application_name: str) -> str:
+        normalized = str(application_name or "").strip().lower()
+        if normalized.endswith(".exe"):
+            normalized = normalized[:-4]
         return normalized
 
     def _build_masked_preview(self, value: str, data_type: str) -> str:

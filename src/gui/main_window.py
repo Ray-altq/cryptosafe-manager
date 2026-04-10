@@ -710,6 +710,7 @@ class MainWindow:
         notifications_enabled: bool,
         security_level: str,
         blocked_on_suspicious: bool,
+        allowed_applications: str = "",
     ) -> str:
         security_labels = {
             "basic": "базовый",
@@ -719,11 +720,16 @@ class MainWindow:
         notifications_text = "включены" if notifications_enabled else "выключены"
         blocked_text = "с блокировкой копирования" if blocked_on_suspicious else "без блокировки копирования"
         level_text = security_labels.get(str(security_level or "").strip().lower(), "базовый")
+        allowed_text = "все приложения"
+        normalized_allowed = [item.strip() for item in str(allowed_applications or "").split(",") if item.strip()]
+        if normalized_allowed:
+            allowed_text = ", ".join(normalized_allowed)
         return (
             f"Автоочистка: {int(timeout_seconds)} сек | "
             f"Уведомления: {notifications_text} | "
             f"Уровень: {level_text} | "
-            f"{blocked_text}"
+            f"{blocked_text} | "
+            f"Разрешённые приложения: {allowed_text}"
         )
 
     def _clipboard_notifications_enabled(self) -> bool:
@@ -2136,6 +2142,7 @@ class MainWindow:
                 "notifications_enabled": self.config.get("security.clipboard_notifications", True),
                 "security_level": self.config.get("security.clipboard_security_level", "basic"),
                 "blocked_on_suspicious": self.config.get("security.clipboard_blocked_on_suspicious", False),
+                "allowed_applications": self.config.get("security.clipboard_allowed_applications", []),
                 "preset": "standard",
             }
         )
@@ -2147,6 +2154,9 @@ class MainWindow:
         clipboard_security_level = tk.StringVar(value=clipboard_settings.get("security_level", "basic"))
         clipboard_blocked_on_suspicious = tk.BooleanVar(
             value=clipboard_settings.get("blocked_on_suspicious", False)
+        )
+        clipboard_allowed_applications = tk.StringVar(
+            value=", ".join(clipboard_settings.get("allowed_applications", []))
         )
         detected_clipboard_preset = self._detect_clipboard_preset(
             timeout_seconds=clipboard_timeout.get(),
@@ -2201,6 +2211,15 @@ class MainWindow:
             variable=clipboard_blocked_on_suspicious,
         ).pack(anchor=tk.W, padx=10, pady=(8, 2))
 
+        ttk.Label(dialog, text="Разрешённые приложения для clipboard").pack(anchor=tk.W, padx=10, pady=(12, 2))
+        ttk.Entry(dialog, textvariable=clipboard_allowed_applications).pack(fill=tk.X, padx=10, pady=2)
+        ttk.Label(
+            dialog,
+            text="Укажите имена процессов через запятую, например: explorer, code, keepassxc",
+            wraplength=420,
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W, padx=10, pady=(2, 4))
+
         ttk.Label(dialog, textvariable=clipboard_summary, wraplength=420, justify=tk.LEFT).pack(
             anchor=tk.W, padx=10, pady=(4, 8)
         )
@@ -2245,6 +2264,7 @@ class MainWindow:
                     notifications_enabled=clipboard_notifications_enabled.get(),
                     security_level=clipboard_security_level.get(),
                     blocked_on_suspicious=clipboard_blocked_on_suspicious.get(),
+                    allowed_applications=clipboard_allowed_applications.get(),
                 )
             )
 
@@ -2266,6 +2286,7 @@ class MainWindow:
             clipboard_notifications_enabled,
             clipboard_security_level,
             clipboard_blocked_on_suspicious,
+            clipboard_allowed_applications,
         ):
             variable.trace_add("write", refresh_clipboard_summary)
         refresh_clipboard_summary()
@@ -2275,6 +2296,10 @@ class MainWindow:
             self.config.set("security.clipboard_notifications", clipboard_notifications_enabled.get())
             self.config.set("security.clipboard_security_level", clipboard_security_level.get())
             self.config.set("security.clipboard_blocked_on_suspicious", clipboard_blocked_on_suspicious.get())
+            normalized_allowed_applications = [
+                item.strip() for item in clipboard_allowed_applications.get().replace(";", ",").split(",") if item.strip()
+            ]
+            self.config.set("security.clipboard_allowed_applications", normalized_allowed_applications)
             self.config.set("security.auto_lock_minutes", auto_lock_minutes.get())
             self.config.set("security.min_password_length", min_password_length.get())
             self.config.set("security.key_cache_timeout_minutes", key_cache_timeout_minutes.get())
@@ -2292,6 +2317,7 @@ class MainWindow:
                     notifications_enabled=clipboard_notifications_enabled.get(),
                     security_level=clipboard_security_level.get(),
                     blocked_on_suspicious=clipboard_blocked_on_suspicious.get(),
+                    allowed_applications=normalized_allowed_applications,
                     preset=selected_preset,
                 )
             self.password_validator.min_length = min_password_length.get()

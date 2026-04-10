@@ -144,6 +144,17 @@ class ClipboardServiceTestCase(unittest.TestCase):
         self.assertEqual(stored["preset"], "custom")
         self.assertEqual(stored["timeout_seconds"], 42)
 
+    def test_allowed_applications_are_normalized_and_persisted(self):
+        self.service.configure(
+            allowed_applications=[" Code.exe ", "explorer", "code", "KEEPASSXC.EXE"],
+        )
+
+        stored = self.database.get_setting("security.clipboard", {})
+        self.assertEqual(stored["allowed_applications"], ["code", "explorer", "keepassxc"])
+        self.assertTrue(self.service.is_application_allowed("code.exe"))
+        self.assertTrue(self.service.is_application_allowed("Keepassxc"))
+        self.assertFalse(self.service.is_application_allowed("telegram"))
+
     def test_replacement_copy_clears_previous_clipboard_content(self):
         self.service.copy_text("first-secret", source_entry_id=1)
         self.service.copy_text("second-secret", source_entry_id=2)

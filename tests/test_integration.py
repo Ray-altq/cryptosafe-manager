@@ -134,6 +134,7 @@ class FakeClipboardService:
             "notifications_enabled": True,
             "security_level": "basic",
             "blocked_on_suspicious": False,
+            "allowed_applications": [],
             "preset": "standard",
         }
         self.configure_calls = []
@@ -906,6 +907,19 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
 
         self.assertEqual(secure_preset, "secure")
         self.assertEqual(custom_preset, "custom")
+
+    def test_build_clipboard_settings_summary_includes_allowed_applications(self):
+        window = MainWindow.__new__(MainWindow)
+
+        summary = window._build_clipboard_settings_summary(
+            timeout_seconds=20,
+            notifications_enabled=True,
+            security_level="advanced",
+            blocked_on_suspicious=True,
+            allowed_applications="explorer, code, keepassxc",
+        )
+
+        self.assertIn("Разрешённые приложения: explorer, code, keepassxc", summary)
 
     def test_apply_clipboard_preset_to_vars_updates_all_fields(self):
         window = MainWindow.__new__(MainWindow)
