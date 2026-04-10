@@ -300,6 +300,73 @@ class ClipboardServiceTestCase(unittest.TestCase):
         self.assertIn(final_value, values)
         self.assertEqual(self.state.get_clipboard(), final_value)
 
+    def test_concurrent_copy_clear_and_tick_operations_keep_state_consistent(self):
+        start_event = threading.Event()
+        errors = []
+
+        def copy_worker():
+            try:
+                start_event.wait(timeout=5)
+                for index in range(10):
+                    self.service.copy_text(f"secret-{index}", data_type="password", source_entry_id=index)
+            except Exception as error:
+                errors.append(error)
+
+        def clear_worker():
+            try:
+                start_event.wait(timeout=5)
+                for _index in range(10):
+                    self.service.clear(reason="manual", publish_event=False)
+            except Exception as error:
+                errors.append(error)
+
+        def tick_worker():
+            try:
+                start_event.wait(timeout=5)
+                for _index in range(10):
+                    self.service.tick()
+            except Exception as error:
+                errors.append(error)
+
+        threads = [
+            threading.Thread(target=copy_worker),
+            threading.Thread(target=clear_worker),
+            threading.Thread(target=tick_worker),
+        ]
+        for thread in threads:
+            thread.start()
+
+        start_event.set()
+        for thread in threads:
+            thread.join(timeout=5)
+
+        self.assertEqual(errors, [])
+        status = self.service.get_status()
+        revealed = self.service.reveal_current_text()
+        if status.active:
+            self.assertEqual(self.state.get_clipboard(), revealed)
+            self.assertEqual(self.adapter.value, revealed)
+        else:
+            self.assertIn(self.state.get_clipboard(), {None, ""})
+
+    def test_successful_copy_resets_failed_clear_flag_after_previous_failure(self):
+        self.service = ClipboardService(
+            FailingClearClipboardAdapter(),
+            database=self.database,
+            config=self.config,
+            state_manager=self.state,
+            bus=self.bus,
+        )
+        self.service.copy_text("Secret!123")
+        self.service.clear(reason="manual")
+        self.assertTrue(self.service.did_last_clear_fail())
+
+        self.service.adapter = FakeClipboardAdapter()
+        self.service.copy_text("Recovered!456")
+
+        self.assertFalse(self.service.did_last_clear_fail())
+        self.assertIsNone(self.service.get_last_clear_reason())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1351,6 +1351,28 @@ class TestMainWindowSecurityState(IntegrationTestCase):
         self.assertEqual(window.clipboard_service.last_clear_reason, "startup_recovery")
         self.assertTrue(window.clipboard_service.last_clear_failed)
 
+    def test_run_startup_clipboard_recovery_clears_stale_root_clipboard_value(self):
+        window = MainWindow.__new__(MainWindow)
+        window.root = FakeRoot()
+        window.root.clipboard = "stale-secret"
+        window.db = Database(self.make_db_path("startup-recovery-stale-root.db"))
+        self.addCleanup(window.db.close)
+        window.db.set_setting(MainWindow.CLIPBOARD_RECOVERY_PENDING_KEY, True)
+        window.clipboard_service = FakeClipboardService()
+        window._clear_windows_clipboard = lambda: False
+        window._handle_clipboard_clear_failure = lambda: setattr(window, "_startup_failure_handled", True)
+
+        window._setup_clipboard_recovery_tracking()
+        window._run_startup_clipboard_recovery()
+
+        self.assertEqual(window.root.clipboard, "")
+        self.assertGreater(window.root.update_calls, 0)
+        self.assertEqual(
+            window.clipboard_service.clear_calls[-1],
+            {"reason": "startup_recovery", "publish_event": False},
+        )
+        self.assertFalse(getattr(window, "_startup_failure_handled", False))
+
     def test_on_close_warns_when_clipboard_clear_failed_with_readable_message(self):
         window = MainWindow.__new__(MainWindow)
         window.auth_service = FakeAuthService()
