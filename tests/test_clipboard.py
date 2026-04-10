@@ -1,6 +1,7 @@
 import os
 import sys
 import tempfile
+import threading
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -218,6 +219,43 @@ class ClipboardServiceTestCase(unittest.TestCase):
         self.assertEqual(clipboard_errors[-1].data["entry_id"], 5)
         self.assertEqual(clipboard_errors[-1].data["data_type"], "password")
         self.assertNotIn("Secret!123", str(clipboard_errors[-1].data))
+
+    def test_failed_replacement_does_not_leave_previous_secret_active(self):
+        self.service.copy_text("first-secret", data_type="password", source_entry_id=1)
+        self.service.adapter = FailingCopyClipboardAdapter()
+
+        with self.assertRaises(ClipboardAccessError):
+            self.service.copy_text("second-secret", data_type="password", source_entry_id=2)
+
+        self.assertFalse(self.service.get_status().active)
+        self.assertIsNone(self.state.get_clipboard())
+
+    def test_rapid_concurrent_copy_operations_keep_consistent_final_state(self):
+        start_event = threading.Event()
+        errors = []
+        values = [f"secret-{index}" for index in range(5)]
+        threads = []
+
+        def worker(value: str, entry_id: int):
+            try:
+                start_event.wait(timeout=5)
+                self.service.copy_text(value, data_type="password", source_entry_id=entry_id)
+            except Exception as error:
+                errors.append(error)
+
+        for index, value in enumerate(values, start=1):
+            thread = threading.Thread(target=worker, args=(value, index))
+            threads.append(thread)
+            thread.start()
+
+        start_event.set()
+        for thread in threads:
+            thread.join(timeout=5)
+
+        self.assertEqual(errors, [])
+        final_value = self.service.reveal_current_text()
+        self.assertIn(final_value, values)
+        self.assertEqual(self.state.get_clipboard(), final_value)
 
 
 if __name__ == "__main__":
