@@ -4,6 +4,7 @@ import ctypes
 import os
 import subprocess
 import sys
+import time
 from abc import ABC, abstractmethod
 from typing import Optional
 
@@ -51,70 +52,122 @@ class CompositeClipboardAdapter(ClipboardAdapter):
 
 
 class WindowsClipboardAdapter(ClipboardAdapter):
-    def copy_to_clipboard(self, data: str) -> bool:
+    def _with_win32clipboard(self, action) -> bool:
         try:
             import win32clipboard  # type: ignore
-
-            win32clipboard.OpenClipboard()
-            win32clipboard.EmptyClipboard()
-            win32clipboard.SetClipboardText(data, win32clipboard.CF_UNICODETEXT)
-            win32clipboard.CloseClipboard()
-            return True
         except Exception:
             return False
 
-    def clear_clipboard(self) -> bool:
-        try:
-            import win32clipboard  # type: ignore
-
-            win32clipboard.OpenClipboard()
-            win32clipboard.EmptyClipboard()
-            win32clipboard.CloseClipboard()
-            return True
-        except Exception:
+        for _attempt in range(3):
+            opened = False
             try:
-                user32 = ctypes.windll.user32
-                if not user32.OpenClipboard(None):
-                    return False
-                user32.EmptyClipboard()
-                user32.CloseClipboard()
+                win32clipboard.OpenClipboard()
+                opened = True
+                action(win32clipboard)
                 return True
             except Exception:
+                time.sleep(0.02)
+            finally:
+                if opened:
+                    try:
+                        win32clipboard.CloseClipboard()
+                    except Exception:
+                        pass
+        return False
+
+    def copy_to_clipboard(self, data: str) -> bool:
+        return self._with_win32clipboard(
+            lambda win32clipboard: (
+                win32clipboard.EmptyClipboard(),
+                win32clipboard.SetClipboardText(data, win32clipboard.CF_UNICODETEXT),
+            )
+        )
+
+    def clear_clipboard(self) -> bool:
+        if self._with_win32clipboard(lambda win32clipboard: win32clipboard.EmptyClipboard()):
+            return True
+        try:
+            user32 = ctypes.windll.user32
+            if not user32.OpenClipboard(None):
                 return False
+            try:
+                user32.EmptyClipboard()
+                return True
+            finally:
+                try:
+                    user32.CloseClipboard()
+                except Exception:
+                    pass
+        except Exception:
+            return False
 
     def get_clipboard_content(self) -> Optional[str]:
         try:
             import win32clipboard  # type: ignore
-
-            win32clipboard.OpenClipboard()
-            try:
-                if win32clipboard.IsClipboardFormatAvailable(win32clipboard.CF_UNICODETEXT):
-                    return win32clipboard.GetClipboardData(win32clipboard.CF_UNICODETEXT)
-            finally:
-                win32clipboard.CloseClipboard()
         except Exception:
             return None
+
+        for _attempt in range(3):
+            opened = False
+            try:
+                win32clipboard.OpenClipboard()
+                opened = True
+                if win32clipboard.IsClipboardFormatAvailable(win32clipboard.CF_UNICODETEXT):
+                    return win32clipboard.GetClipboardData(win32clipboard.CF_UNICODETEXT)
+                return None
+            except Exception:
+                time.sleep(0.02)
+            finally:
+                if opened:
+                    try:
+                        win32clipboard.CloseClipboard()
+                    except Exception:
+                        pass
         return None
 
 
 class MacOSClipboardAdapter(ClipboardAdapter):
+    def _run_commands(self, commands: list[list[str]], *, input_data: Optional[str] = None) -> bool:
+        for command in commands:
+            try:
+                process = subprocess.run(
+                    command,
+                    input=input_data,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                if process.returncode == 0:
+                    return True
+            except FileNotFoundError:
+                continue
+            except Exception:
+                return False
+        return False
+
     def copy_to_clipboard(self, data: str) -> bool:
-        try:
-            process = subprocess.run(["pbcopy"], input=data, text=True, capture_output=True, check=False)
-            return process.returncode == 0
-        except Exception:
-            return False
+        escaped_data = data.replace("\\", "\\\\").replace('"', '\\"')
+        return self._run_commands(
+            [
+                ["pbcopy"],
+                ["osascript", "-e", f'set the clipboard to "{escaped_data}"'],
+            ],
+            input_data=data,
+        )
 
     def clear_clipboard(self) -> bool:
         return self.copy_to_clipboard("")
 
     def get_clipboard_content(self) -> Optional[str]:
-        try:
-            process = subprocess.run(["pbpaste"], text=True, capture_output=True, check=False)
-            if process.returncode == 0:
-                return process.stdout
-        except Exception:
-            return None
+        for command in [["pbpaste"], ["osascript", "-e", "the clipboard as text"]]:
+            try:
+                process = subprocess.run(command, text=True, capture_output=True, check=False)
+                if process.returncode == 0:
+                    return process.stdout
+            except FileNotFoundError:
+                continue
+            except Exception:
+                return None
         return None
 
 

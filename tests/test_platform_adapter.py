@@ -1,5 +1,6 @@
 import os
 import sys
+import types
 import unittest
 from unittest.mock import patch
 
@@ -115,6 +116,84 @@ class TestCreatePlatformAdapter(unittest.TestCase):
 
 
 class TestPlatformAdapters(unittest.TestCase):
+    def test_windows_clipboard_adapter_retries_busy_clipboard_and_succeeds(self):
+        state = {"open_calls": 0, "closed_calls": 0, "stored_text": None}
+
+        fake_win32clipboard = types.SimpleNamespace(
+            CF_UNICODETEXT=13,
+            OpenClipboard=lambda: self._fake_open_clipboard(state),
+            EmptyClipboard=lambda: None,
+            SetClipboardText=lambda value, _fmt: state.update(stored_text=value),
+            CloseClipboard=lambda: state.update(closed_calls=state["closed_calls"] + 1),
+            IsClipboardFormatAvailable=lambda _fmt: True,
+            GetClipboardData=lambda _fmt: state["stored_text"],
+        )
+
+        adapter = platform_adapter.WindowsClipboardAdapter()
+
+        with patch.dict(sys.modules, {"win32clipboard": fake_win32clipboard}):
+            result = adapter.copy_to_clipboard("Secret!123")
+
+        self.assertTrue(result)
+        self.assertEqual(state["open_calls"], 2)
+        self.assertEqual(state["closed_calls"], 1)
+        self.assertEqual(state["stored_text"], "Secret!123")
+
+    def test_windows_clipboard_adapter_uses_user32_fallback_for_clear(self):
+        user32_calls = {"open": 0, "empty": 0, "close": 0}
+        fake_user32 = types.SimpleNamespace(
+            OpenClipboard=lambda _handle: self._fake_user32_open(user32_calls),
+            EmptyClipboard=lambda: user32_calls.update(empty=user32_calls["empty"] + 1),
+            CloseClipboard=lambda: user32_calls.update(close=user32_calls["close"] + 1),
+        )
+        adapter = platform_adapter.WindowsClipboardAdapter()
+
+        with patch.object(adapter, "_with_win32clipboard", return_value=False), patch.object(
+            platform_adapter.ctypes, "windll", types.SimpleNamespace(user32=fake_user32), create=True
+        ):
+            result = adapter.clear_clipboard()
+
+        self.assertTrue(result)
+        self.assertEqual(user32_calls["open"], 1)
+        self.assertEqual(user32_calls["empty"], 1)
+        self.assertEqual(user32_calls["close"], 1)
+
+    def test_macos_clipboard_adapter_falls_back_to_osascript_on_missing_pbcopy(self):
+        calls = []
+
+        def fake_run(command, input=None, text=None, capture_output=None, check=None):
+            calls.append(command)
+            if command[0] == "pbcopy":
+                raise FileNotFoundError("pbcopy not found")
+            return FakeProcessResult(returncode=0)
+
+        adapter = platform_adapter.MacOSClipboardAdapter()
+
+        with patch.object(platform_adapter.subprocess, "run", side_effect=fake_run):
+            result = adapter.copy_to_clipboard('Secret "123"')
+
+        self.assertTrue(result)
+        self.assertEqual(calls[0], ["pbcopy"])
+        self.assertEqual(calls[1][0], "osascript")
+
+    def test_macos_clipboard_adapter_reads_with_osascript_fallback(self):
+        calls = []
+
+        def fake_run(command, text=None, capture_output=None, check=None):
+            calls.append(command)
+            if command[0] == "pbpaste":
+                raise FileNotFoundError("pbpaste not found")
+            return FakeProcessResult(returncode=0, stdout="clipboard text")
+
+        adapter = platform_adapter.MacOSClipboardAdapter()
+
+        with patch.object(platform_adapter.subprocess, "run", side_effect=fake_run):
+            value = adapter.get_clipboard_content()
+
+        self.assertEqual(value, "clipboard text")
+        self.assertEqual(calls[0], ["pbpaste"])
+        self.assertEqual(calls[1], ["osascript", "-e", "the clipboard as text"])
+
     def test_tk_clipboard_adapter_roundtrip(self):
         root = FakeRoot()
         adapter = platform_adapter.TkClipboardAdapter(root)
@@ -207,6 +286,17 @@ class TestPlatformAdapters(unittest.TestCase):
         self.assertEqual(calls[0], ["wl-copy"])
         self.assertIn(["xclip", "-selection", "clipboard"], calls)
         self.assertIn(["xclip", "-selection", "primary"], calls)
+
+    @staticmethod
+    def _fake_open_clipboard(state):
+        state["open_calls"] += 1
+        if state["open_calls"] == 1:
+            raise RuntimeError("clipboard busy")
+
+    @staticmethod
+    def _fake_user32_open(state):
+        state["open"] += 1
+        return True
 
 
 if __name__ == "__main__":
