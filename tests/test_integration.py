@@ -1063,6 +1063,19 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
         self.assertIn("тип=пароль", line)
         self.assertIn("наблюдаемая длина=21", line)
 
+    def test_format_audit_log_line_for_clipboard_clear_includes_monitor_reason(self):
+        window = MainWindow.__new__(MainWindow)
+
+        class AuditLogRecord:
+            action = "clipboard_cleared"
+            timestamp = datetime(2026, 4, 7, 12, 30, 2)
+            entry_id = None
+            details = "reason=monitor_warning, monitor_reason=external_clear, data_type=password, observed_length=0"
+
+        line = window._format_audit_log_line(AuditLogRecord())
+
+        self.assertIn("external_clear", line)
+
     def test_format_clipboard_clear_reason_handles_manual_and_replacement(self):
         window = MainWindow.__new__(MainWindow)
 

@@ -112,10 +112,42 @@ class ClipboardServiceTestCase(unittest.TestCase):
         self.adapter.value = "Changed by another app"
 
         monitor.poll()
+        status = self.service.get_status()
+        self.assertFalse(status.suspicious_activity)
+
+        monitor.poll()
 
         status = self.service.get_status()
         self.assertTrue(status.suspicious_activity)
         self.assertLessEqual(status.remaining_seconds, 1)
+
+    def test_monitor_reacts_immediately_in_paranoid_mode(self):
+        self.service.configure(security_level="paranoid")
+        self.service.copy_text("Secret!123")
+        monitor = ClipboardMonitor(self.adapter, self.service)
+        self.adapter.value = "Changed by another app"
+
+        monitor.poll()
+
+        status = self.service.get_status()
+        self.assertTrue(status.suspicious_activity)
+        self.assertLessEqual(status.remaining_seconds, 1)
+
+    def test_monitor_marks_external_clear_with_separate_reason(self):
+        received_events = []
+        self.bus.subscribe(EventType.CLIPBOARD_CLEARED, received_events.append)
+        self.service.configure(security_level="paranoid")
+        self.service.copy_text("Secret!123")
+        monitor = ClipboardMonitor(self.adapter, self.service)
+        self.adapter.value = ""
+
+        monitor.poll()
+
+        self.assertEqual(received_events[-1].data["reason"], "monitor_warning")
+        self.assertEqual(received_events[-1].data["monitor_reason"], "external_clear")
+        self.assertEqual(received_events[-1].data["entry_id"], None)
+        self.assertEqual(received_events[-1].data["data_type"], "password")
+        self.assertEqual(received_events[-1].data["observed_length"], 0)
 
     def test_settings_are_persisted_in_database(self):
         self.service.configure(

@@ -2073,6 +2073,8 @@ class MainWindow:
         if action == "clipboard_cleared":
             clear_reason = parsed_details.get("reason", "")
             detail_parts = [self._format_clipboard_clear_reason(clear_reason)]
+            if parsed_details.get("monitor_reason"):
+                detail_parts.append(f"деталь={parsed_details['monitor_reason']}")
             if parsed_details.get("data_type"):
                 detail_parts.append(f"тип={self._format_clipboard_data_type(parsed_details['data_type'])}")
             if parsed_details.get("entry_id") not in {None, "", "None"}:

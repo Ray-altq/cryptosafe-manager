@@ -313,7 +313,7 @@ class ClipboardService:
                     self._current_item.expires_at = accelerated_expiration
 
             details = {
-                "reason": reason,
+                "monitor_reason": reason,
                 "entry_id": self._current_item.source_entry_id,
                 "data_type": self._current_item.data_type,
             }
