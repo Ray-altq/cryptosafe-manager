@@ -119,25 +119,58 @@ class MacOSClipboardAdapter(ClipboardAdapter):
 
 
 class LinuxClipboardAdapter(ClipboardAdapter):
+    def __init__(self, selection_mode: str = "clipboard"):
+        normalized_mode = str(selection_mode or "clipboard").strip().lower()
+        if normalized_mode not in {"clipboard", "primary", "both"}:
+            normalized_mode = "clipboard"
+        self.selection_mode = normalized_mode
+
+    def _copy_commands(self) -> list[list[str]]:
+        if self.selection_mode == "primary":
+            return [["xclip", "-selection", "primary"], ["xsel", "--primary", "--input"]]
+        if self.selection_mode == "both":
+            return [
+                ["wl-copy"],
+                ["xclip", "-selection", "clipboard"],
+                ["xclip", "-selection", "primary"],
+                ["xsel", "--clipboard", "--input"],
+                ["xsel", "--primary", "--input"],
+            ]
+        return [["wl-copy"], ["xclip", "-selection", "clipboard"], ["xsel", "--clipboard", "--input"]]
+
+    def _read_commands(self) -> list[list[str]]:
+        if self.selection_mode == "primary":
+            return [["xclip", "-selection", "primary", "-o"], ["xsel", "--primary", "--output"]]
+        if self.selection_mode == "both":
+            return [
+                ["wl-paste", "-n"],
+                ["xclip", "-selection", "clipboard", "-o"],
+                ["xclip", "-selection", "primary", "-o"],
+                ["xsel", "--clipboard", "--output"],
+                ["xsel", "--primary", "--output"],
+            ]
+        return [["wl-paste", "-n"], ["xclip", "-selection", "clipboard", "-o"], ["xsel", "--clipboard", "--output"]]
+
     def copy_to_clipboard(self, data: str) -> bool:
-        commands = [["wl-copy"], ["xclip", "-selection", "clipboard"], ["xsel", "--clipboard", "--input"]]
-        for command in commands:
+        result = False
+        for command in self._copy_commands():
             try:
                 process = subprocess.run(command, input=data, text=True, capture_output=True, check=False)
                 if process.returncode == 0:
-                    return True
+                    result = True
+                    if self.selection_mode != "both":
+                        return True
             except FileNotFoundError:
                 continue
             except Exception:
                 return False
-        return False
+        return result
 
     def clear_clipboard(self) -> bool:
         return self.copy_to_clipboard("")
 
     def get_clipboard_content(self) -> Optional[str]:
-        commands = [["wl-paste", "-n"], ["xclip", "-selection", "clipboard", "-o"], ["xsel", "--clipboard", "--output"]]
-        for command in commands:
+        for command in self._read_commands():
             try:
                 process = subprocess.run(command, text=True, capture_output=True, check=False)
                 if process.returncode == 0:
@@ -202,7 +235,7 @@ class TkClipboardAdapter(ClipboardAdapter):
             return None
 
 
-def create_platform_adapter(root=None) -> ClipboardAdapter:
+def create_platform_adapter(root=None, *, linux_selection_mode: str = "clipboard") -> ClipboardAdapter:
     adapters: list[ClipboardAdapter] = []
 
     if os.name == "nt":
@@ -210,7 +243,7 @@ def create_platform_adapter(root=None) -> ClipboardAdapter:
     elif sys.platform == "darwin":
         adapters.append(MacOSClipboardAdapter())
     elif sys.platform.startswith("linux"):
-        adapters.append(LinuxClipboardAdapter())
+        adapters.append(LinuxClipboardAdapter(selection_mode=linux_selection_mode))
 
     if root is not None:
         adapters.append(TkClipboardAdapter(root))

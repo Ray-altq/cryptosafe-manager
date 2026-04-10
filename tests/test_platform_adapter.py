@@ -97,6 +97,22 @@ class TestCreatePlatformAdapter(unittest.TestCase):
             with self.assertRaises(platform_adapter.ClipboardAdapterError):
                 platform_adapter.create_platform_adapter()
 
+    def test_create_platform_adapter_passes_linux_selection_mode(self):
+        linux_adapter = object()
+
+        with patch.object(platform_adapter.os, "name", "posix"), patch.object(
+            platform_adapter.sys, "platform", "linux"
+        ), patch.object(
+            platform_adapter, "LinuxClipboardAdapter", return_value=linux_adapter
+        ) as linux_factory, patch.object(
+            platform_adapter, "PyperclipClipboardAdapter", side_effect=platform_adapter.ClipboardAdapterError("missing")
+        ):
+            adapter = platform_adapter.create_platform_adapter(linux_selection_mode="primary")
+
+        self.assertIsInstance(adapter, platform_adapter.CompositeClipboardAdapter)
+        self.assertEqual(adapter.adapters, [linux_adapter])
+        linux_factory.assert_called_once_with(selection_mode="primary")
+
 
 class TestPlatformAdapters(unittest.TestCase):
     def test_tk_clipboard_adapter_roundtrip(self):
@@ -144,6 +160,53 @@ class TestPlatformAdapters(unittest.TestCase):
         self.assertEqual(value, "clipboard text")
         self.assertEqual(calls[0], ["wl-paste", "-n"])
         self.assertEqual(calls[1], ["xclip", "-selection", "clipboard", "-o"])
+
+    def test_linux_clipboard_adapter_uses_primary_selection_commands(self):
+        calls = []
+
+        def fake_run(command, input=None, text=None, capture_output=None, check=None):
+            calls.append(command)
+            return FakeProcessResult(returncode=0)
+
+        adapter = platform_adapter.LinuxClipboardAdapter(selection_mode="primary")
+
+        with patch.object(platform_adapter.subprocess, "run", side_effect=fake_run):
+            result = adapter.copy_to_clipboard("Secret!123")
+
+        self.assertTrue(result)
+        self.assertEqual(calls[0], ["xclip", "-selection", "primary"])
+
+    def test_linux_clipboard_adapter_reads_primary_selection_when_requested(self):
+        calls = []
+
+        def fake_run(command, text=None, capture_output=None, check=None):
+            calls.append(command)
+            return FakeProcessResult(returncode=0, stdout="primary text")
+
+        adapter = platform_adapter.LinuxClipboardAdapter(selection_mode="primary")
+
+        with patch.object(platform_adapter.subprocess, "run", side_effect=fake_run):
+            value = adapter.get_clipboard_content()
+
+        self.assertEqual(value, "primary text")
+        self.assertEqual(calls[0], ["xclip", "-selection", "primary", "-o"])
+
+    def test_linux_clipboard_adapter_writes_both_clipboard_and_primary_when_requested(self):
+        calls = []
+
+        def fake_run(command, input=None, text=None, capture_output=None, check=None):
+            calls.append(command)
+            return FakeProcessResult(returncode=0)
+
+        adapter = platform_adapter.LinuxClipboardAdapter(selection_mode="both")
+
+        with patch.object(platform_adapter.subprocess, "run", side_effect=fake_run):
+            result = adapter.copy_to_clipboard("Secret!123")
+
+        self.assertTrue(result)
+        self.assertEqual(calls[0], ["wl-copy"])
+        self.assertIn(["xclip", "-selection", "clipboard"], calls)
+        self.assertIn(["xclip", "-selection", "primary"], calls)
 
 
 if __name__ == "__main__":
