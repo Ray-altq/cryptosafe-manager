@@ -150,6 +150,30 @@ class ClipboardService:
         with self._lock:
             return dict(self._settings)
 
+    def _publish_clipboard_error(
+        self,
+        *,
+        operation: str,
+        error_code: str,
+        data_type: str = "",
+        source_entry_id: Optional[int] = None,
+        extra_details: Optional[dict] = None,
+    ):
+        payload = {
+            "operation": operation,
+            "error_code": error_code,
+            "data_type": data_type,
+            "entry_id": source_entry_id,
+        }
+        if extra_details:
+            payload.update(extra_details)
+        self.event_bus.publish(
+            Event(
+                EventType.CLIPBOARD_ERROR,
+                payload,
+            )
+        )
+
     def copy_text(
         self,
         value: str,
@@ -160,12 +184,25 @@ class ClipboardService:
     ):
         normalized_value = str(value or "")
         if not normalized_value:
+            self._publish_clipboard_error(operation="copy", error_code="empty_value", data_type=data_type)
             raise ClipboardAccessError("Нельзя копировать пустое значение")
 
         with self._lock:
             if self._blocked_future_copies:
+                self._publish_clipboard_error(
+                    operation="copy",
+                    error_code="blocked_on_suspicious",
+                    data_type=data_type,
+                    source_entry_id=source_entry_id,
+                )
                 raise ClipboardAccessError("Копирование временно заблокировано из-за подозрительной активности")
             if self.state_manager is not None and hasattr(self.state_manager, "is_locked") and self.state_manager.is_locked():
+                self._publish_clipboard_error(
+                    operation="copy",
+                    error_code="vault_locked",
+                    data_type=data_type,
+                    source_entry_id=source_entry_id,
+                )
                 raise ClipboardAccessError("Буфер обмена доступен только при разблокированном vault")
 
             self.clear(reason="replacement", publish_event=False)
@@ -178,6 +215,12 @@ class ClipboardService:
             )
             if not self.adapter.copy_to_clipboard(normalized_value):
                 item.secure_wipe()
+                self._publish_clipboard_error(
+                    operation="copy",
+                    error_code="adapter_write_failed",
+                    data_type=data_type,
+                    source_entry_id=source_entry_id,
+                )
                 raise ClipboardAccessError("Не удалось записать данные в буфер обмена")
 
             self._current_item = item
@@ -219,6 +262,13 @@ class ClipboardService:
             self._last_clear_failed = had_content and not adapter_cleared
             if self.state_manager is not None and hasattr(self.state_manager, "clear_clipboard"):
                 self.state_manager.clear_clipboard()
+
+            if self._last_clear_failed:
+                self._publish_clipboard_error(
+                    operation="clear",
+                    error_code="adapter_clear_failed",
+                    extra_details={"clear_reason": reason},
+                )
 
             if had_content and publish_event:
                 self.event_bus.publish(

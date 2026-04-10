@@ -949,6 +949,49 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
         self.assertIn("Очистите буфер обмена вручную", showwarning.call_args.args[1])
         self.assertIn("системный буфер обмена мог сохраниться", window.clipboard_notice_label.text)
 
+    def test_format_audit_log_line_for_clipboard_error_is_human_readable(self):
+        window = MainWindow.__new__(MainWindow)
+
+        class AuditLogRecord:
+            action = "clipboard_error"
+            timestamp = datetime(2026, 4, 10, 10, 30, 0)
+            entry_id = 7
+            details = "operation=copy, error_code=adapter_write_failed, entry_id=7, data_type=password"
+
+        line = window._format_audit_log_line(AuditLogRecord())
+
+        self.assertIn("Ошибка буфера обмена", line)
+        self.assertIn("операция копирования", line)
+        self.assertIn("сбой записи через системный адаптер", line)
+        self.assertIn("тип=пароль", line)
+
+    def test_check_security_timers_publishes_clipboard_error_when_monitor_fails(self):
+        window = MainWindow.__new__(MainWindow)
+        window.state = FakeStateManager()
+        window.config = Config()
+        window.key_storage = FakeKeyStorage()
+        window.root = FakeRoot()
+        window.clipboard_service = FakeClipboardService()
+        window._clipboard_monitor_warning_shown = False
+        window._refresh_clipboard_status = lambda: None
+        window.clipboard_service.tick = lambda: None
+
+        class FailingMonitor:
+            def poll(self):
+                raise RuntimeError("monitor failed")
+
+        window.clipboard_monitor = FailingMonitor()
+        published_events = []
+
+        with patch("src.gui.main_window.event_bus.publish", side_effect=lambda event: published_events.append(event)), patch(
+            "src.gui.main_window.messagebox.showwarning"
+        ):
+            window._check_security_timers()
+
+        self.assertEqual(published_events[-1].type.value, "clipboard_error")
+        self.assertEqual(published_events[-1].data["operation"], "monitor_poll")
+        self.assertEqual(published_events[-1].data["error_code"], "monitor_unavailable")
+
 class TestMainWindowSecurityState(IntegrationTestCase):
     def test_lock_vault_clears_decrypted_entries_and_password_visibility_state(self):
         window = MainWindow.__new__(MainWindow)

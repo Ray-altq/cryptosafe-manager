@@ -124,6 +124,22 @@ class TestEvents(unittest.TestCase):
         self.assertIn("reason=monitor_warning", database.records[1]["details"])
         self.assertIn("observed_length=21", database.records[1]["details"])
 
+    def test_audit_logger_records_clipboard_error_without_secret_payload(self):
+        database = FakeAuditDatabase()
+        logger = AuditLogger(database, self.event_bus)
+        self.addCleanup(logger.close)
+
+        error_event = Event(
+            EventType.CLIPBOARD_ERROR,
+            {"operation": "copy", "error_code": "adapter_write_failed", "entry_id": 7, "data_type": "password"},
+        )
+        self.event_bus.publish(error_event)
+
+        self.assertEqual(database.records[-1]["action"], "clipboard_error")
+        self.assertEqual(database.records[-1]["entry_id"], 7)
+        self.assertIn("error_code=adapter_write_failed", database.records[-1]["details"])
+        self.assertNotIn("Secret!123", database.records[-1]["details"])
+
 
 if __name__ == "__main__":
     unittest.main()

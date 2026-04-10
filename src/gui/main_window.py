@@ -371,6 +371,15 @@ class MainWindow:
             except Exception:
                 if not self._clipboard_monitor_warning_shown:
                     self._clipboard_monitor_warning_shown = True
+                    event_bus.publish(
+                        Event(
+                            EventType.CLIPBOARD_ERROR,
+                            {
+                                "operation": "monitor_poll",
+                                "error_code": "monitor_unavailable",
+                            },
+                        )
+                    )
                     messagebox.showwarning(
                         "Мониторинг буфера обмена",
                         "Не удалось проверить состояние буфера обмена. Защита продолжит работу в ограниченном режиме.",
@@ -1862,6 +1871,7 @@ class MainWindow:
             "user_logged_out": "Выход из vault",
             "clipboard_copied": "Копирование в буфер обмена",
             "clipboard_cleared": "Очистка буфера обмена",
+            "clipboard_error": "Ошибка буфера обмена",
             "vault_locked": "Блокировка vault",
             "vault_unlocked": "Разблокировка vault",
         }
@@ -1894,6 +1904,33 @@ class MainWindow:
             if parsed_details.get("observed_length"):
                 detail_parts.append(f"наблюдаемая длина={parsed_details['observed_length']}")
             return " | ".join(part for part in detail_parts if part)
+
+        if action == "clipboard_error":
+            operation_map = {
+                "copy": "операция копирования",
+                "clear": "операция очистки",
+                "monitor_poll": "проверка мониторинга",
+            }
+            error_map = {
+                "empty_value": "пустое значение",
+                "blocked_on_suspicious": "копирование заблокировано защитой",
+                "vault_locked": "vault заблокирован",
+                "adapter_write_failed": "сбой записи через системный адаптер",
+                "adapter_clear_failed": "сбой системной очистки буфера обмена",
+                "monitor_unavailable": "мониторинг буфера обмена недоступен",
+            }
+            detail_parts = []
+            if parsed_details.get("operation"):
+                detail_parts.append(operation_map.get(parsed_details["operation"], parsed_details["operation"]))
+            if parsed_details.get("error_code"):
+                detail_parts.append(error_map.get(parsed_details["error_code"], parsed_details["error_code"]))
+            if parsed_details.get("data_type"):
+                detail_parts.append(f"тип={self._format_clipboard_data_type(parsed_details['data_type'])}")
+            if parsed_details.get("clear_reason"):
+                detail_parts.append(self._format_clipboard_clear_reason(parsed_details["clear_reason"]))
+            if parsed_details.get("entry_id") not in {None, "", "None"}:
+                detail_parts.append(f"entry={parsed_details['entry_id']}")
+            return " | ".join(detail_parts)
 
         return str(details or "")
 

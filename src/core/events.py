@@ -11,6 +11,7 @@ class EventType(Enum):
     USER_LOGGED_OUT = "user_logged_out"
     CLIPBOARD_COPIED = "clipboard_copied"
     CLIPBOARD_CLEARED = "clipboard_cleared"
+    CLIPBOARD_ERROR = "clipboard_error"
     VAULT_UNLOCKED = "vault_unlocked"
     VAULT_LOCKED = "vault_locked"
 

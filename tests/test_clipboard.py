@@ -177,6 +177,8 @@ class ClipboardServiceTestCase(unittest.TestCase):
     def test_clear_event_marks_failed_system_clear(self):
         received_events = []
         self.bus.subscribe(EventType.CLIPBOARD_CLEARED, received_events.append)
+        clipboard_errors = []
+        self.bus.subscribe(EventType.CLIPBOARD_ERROR, clipboard_errors.append)
         self.service = ClipboardService(
             FailingClearClipboardAdapter(),
             database=self.database,
@@ -192,6 +194,29 @@ class ClipboardServiceTestCase(unittest.TestCase):
         self.assertTrue(self.service.did_last_clear_fail())
         self.assertEqual(received_events[-1].data["reason"], "manual")
         self.assertTrue(received_events[-1].data["clear_failed"])
+        self.assertEqual(clipboard_errors[-1].data["operation"], "clear")
+        self.assertEqual(clipboard_errors[-1].data["error_code"], "adapter_clear_failed")
+        self.assertEqual(clipboard_errors[-1].data["clear_reason"], "manual")
+
+    def test_copy_failure_publishes_clipboard_error_without_secret_value(self):
+        clipboard_errors = []
+        self.bus.subscribe(EventType.CLIPBOARD_ERROR, clipboard_errors.append)
+        self.service = ClipboardService(
+            FailingCopyClipboardAdapter(),
+            database=self.database,
+            config=self.config,
+            state_manager=self.state,
+            bus=self.bus,
+        )
+
+        with self.assertRaises(ClipboardAccessError):
+            self.service.copy_text("Secret!123", data_type="password", source_entry_id=5)
+
+        self.assertEqual(clipboard_errors[-1].data["operation"], "copy")
+        self.assertEqual(clipboard_errors[-1].data["error_code"], "adapter_write_failed")
+        self.assertEqual(clipboard_errors[-1].data["entry_id"], 5)
+        self.assertEqual(clipboard_errors[-1].data["data_type"], "password")
+        self.assertNotIn("Secret!123", str(clipboard_errors[-1].data))
 
 
 if __name__ == "__main__":
