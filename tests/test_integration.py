@@ -138,6 +138,7 @@ class FakeClipboardService:
         }
         self.configure_calls = []
         self.clear_calls = []
+        self.revealed_text = "Secret!123"
 
     def copy_text(self, value, **kwargs):
         self.calls.append((value, kwargs))
@@ -167,6 +168,9 @@ class FakeClipboardService:
             blocked_future_copies=self.status.blocked_future_copies,
         )
         return True
+
+    def reveal_current_text(self):
+        return self.revealed_text
 
 
 class FakeAuthService:
@@ -721,6 +725,7 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
         window.clipboard_service = FakeClipboardService()
         window.clipboard_label = FakeLabel()
         window.clipboard_details_label = FakeLabel()
+        window.clipboard_preview_button = FakeButton()
         window.clipboard_service.status = ClipboardStatus(
             active=True,
             data_type="password",
@@ -737,6 +742,8 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
         self.assertIn("Источник: Example", window.clipboard_details_label.text)
         self.assertIn("Просмотр: Sec*****", window.clipboard_details_label.text)
         self.assertIn("Скоро очистка: 4 сек", window.clipboard_details_label.text)
+
+        self.assertFalse(window.clipboard_preview_button.disabled)
 
     def test_refresh_clipboard_status_disables_preview_button_when_empty(self):
         window = MainWindow.__new__(MainWindow)
@@ -774,6 +781,19 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
 
         self.assertFalse(result)
         self.assertTrue(showerror.called)
+
+    def test_get_full_clipboard_value_for_preview_returns_secret_after_reauth(self):
+        window = MainWindow.__new__(MainWindow)
+        window.root = FakeRoot()
+        window.auth_service = FakeAuthServiceForReveal()
+        window.key_manager = FakeKeyManager()
+        window.clipboard_service = FakeClipboardService()
+        window.clipboard_service.revealed_text = "TopSecret!789"
+
+        with patch("src.gui.main_window.simpledialog.askstring", return_value="ValidMasterPass!9X"):
+            full_value = window._get_full_clipboard_value_for_preview()
+
+        self.assertEqual(full_value, "TopSecret!789")
 
     def test_show_clipboard_preview_dialog_reports_empty_clipboard(self):
         window = MainWindow.__new__(MainWindow)

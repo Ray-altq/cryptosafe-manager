@@ -805,6 +805,13 @@ class MainWindow:
         messagebox.showerror("Ошибка аутентификации", "Неверный мастер-пароль.", parent=self.root)
         return False
 
+    def _get_full_clipboard_value_for_preview(self) -> str:
+        if not self._reauthenticate_for_sensitive_action("Показать содержимое буфера обмена"):
+            return ""
+        if not hasattr(self, "clipboard_service"):
+            return ""
+        return self.clipboard_service.reveal_current_text()
+
     def show_clipboard_preview_dialog(self):
         status = self._get_clipboard_status()
         if not status.active:
@@ -832,9 +839,7 @@ class MainWindow:
         )
 
         def reveal_full_value():
-            if not self._reauthenticate_for_sensitive_action("Показать содержимое буфера обмена"):
-                return
-            full_value = self.clipboard_service.reveal_current_text() if hasattr(self, "clipboard_service") else ""
+            full_value = self._get_full_clipboard_value_for_preview()
             if not full_value:
                 messagebox.showwarning("Буфер обмена", "Содержимое буфера обмена уже очищено.", parent=dialog)
                 dialog.destroy()
