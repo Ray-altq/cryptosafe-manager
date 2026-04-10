@@ -2259,6 +2259,7 @@ class MainWindow:
         self.state.clear_clipboard()
         self._clear_sensitive_view_state()
         self._clear_system_clipboard()
+        self._handle_clipboard_clear_failure()
         try:
             self.audit_logger.close()
         except Exception:

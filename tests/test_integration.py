@@ -203,6 +203,14 @@ class FakeKeyManager:
         pass
 
 
+class FakeAuditLogger:
+    def __init__(self):
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
 class FakeKeyStorage:
     def is_cache_expired(self):
         return False
@@ -1181,6 +1189,55 @@ class TestMainWindowSecurityState(IntegrationTestCase):
 
         self.assertTrue(window._clipboard_cleared)
         self.assertEqual(window._locked_with, False)
+
+    def test_on_close_clears_sensitive_state_and_destroys_window(self):
+        window = MainWindow.__new__(MainWindow)
+        window.auth_service = FakeAuthService()
+        window.key_manager = FakeKeyManager()
+        window.state = FakeStateManager()
+        window.root = FakeRoot()
+        window.audit_logger = FakeAuditLogger()
+        window.db = Database(self.make_db_path("close-test.db"))
+        self.addCleanup(window.db.close)
+        window.clipboard_service = FakeClipboardService()
+        window._clear_sensitive_view_state = lambda: setattr(window, "_view_cleared", True)
+        window._clear_system_clipboard = lambda sync_service=True: True
+        window._handle_clipboard_clear_failure = lambda: setattr(window, "_clear_failure_checked", True)
+
+        window._on_close()
+
+        self.assertTrue(window.auth_service.logged_out)
+        self.assertTrue(window.key_manager.cleared)
+        self.assertTrue(window.state.clipboard_cleared)
+        self.assertTrue(window._view_cleared)
+        self.assertTrue(window._clear_failure_checked)
+        self.assertTrue(window.audit_logger.closed)
+        self.assertTrue(window.root.destroyed)
+
+    def test_on_close_warns_when_clipboard_clear_failed(self):
+        window = MainWindow.__new__(MainWindow)
+        window.auth_service = FakeAuthService()
+        window.key_manager = FakeKeyManager()
+        window.state = FakeStateManager()
+        window.root = FakeRoot()
+        window.audit_logger = FakeAuditLogger()
+        window.db = Database(self.make_db_path("close-failed-clear.db"))
+        self.addCleanup(window.db.close)
+        window.clipboard_service = FakeClipboardService()
+        window._clear_sensitive_view_state = lambda: None
+
+        def fake_clear_system_clipboard(sync_service=True):
+            window.clipboard_service.last_clear_reason = "manual"
+            window.clipboard_service.last_clear_failed = True
+            return False
+
+        window._clear_system_clipboard = fake_clear_system_clipboard
+
+        with patch("src.gui.main_window.messagebox.showwarning") as showwarning:
+            window._on_close()
+
+        self.assertTrue(showwarning.called)
+        self.assertIn("Очистите буфер обмена вручную", showwarning.call_args.args[1])
 
 
 if __name__ == "__main__":
