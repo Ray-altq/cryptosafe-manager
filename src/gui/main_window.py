@@ -77,6 +77,7 @@ class MainWindow:
         self._login_prompt_active = False
         self._initial_login_completed = False
         self._clipboard_monitor_warning_shown = False
+        self._clipboard_notification_toast = None
         self.audit_logger = AuditLogger(self.db, event_bus)
         self.clipboard_service = ClipboardService(
             create_platform_adapter(self.root),
@@ -515,6 +516,7 @@ class MainWindow:
         self._clipboard_status_snapshot = status
         self._sync_clipboard_row_marker(previous_status, status)
         self._update_clipboard_notice(previous_status, status)
+        self._update_clipboard_notification_area(previous_status, status)
         self._handle_clipboard_security_alert(previous_status, status)
         self._refresh_clipboard_status(status)
 
@@ -581,6 +583,69 @@ class MainWindow:
             "text": "текст",
         }
         return mapping.get(str(data_type or "").strip().lower(), "данные")
+
+    def _should_show_clipboard_notification_area(self) -> bool:
+        if not self._clipboard_notifications_enabled():
+            return False
+        try:
+            window_state = self.root.state()
+        except tk.TclError:
+            return False
+        if window_state in {"iconic", "withdrawn"}:
+            return True
+        try:
+            return self.root.focus_displayof() is None
+        except tk.TclError:
+            return False
+
+    def _build_clipboard_notification_message(self, previous_status: ClipboardStatus, status: ClipboardStatus) -> str:
+        if status.active:
+            data_type = self._format_clipboard_data_type(status.data_type)
+            if previous_status.active:
+                return f"Буфер обмена обновлён: {data_type}"
+            return f"Буфер обмена: скопирован {data_type}"
+
+        if previous_status.active:
+            clear_reason = None
+            clear_failed = False
+            if hasattr(self, "clipboard_service"):
+                clear_reason = self.clipboard_service.get_last_clear_reason()
+                clear_failed = self.clipboard_service.did_last_clear_fail()
+            if clear_failed:
+                return self._build_clipboard_clear_failure_text(clear_reason)
+            return self._format_clipboard_clear_reason(clear_reason)
+
+        return ""
+
+    def _show_clipboard_notification_area_message(self, message: str):
+        if not message:
+            return
+        existing_toast = getattr(self, "_clipboard_notification_toast", None)
+        if existing_toast is not None:
+            try:
+                existing_toast.destroy()
+            except Exception:
+                pass
+        try:
+            toast = tk.Toplevel(self.root)
+            toast.overrideredirect(True)
+            toast.attributes("-topmost", True)
+            ttk.Label(toast, text=message, justify=tk.LEFT).pack(ipadx=10, ipady=6)
+            toast.update_idletasks()
+            x_position = max(40, toast.winfo_screenwidth() - 380)
+            y_position = max(40, toast.winfo_screenheight() - 120)
+            toast.geometry(f"+{x_position}+{y_position}")
+            toast.after(4000, toast.destroy)
+            self._clipboard_notification_toast = toast
+        except Exception:
+            self._clipboard_notification_toast = None
+
+    def _update_clipboard_notification_area(self, previous_status: ClipboardStatus, status: ClipboardStatus):
+        if not self._should_show_clipboard_notification_area():
+            return
+        message = self._build_clipboard_notification_message(previous_status, status)
+        if message:
+            self._show_clipboard_notification_area_message(message)
 
     def _get_clipboard_preset_labels(self) -> dict[str, str]:
         return {

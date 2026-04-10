@@ -815,6 +815,7 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
 
     def test_on_clipboard_status_changed_updates_notice_and_table_marker(self):
         window = MainWindow.__new__(MainWindow)
+        window.root = FakeRoot()
         window.table = object()
         window.entry_manager = object()
         window.clipboard_service = FakeClipboardService()
@@ -823,6 +824,7 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
         window.clipboard_details_label = FakeLabel()
         window._clipboard_status_snapshot = ClipboardStatus(active=False)
         window._apply_entry_filter = lambda: setattr(window, "_filter_refreshed", True)
+        window._show_clipboard_notification_area_message = lambda message: setattr(window, "_notification_message", message)
 
         status = ClipboardStatus(
             active=True,
@@ -849,6 +851,42 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
 
         self.assertEqual(marked_title, "Example [В буфере]")
         self.assertEqual(plain_title, "Another")
+
+    def test_on_clipboard_status_changed_uses_notification_area_when_window_minimized(self):
+        window = MainWindow.__new__(MainWindow)
+        window.root = FakeRoot()
+        window.root.window_state = "iconic"
+        window.table = object()
+        window.entry_manager = object()
+        window.clipboard_service = FakeClipboardService()
+        window.clipboard_notice_label = FakeLabel()
+        window.clipboard_label = FakeLabel()
+        window.clipboard_details_label = FakeLabel()
+        window._clipboard_status_snapshot = ClipboardStatus(active=False)
+        window._apply_entry_filter = lambda: None
+        window._show_clipboard_notification_area_message = lambda message: setattr(window, "_notification_message", message)
+
+        status = ClipboardStatus(active=True, data_type="password", remaining_seconds=15)
+
+        window._on_clipboard_status_changed(status)
+
+        self.assertEqual(window._notification_message, "Буфер обмена: скопирован пароль")
+
+    def test_update_clipboard_notification_area_shows_failed_clear_message_when_window_unfocused(self):
+        window = MainWindow.__new__(MainWindow)
+        window.root = FakeRoot()
+        window.root.focus_displayof = lambda: None
+        window.clipboard_service = FakeClipboardService()
+        window.clipboard_service.last_clear_reason = "timeout"
+        window.clipboard_service.last_clear_failed = True
+        window._show_clipboard_notification_area_message = lambda message: setattr(window, "_notification_message", message)
+
+        previous_status = ClipboardStatus(active=True, data_type="password")
+        current_status = ClipboardStatus(active=False)
+
+        window._update_clipboard_notification_area(previous_status, current_status)
+
+        self.assertIn("системный буфер обмена мог сохраниться", window._notification_message)
 
     def test_detect_clipboard_preset_returns_matching_profile_or_custom(self):
         window = MainWindow.__new__(MainWindow)
