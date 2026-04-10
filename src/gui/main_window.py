@@ -43,6 +43,8 @@ class EntryView(dict):
 
 
 class MainWindow:
+    CLIPBOARD_RECOVERY_PENDING_KEY = "runtime.clipboard_recovery_pending"
+
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("CryptoSafe Manager")
@@ -85,6 +87,7 @@ class MainWindow:
         self.clipboard_monitor = ClipboardMonitor(self.clipboard_service.adapter, self.clipboard_service)
         self._clipboard_status_snapshot = ClipboardStatus(active=False)
         self.clipboard_service.subscribe(self._on_clipboard_status_changed)
+        self._setup_clipboard_recovery_tracking()
         self._persist_runtime_settings()
         self._load_password_policy()
         self._load_search_history()
@@ -110,6 +113,7 @@ class MainWindow:
         self._create_toolbar()
         self._create_main_area()
         self._create_statusbar()
+        self._run_startup_clipboard_recovery()
         self._setup_events()
         self._setup_activity_tracking()
 
@@ -138,6 +142,38 @@ class MainWindow:
         self.db.set_setting("security.lock_on_focus_loss", self.config.get("security.lock_on_focus_loss", True))
         self.db.set_setting("security.lock_on_minimize", self.config.get("security.lock_on_minimize", True))
         self.db.set_setting("security.clipboard", self.clipboard_service.get_settings(), encrypted=True)
+
+    def _setup_clipboard_recovery_tracking(self):
+        self._startup_clipboard_recovery_pending = bool(
+            self.db.get_setting(self.CLIPBOARD_RECOVERY_PENDING_KEY, False)
+        )
+        self._startup_clipboard_recovery_performed = False
+        self._startup_clipboard_recovery_failed = False
+        self.db.set_setting(self.CLIPBOARD_RECOVERY_PENDING_KEY, True)
+
+    def _run_startup_clipboard_recovery(self):
+        if not getattr(self, "_startup_clipboard_recovery_pending", False):
+            return
+        self._startup_clipboard_recovery_performed = True
+        cleared = self._clear_system_clipboard(sync_service=False)
+        if hasattr(self, "clipboard_service"):
+            self.clipboard_service.clear(reason="startup_recovery", publish_event=False)
+        self._startup_clipboard_recovery_failed = not cleared
+        if self._startup_clipboard_recovery_failed and hasattr(self, "clipboard_service"):
+            if hasattr(self.clipboard_service, "_last_clear_reason"):
+                self.clipboard_service._last_clear_reason = "startup_recovery"
+            if hasattr(self.clipboard_service, "_last_clear_failed"):
+                self.clipboard_service._last_clear_failed = True
+            if hasattr(self.clipboard_service, "last_clear_reason"):
+                self.clipboard_service.last_clear_reason = "startup_recovery"
+            if hasattr(self.clipboard_service, "last_clear_failed"):
+                self.clipboard_service.last_clear_failed = True
+        if self._startup_clipboard_recovery_failed:
+            self._handle_clipboard_clear_failure()
+
+    def _clear_clipboard_recovery_pending(self):
+        if hasattr(self, "db"):
+            self.db.set_setting(self.CLIPBOARD_RECOVERY_PENDING_KEY, False)
 
     def _load_password_policy(self):
         policy = self.db.get_setting("security.password_policy", {})
@@ -634,6 +670,7 @@ class MainWindow:
         normalized_reason = str(clear_reason or "").strip().lower()
         reason_map = {
             "monitor_warning": "Буфер обмена очищен из-за подозрительной активности",
+            "startup_recovery": "Буфер обмена очищен при запуске после нештатного завершения",
             "timeout": "Буфер обмена очищен автоматически",
             "vault_locked": "Буфер обмена очищен при блокировке vault",
             "replacement": "Буфер обмена заменён новым содержимым",
@@ -2260,6 +2297,7 @@ class MainWindow:
         self._clear_sensitive_view_state()
         self._clear_system_clipboard()
         self._handle_clipboard_clear_failure()
+        self._clear_clipboard_recovery_pending()
         try:
             self.audit_logger.close()
         except Exception:
