@@ -193,6 +193,7 @@ class MainWindow:
         security_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Безопасность", menu=security_menu)
         security_menu.add_command(label="Очистить буфер обмена", command=self.clear_clipboard_from_ui)
+        security_menu.add_command(label="Просмотр буфера обмена", command=self.show_clipboard_preview_dialog)
         security_menu.add_separator()
         security_menu.add_command(label="Сменить мастер-пароль", command=self.change_master_password)
         security_menu.add_command(label="Настройки", command=self.show_settings)
@@ -330,6 +331,9 @@ class MainWindow:
         self.clipboard_details_label.pack(side=tk.LEFT, padx=5)
         self.clipboard_notice_label = ttk.Label(statusbar, text="")
         self.clipboard_notice_label.pack(side=tk.LEFT, padx=10)
+        self.clipboard_preview_button = ttk.Button(statusbar, text="Просмотр", command=self.show_clipboard_preview_dialog)
+        self.clipboard_preview_button.pack(side=tk.LEFT, padx=5)
+        self.clipboard_preview_button.state(["disabled"])
 
         ttk.Label(statusbar, text="v2.0").pack(side=tk.RIGHT, padx=5)
 
@@ -484,6 +488,8 @@ class MainWindow:
             self.clipboard_label.config(text="Буфер обмена: пуст")
             if hasattr(self, "clipboard_details_label"):
                 self.clipboard_details_label.config(text="")
+            if hasattr(self, "clipboard_preview_button"):
+                self.clipboard_preview_button.state(["disabled"])
             return
 
         data_type_label = self._format_clipboard_data_type(status.data_type)
@@ -506,6 +512,8 @@ class MainWindow:
             details_parts.append(f"Скоро очистка: {status.remaining_seconds} сек")
         if hasattr(self, "clipboard_details_label"):
             self.clipboard_details_label.config(text=" | ".join(details_parts))
+        if hasattr(self, "clipboard_preview_button"):
+            self.clipboard_preview_button.state(["!disabled"])
 
     def _get_clipboard_status(self) -> ClipboardStatus:
         if hasattr(self, "clipboard_service"):
@@ -780,6 +788,61 @@ class MainWindow:
             "Не удалось очистить буфер обмена автоматически. Очистите его вручную в системе.",
             parent=self.root,
         )
+
+    def _reauthenticate_for_sensitive_action(self, action_name: str) -> bool:
+        password = simpledialog.askstring(
+            "Подтверждение",
+            f"Введите мастер-пароль для действия «{action_name}»:",
+            show="*",
+            parent=self.root,
+        )
+        if password is None:
+            return False
+        if self.auth_service.authenticate(password):
+            if hasattr(self, "key_manager"):
+                self.key_manager.store_key("active", self.auth_service.get_active_key())
+            return True
+        messagebox.showerror("Ошибка аутентификации", "Неверный мастер-пароль.", parent=self.root)
+        return False
+
+    def show_clipboard_preview_dialog(self):
+        status = self._get_clipboard_status()
+        if not status.active:
+            messagebox.showinfo("Буфер обмена", "Буфер обмена пуст.", parent=self.root)
+            return
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Просмотр буфера обмена")
+        dialog.geometry("460x260")
+
+        ttk.Label(dialog, text=f"Тип данных: {self._format_clipboard_data_type(status.data_type)}").pack(
+            anchor=tk.W, padx=10, pady=(12, 4)
+        )
+        source_text = status.source_label or "Не указан"
+        ttk.Label(dialog, text=f"Источник: {source_text}").pack(anchor=tk.W, padx=10, pady=4)
+        ttk.Label(dialog, text=f"Маскированный просмотр: {status.preview or 'Нет данных'}", wraplength=420).pack(
+            anchor=tk.W, padx=10, pady=4
+        )
+        remaining_text = f"{status.remaining_seconds} сек" if status.remaining_seconds > 0 else "до ручной очистки"
+        ttk.Label(dialog, text=f"Осталось времени: {remaining_text}").pack(anchor=tk.W, padx=10, pady=4)
+
+        revealed_value_var = tk.StringVar(value="Полное значение скрыто")
+        ttk.Label(dialog, textvariable=revealed_value_var, wraplength=420, justify=tk.LEFT).pack(
+            anchor=tk.W, padx=10, pady=(10, 6)
+        )
+
+        def reveal_full_value():
+            if not self._reauthenticate_for_sensitive_action("Показать содержимое буфера обмена"):
+                return
+            full_value = self.clipboard_service.reveal_current_text() if hasattr(self, "clipboard_service") else ""
+            if not full_value:
+                messagebox.showwarning("Буфер обмена", "Содержимое буфера обмена уже очищено.", parent=dialog)
+                dialog.destroy()
+                return
+            revealed_value_var.set(f"Полное значение: {full_value}")
+
+        ttk.Button(dialog, text="Показать полностью", command=reveal_full_value).pack(pady=(6, 4))
+        ttk.Button(dialog, text="Закрыть", command=dialog.destroy).pack(pady=4)
 
     def _require_login(self, initial: bool = False):
         self._login_prompt_active = True

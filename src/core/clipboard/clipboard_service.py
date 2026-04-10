@@ -351,6 +351,12 @@ class ClipboardService:
     def did_last_clear_fail(self) -> bool:
         return self._last_clear_failed
 
+    def reveal_current_text(self) -> str:
+        with self._lock:
+            if self._current_item is None:
+                return ""
+            return self._current_item.reveal()
+
     def has_active_content(self) -> bool:
         return self._current_item is not None
 

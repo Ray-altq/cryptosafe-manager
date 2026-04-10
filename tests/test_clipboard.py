@@ -82,6 +82,7 @@ class ClipboardServiceTestCase(unittest.TestCase):
         self.assertEqual(self.adapter.value, "Secret!123")
         self.assertEqual(self.state.get_clipboard(), "Secret!123")
         self.assertIn("Sec", status.preview)
+        self.assertEqual(self.service.reveal_current_text(), "Secret!123")
 
     def test_timeout_warning_and_clear(self):
         self.service.configure(timeout_seconds=5)

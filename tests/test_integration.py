@@ -72,6 +72,31 @@ class FakeButton:
         return 24
 
 
+class FakeAuthServiceForReveal:
+    def __init__(self):
+        self.logged_out = False
+        self.authenticated = False
+        self.initialized = True
+        self.password_checks = []
+
+    def authenticate(self, password):
+        self.password_checks.append(password)
+        self.authenticated = password == "ValidMasterPass!9X"
+        return self.authenticated
+
+    def logout(self):
+        self.logged_out = True
+
+    def is_authenticated(self):
+        return self.authenticated
+
+    def is_initialized(self):
+        return self.initialized
+
+    def get_active_key(self):
+        return b"x" * 32
+
+
 class FakeEntryWidget:
     def __init__(self):
         self.focused = False
@@ -712,6 +737,53 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
         self.assertIn("Источник: Example", window.clipboard_details_label.text)
         self.assertIn("Просмотр: Sec*****", window.clipboard_details_label.text)
         self.assertIn("Скоро очистка: 4 сек", window.clipboard_details_label.text)
+
+    def test_refresh_clipboard_status_disables_preview_button_when_empty(self):
+        window = MainWindow.__new__(MainWindow)
+        window.clipboard_service = FakeClipboardService()
+        window.clipboard_label = FakeLabel()
+        window.clipboard_details_label = FakeLabel()
+        window.clipboard_preview_button = FakeButton()
+
+        window._refresh_clipboard_status()
+
+        self.assertTrue(window.clipboard_preview_button.disabled)
+
+    def test_reauthenticate_for_sensitive_action_accepts_valid_master_password(self):
+        window = MainWindow.__new__(MainWindow)
+        window.root = FakeRoot()
+        window.auth_service = FakeAuthServiceForReveal()
+        window.key_manager = FakeKeyManager()
+
+        with patch("src.gui.main_window.simpledialog.askstring", return_value="ValidMasterPass!9X"):
+            result = window._reauthenticate_for_sensitive_action("Показать содержимое буфера обмена")
+
+        self.assertTrue(result)
+        self.assertEqual(window.auth_service.password_checks[-1], "ValidMasterPass!9X")
+
+    def test_reauthenticate_for_sensitive_action_rejects_invalid_password(self):
+        window = MainWindow.__new__(MainWindow)
+        window.root = FakeRoot()
+        window.auth_service = FakeAuthServiceForReveal()
+        window.key_manager = FakeKeyManager()
+
+        with patch("src.gui.main_window.simpledialog.askstring", return_value="wrong"), patch(
+            "src.gui.main_window.messagebox.showerror"
+        ) as showerror:
+            result = window._reauthenticate_for_sensitive_action("Показать содержимое буфера обмена")
+
+        self.assertFalse(result)
+        self.assertTrue(showerror.called)
+
+    def test_show_clipboard_preview_dialog_reports_empty_clipboard(self):
+        window = MainWindow.__new__(MainWindow)
+        window.root = FakeRoot()
+        window.clipboard_service = FakeClipboardService()
+
+        with patch("src.gui.main_window.messagebox.showinfo") as showinfo:
+            window.show_clipboard_preview_dialog()
+
+        self.assertIn("Буфер обмена пуст", showinfo.call_args.args[1])
 
     def test_on_clipboard_status_changed_updates_notice_and_table_marker(self):
         window = MainWindow.__new__(MainWindow)
