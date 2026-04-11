@@ -220,6 +220,31 @@ class ClipboardServiceTestCase(unittest.TestCase):
         self.assertEqual(clipboard_errors[-1].data["error_code"], "application_not_allowed")
         self.assertEqual(clipboard_errors[-1].data["application_name"], "telegram")
 
+    def test_copy_is_blocked_when_entry_policy_forbids_clipboard_usage(self):
+        clipboard_errors = []
+        self.bus.subscribe(EventType.CLIPBOARD_ERROR, clipboard_errors.append)
+
+        with self.assertRaises(ClipboardAccessError):
+            self.service.copy_text("Secret!123", source_entry_id=7, entry_clipboard_policy="never")
+
+        self.assertFalse(self.service.get_status().active)
+        self.assertEqual(clipboard_errors[-1].data["error_code"], "entry_copy_disabled")
+
+    def test_memory_only_delivery_mode_keeps_secret_out_of_system_clipboard(self):
+        copied_events = []
+        self.bus.subscribe(EventType.CLIPBOARD_COPIED, copied_events.append)
+        self.service.configure(delivery_mode="memory_only")
+
+        self.service.copy_text("Secret!123", data_type="password", source_entry_id=7)
+
+        status = self.service.get_status()
+        self.assertTrue(status.active)
+        self.assertEqual(status.delivery_mode, "memory_only")
+        self.assertEqual(self.adapter.copy_calls, 0)
+        self.assertEqual(self.adapter.clear_calls, 0)
+        self.assertEqual(self.service.reveal_current_text(), "Secret!123")
+        self.assertEqual(copied_events[-1].data["delivery_mode"], "memory_only")
+
     def test_copy_rejects_null_bytes_in_value(self):
         clipboard_errors = []
         self.bus.subscribe(EventType.CLIPBOARD_ERROR, clipboard_errors.append)
@@ -444,6 +469,18 @@ class ClipboardServiceTestCase(unittest.TestCase):
         elapsed = time.perf_counter() - started_at
 
         self.assertLess(elapsed, 0.5)
+
+    def test_clipboard_monitor_ignores_system_clipboard_when_delivery_mode_is_memory_only(self):
+        self.service.configure(delivery_mode="memory_only")
+        self.service.copy_text("Secret!123")
+        monitor = ClipboardMonitor(self.adapter, self.service)
+        self.adapter.value = "Changed by another app"
+
+        monitor.poll()
+
+        status = self.service.get_status()
+        self.assertFalse(status.suspicious_activity)
+        self.assertEqual(status.delivery_mode, "memory_only")
 
     def test_clipboard_service_memory_overhead_stays_below_10mb_for_large_payload(self):
         large_value = "A" * 4096

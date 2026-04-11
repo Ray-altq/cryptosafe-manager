@@ -128,6 +128,7 @@ class EntryManager:
             "notes": current_data["notes"],
             "category": current_data["category"],
             "tags": current_data["tags"],
+            "clipboard_policy": current_data.get("clipboard_policy", "allow"),
             "totp_secret": current_data["totp_secret"],
             "sharing_metadata": current_data["sharing_metadata"],
         }
@@ -198,6 +199,7 @@ class EntryManager:
             "notes": str(data_dict.get("notes", "")).strip(),
             "category": str(data_dict.get("category", "")).strip(),
             "tags": self._normalize_tags(data_dict.get("tags", "")),
+            "clipboard_policy": self._normalize_clipboard_policy(data_dict.get("clipboard_policy", "allow")),
             "totp_secret": str(data_dict.get("totp_secret", "")).strip(),
             "sharing_metadata": self._normalize_sharing_metadata(data_dict.get("sharing_metadata")),
         }
@@ -218,6 +220,12 @@ class EntryManager:
         if isinstance(raw_metadata, dict):
             return dict(raw_metadata)
         return {}
+
+    def _normalize_clipboard_policy(self, raw_policy: Any) -> str:
+        normalized = str(raw_policy or "allow").strip().lower()
+        if normalized not in {"allow", "never"}:
+            return "allow"
+        return normalized
 
     def _parse_search_query(self, search_text: str):
         field_aliases = {
@@ -411,6 +419,7 @@ class EntryManager:
             "url": data_dict["url"],
             "notes": data_dict["notes"],
             "category": data_dict["category"],
+            "clipboard_policy": data_dict["clipboard_policy"],
             "totp_secret": data_dict["totp_secret"],
             "sharing_metadata": data_dict["sharing_metadata"],
             "version": self.PAYLOAD_VERSION,
@@ -429,6 +438,7 @@ class EntryManager:
             "url": payload.get("url", entry.url),
             "notes": payload.get("notes", entry.notes),
             "category": payload.get("category", ""),
+            "clipboard_policy": self._normalize_clipboard_policy(payload.get("clipboard_policy", "allow")),
             "totp_secret": payload.get("totp_secret", ""),
             "sharing_metadata": self._normalize_sharing_metadata(payload.get("sharing_metadata")),
             "version": payload.get("version", self.PAYLOAD_VERSION),
@@ -456,6 +466,7 @@ class EntryManager:
                 "url": entry.url,
                 "notes": entry.notes,
                 "category": entry.category,
+                "clipboard_policy": "allow",
                 "totp_secret": "",
                 "sharing_metadata": {},
                 "version": self.PAYLOAD_VERSION,

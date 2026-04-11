@@ -474,9 +474,10 @@ class MainWindow:
         if not status.active:
             return "CryptoSafe Manager: буфер обмена пуст"
         data_type_label = self._format_clipboard_data_type(status.data_type)
+        delivery_text = self._format_clipboard_delivery_mode(status.delivery_mode)
         if status.remaining_seconds > 0:
-            return f"CryptoSafe Manager: {data_type_label}, осталось {status.remaining_seconds} сек"
-        return f"CryptoSafe Manager: {data_type_label}"
+            return f"CryptoSafe Manager: {data_type_label}, {delivery_text}, осталось {status.remaining_seconds} сек"
+        return f"CryptoSafe Manager: {data_type_label}, {delivery_text}"
 
     def _update_system_tray_status(self, status: Optional[ClipboardStatus] = None):
         tray_icon = getattr(self, "_system_tray_icon", None)
@@ -620,6 +621,8 @@ class MainWindow:
         self.clipboard_label.config(text=status_text)
 
         details_parts = []
+        if status.delivery_mode == "memory_only":
+            details_parts.append("Режим: внутренняя память")
         if status.source_label:
             details_parts.append(f"Источник: {status.source_label}")
         if status.preview:
@@ -666,6 +669,11 @@ class MainWindow:
         }
         return mapping.get(str(data_type or "").strip().lower(), "данные")
 
+    def _format_clipboard_delivery_mode(self, delivery_mode: str) -> str:
+        if str(delivery_mode or "").strip().lower() == "memory_only":
+            return "внутренняя память"
+        return "системный буфер"
+
     def _should_show_clipboard_notification_area(self) -> bool:
         if not self._clipboard_notifications_enabled():
             return False
@@ -683,9 +691,10 @@ class MainWindow:
     def _build_clipboard_notification_message(self, previous_status: ClipboardStatus, status: ClipboardStatus) -> str:
         if status.active:
             data_type = self._format_clipboard_data_type(status.data_type)
+            mode_label = self._format_clipboard_delivery_mode(status.delivery_mode)
             if previous_status.active:
-                return f"Буфер обмена обновлён: {data_type}"
-            return f"Буфер обмена: скопирован {data_type}"
+                return f"Буфер обмена обновлён: {data_type} ({mode_label})"
+            return f"Буфер обмена: скопирован {data_type} ({mode_label})"
 
         if previous_status.active:
             clear_reason = None
@@ -755,6 +764,7 @@ class MainWindow:
         notifications_enabled: bool,
         security_level: str,
         blocked_on_suspicious: bool,
+        delivery_mode: str = "system",
     ) -> str:
         for preset_key, preset_settings in ClipboardService.PRESETS.items():
             if (
@@ -762,6 +772,7 @@ class MainWindow:
                 and preset_settings["notifications_enabled"] == bool(notifications_enabled)
                 and preset_settings["security_level"] == str(security_level).strip().lower()
                 and preset_settings["blocked_on_suspicious"] == bool(blocked_on_suspicious)
+                and preset_settings.get("delivery_mode", "system") == str(delivery_mode).strip().lower()
             ):
                 return preset_key
         return "custom"
@@ -774,6 +785,7 @@ class MainWindow:
         notifications_var,
         security_level_var,
         blocked_var,
+        delivery_mode_var,
     ) -> bool:
         normalized_preset = str(preset or "").strip().lower()
         preset_settings = ClipboardService.PRESETS.get(normalized_preset)
@@ -783,6 +795,7 @@ class MainWindow:
         notifications_var.set(preset_settings["notifications_enabled"])
         security_level_var.set(preset_settings["security_level"])
         blocked_var.set(preset_settings["blocked_on_suspicious"])
+        delivery_mode_var.set(preset_settings.get("delivery_mode", "system"))
         return True
 
     def _build_clipboard_settings_summary(
@@ -792,6 +805,7 @@ class MainWindow:
         notifications_enabled: bool,
         security_level: str,
         blocked_on_suspicious: bool,
+        delivery_mode: str = "system",
         allowed_applications: str = "",
     ) -> str:
         security_labels = {
@@ -802,6 +816,7 @@ class MainWindow:
         notifications_text = "включены" if notifications_enabled else "выключены"
         blocked_text = "с блокировкой копирования" if blocked_on_suspicious else "без блокировки копирования"
         level_text = security_labels.get(str(security_level or "").strip().lower(), "базовый")
+        delivery_text = self._format_clipboard_delivery_mode(delivery_mode)
         allowed_text = "все приложения"
         normalized_allowed = [item.strip() for item in str(allowed_applications or "").split(",") if item.strip()]
         if normalized_allowed:
@@ -810,6 +825,7 @@ class MainWindow:
             f"Автоочистка: {int(timeout_seconds)} сек | "
             f"Уведомления: {notifications_text} | "
             f"Уровень: {level_text} | "
+            f"Режим: {delivery_text} | "
             f"{blocked_text} | "
             f"Разрешённые приложения: {allowed_text}"
         )
@@ -1020,6 +1036,11 @@ class MainWindow:
         ttk.Label(dialog, text=f"Маскированный просмотр: {status.preview or 'Нет данных'}", wraplength=420).pack(
             anchor=tk.W, padx=10, pady=4
         )
+        ttk.Label(
+            dialog,
+            text=f"Режим доставки: {self._format_clipboard_delivery_mode(status.delivery_mode)}",
+            wraplength=420,
+        ).pack(anchor=tk.W, padx=10, pady=4)
         remaining_text = f"{status.remaining_seconds} сек" if status.remaining_seconds > 0 else "до ручной очистки"
         ttk.Label(dialog, text=f"Осталось времени: {remaining_text}").pack(anchor=tk.W, padx=10, pady=4)
 
@@ -1341,6 +1362,12 @@ class MainWindow:
         ttk.Label(dialog, text="Теги").pack(anchor=tk.W, padx=8, pady=(8, 2))
         tags_entry = ttk.Entry(dialog, width=60)
         tags_entry.pack(fill=tk.X, padx=8, pady=2)
+        clipboard_policy_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            dialog,
+            text="Запретить копирование этой записи в буфер обмена",
+            variable=clipboard_policy_var,
+        ).pack(anchor=tk.W, padx=8, pady=(6, 2))
 
         ttk.Label(dialog, text="Заметки").pack(anchor=tk.W, padx=8, pady=(8, 2))
         notes_text = tk.Text(dialog, height=7, width=60)
@@ -1353,6 +1380,7 @@ class MainWindow:
             url_entry.insert(0, entry["url"])
             category_entry.insert(0, entry["category"])
             tags_entry.insert(0, entry.get("tags", ""))
+            clipboard_policy_var.set(str(entry.get("clipboard_policy", "allow")).strip().lower() == "never")
             notes_text.insert("1.0", entry["notes"])
 
         password_entry.entry.bind(
@@ -1374,6 +1402,7 @@ class MainWindow:
         self._update_password_strength(password_entry, strength_var)
         dialog.category_entry = category_entry
         dialog.tags_entry = tags_entry
+        dialog.clipboard_policy_var = clipboard_policy_var
         dialog.strength_var = strength_var
         dialog.password_was_generated = False
         dialog.favicon_status = favicon_status
@@ -1398,6 +1427,8 @@ class MainWindow:
         tags_entry = getattr(title_entry.master, "tags_entry", None)
         tags = tags_entry.get().strip() if tags_entry is not None else ""
         notes = notes_text.get("1.0", tk.END).strip()
+        clipboard_policy_var = getattr(title_entry.master, "clipboard_policy_var", None)
+        clipboard_policy = "never" if clipboard_policy_var is not None and clipboard_policy_var.get() else "allow"
 
         if not title or not password:
             raise ValueError("Поля «Название» и «Пароль» обязательны.")
@@ -1410,7 +1441,7 @@ class MainWindow:
                 "Слишком слабый пароль. Усильте его вручную или воспользуйтесь генератором паролей."
             )
 
-        return title, username, password, url, notes, category, tags
+        return title, username, password, url, notes, category, tags, clipboard_policy
 
     def _schedule_username_suggestions(self, dialog, url_entry, username_entry, delay_ms: int = 250):
         if not hasattr(dialog, "username_suggestion"):
@@ -1955,7 +1986,7 @@ class MainWindow:
 
         def save():
             try:
-                title, username, password, url, notes, category, tags = self._collect_entry_form(
+                title, username, password, url, notes, category, tags, clipboard_policy = self._collect_entry_form(
                     title_entry, username_entry, password_entry, url_entry, notes_text
                 )
             except ValueError as error:
@@ -1971,6 +2002,7 @@ class MainWindow:
                     "category": category,
                     "notes": notes,
                     "tags": tags,
+                    "clipboard_policy": clipboard_policy,
                 }
             )
             dialog.destroy()
@@ -1990,7 +2022,7 @@ class MainWindow:
 
         def save():
             try:
-                title, username, password, url, notes, category, tags = self._collect_entry_form(
+                title, username, password, url, notes, category, tags, clipboard_policy = self._collect_entry_form(
                     title_entry, username_entry, password_entry, url_entry, notes_text
                 )
             except ValueError as error:
@@ -2007,6 +2039,7 @@ class MainWindow:
                     "category": category,
                     "notes": notes,
                     "tags": tags,
+                    "clipboard_policy": clipboard_policy,
                 },
             )
             dialog.destroy()
@@ -2048,6 +2081,8 @@ class MainWindow:
                 data_type="password",
                 source_entry_id=entry.id,
                 source_label=entry.title,
+                application_name=self._get_clipboard_application_name(),
+                entry_clipboard_policy=self._get_entry_clipboard_policy(entry),
             )
         except ClipboardAccessError as error:
             messagebox.showerror("Ошибка буфера обмена", str(error))
@@ -2106,11 +2141,15 @@ class MainWindow:
                 source_entry_id=entry.id,
                 source_label=entry.title,
                 application_name=self._get_clipboard_application_name(),
+                entry_clipboard_policy=self._get_entry_clipboard_policy(entry),
             )
         except ClipboardAccessError as error:
             messagebox.showerror("Ошибка буфера обмена", str(error))
             return False
         return True
+
+    def _get_entry_clipboard_policy(self, entry) -> str:
+        return str(entry.get("clipboard_policy", "allow") or "allow").strip().lower()
 
     def _get_clipboard_application_name(self) -> str:
         application_name = os.path.basename(sys.argv[0] or "").strip()
@@ -2159,6 +2198,8 @@ class MainWindow:
                 detail_parts.append(f"источник={parsed_details['source_label']}")
             if parsed_details.get("timeout_seconds"):
                 detail_parts.append(f"таймаут={parsed_details['timeout_seconds']} сек")
+            if parsed_details.get("delivery_mode"):
+                detail_parts.append(f"режим={self._format_clipboard_delivery_mode(parsed_details['delivery_mode'])}")
             return ", ".join(detail_parts)
 
         if action == "clipboard_cleared":
@@ -2185,6 +2226,7 @@ class MainWindow:
                 "invalid_content": "недопустимое содержимое",
                 "value_too_large": "превышен безопасный лимит данных",
                 "blocked_on_suspicious": "копирование заблокировано защитой",
+                "entry_copy_disabled": "копирование запрещено политикой записи",
                 "application_not_allowed": "приложение не входит в whitelist",
                 "vault_locked": "vault заблокирован",
                 "adapter_write_failed": "сбой записи через системный адаптер",
@@ -2241,6 +2283,7 @@ class MainWindow:
                 "security_level": self.config.get("security.clipboard_security_level", "basic"),
                 "blocked_on_suspicious": self.config.get("security.clipboard_blocked_on_suspicious", False),
                 "allowed_applications": self.config.get("security.clipboard_allowed_applications", []),
+                "delivery_mode": self.config.get("security.clipboard_delivery_mode", "system"),
                 "preset": "standard",
             }
         )
@@ -2250,6 +2293,7 @@ class MainWindow:
             value=clipboard_settings.get("notifications_enabled", True)
         )
         clipboard_security_level = tk.StringVar(value=clipboard_settings.get("security_level", "basic"))
+        clipboard_delivery_mode = tk.StringVar(value=clipboard_settings.get("delivery_mode", "system"))
         clipboard_blocked_on_suspicious = tk.BooleanVar(
             value=clipboard_settings.get("blocked_on_suspicious", False)
         )
@@ -2261,6 +2305,7 @@ class MainWindow:
             notifications_enabled=clipboard_notifications_enabled.get(),
             security_level=clipboard_security_level.get(),
             blocked_on_suspicious=clipboard_blocked_on_suspicious.get(),
+            delivery_mode=clipboard_delivery_mode.get(),
         )
         stored_clipboard_preset = str(clipboard_settings.get("preset", detected_clipboard_preset)).strip().lower()
         if stored_clipboard_preset not in self._get_clipboard_preset_labels():
@@ -2302,6 +2347,15 @@ class MainWindow:
             values=["basic", "advanced", "paranoid"],
         )
         clipboard_security_level_box.pack(fill=tk.X, padx=10, pady=2)
+
+        ttk.Label(dialog, text="Режим доставки clipboard").pack(anchor=tk.W, padx=10, pady=(12, 2))
+        clipboard_delivery_mode_box = ttk.Combobox(
+            dialog,
+            textvariable=clipboard_delivery_mode,
+            state="readonly",
+            values=["system", "memory_only"],
+        )
+        clipboard_delivery_mode_box.pack(fill=tk.X, padx=10, pady=2)
 
         ttk.Checkbutton(
             dialog,
@@ -2352,6 +2406,7 @@ class MainWindow:
                 notifications_enabled=clipboard_notifications_enabled.get(),
                 security_level=clipboard_security_level.get(),
                 blocked_on_suspicious=clipboard_blocked_on_suspicious.get(),
+                delivery_mode=clipboard_delivery_mode.get(),
             )
             selected_preset = self._get_clipboard_preset_key_from_label(clipboard_preset.get())
             if selected_preset != detected_preset:
@@ -2362,6 +2417,7 @@ class MainWindow:
                     notifications_enabled=clipboard_notifications_enabled.get(),
                     security_level=clipboard_security_level.get(),
                     blocked_on_suspicious=clipboard_blocked_on_suspicious.get(),
+                    delivery_mode=clipboard_delivery_mode.get(),
                     allowed_applications=clipboard_allowed_applications.get(),
                 )
             )
@@ -2374,6 +2430,7 @@ class MainWindow:
                 notifications_var=clipboard_notifications_enabled,
                 security_level_var=clipboard_security_level,
                 blocked_var=clipboard_blocked_on_suspicious,
+                delivery_mode_var=clipboard_delivery_mode,
             ):
                 clipboard_preset.set(self._get_clipboard_preset_label(selected_preset))
             refresh_clipboard_summary()
@@ -2383,6 +2440,7 @@ class MainWindow:
             clipboard_timeout,
             clipboard_notifications_enabled,
             clipboard_security_level,
+            clipboard_delivery_mode,
             clipboard_blocked_on_suspicious,
             clipboard_allowed_applications,
         ):
@@ -2393,6 +2451,7 @@ class MainWindow:
             self.config.set("security.clipboard_timeout", clipboard_timeout.get())
             self.config.set("security.clipboard_notifications", clipboard_notifications_enabled.get())
             self.config.set("security.clipboard_security_level", clipboard_security_level.get())
+            self.config.set("security.clipboard_delivery_mode", clipboard_delivery_mode.get())
             self.config.set("security.clipboard_blocked_on_suspicious", clipboard_blocked_on_suspicious.get())
             normalized_allowed_applications = [
                 item.strip() for item in clipboard_allowed_applications.get().replace(";", ",").split(",") if item.strip()
@@ -2408,12 +2467,14 @@ class MainWindow:
                 notifications_enabled=clipboard_notifications_enabled.get(),
                 security_level=clipboard_security_level.get(),
                 blocked_on_suspicious=clipboard_blocked_on_suspicious.get(),
+                delivery_mode=clipboard_delivery_mode.get(),
             )
             if hasattr(self, "clipboard_service"):
                 self.clipboard_service.configure(
                     timeout_seconds=clipboard_timeout.get(),
                     notifications_enabled=clipboard_notifications_enabled.get(),
                     security_level=clipboard_security_level.get(),
+                    delivery_mode=clipboard_delivery_mode.get(),
                     blocked_on_suspicious=clipboard_blocked_on_suspicious.get(),
                     allowed_applications=normalized_allowed_applications,
                     preset=selected_preset,

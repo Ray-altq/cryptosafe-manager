@@ -135,6 +135,7 @@ class FakeClipboardService:
             "security_level": "basic",
             "blocked_on_suspicious": False,
             "allowed_applications": [],
+            "delivery_mode": "system",
             "preset": "standard",
         }
         self.configure_calls = []
@@ -703,6 +704,7 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
                 "encrypted_password": "Secret!123",
                 "url": "",
                 "notes": "",
+                "clipboard_policy": "allow",
             }
         )
         window._get_single_selected_entry = lambda _action: entry
@@ -712,6 +714,7 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
         self.assertEqual(window.clipboard_service.calls[0][0], "demo-user")
         self.assertEqual(window.clipboard_service.calls[0][1]["data_type"], "username")
         self.assertEqual(window.clipboard_service.calls[0][1]["application_name"], "cryptosafe-manager")
+        self.assertEqual(window.clipboard_service.calls[0][1]["entry_clipboard_policy"], "allow")
         self.assertTrue(window._activity_called)
 
     def test_copy_selected_all_uses_clipboard_service(self):
@@ -728,6 +731,7 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
                 "encrypted_password": "encrypted",
                 "url": "https://example.com",
                 "notes": "note",
+                "clipboard_policy": "allow",
             }
         )
         window._get_single_selected_entry = lambda _action: entry
@@ -739,7 +743,30 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
         self.assertIn("Пароль: Secret!123", copied_text)
         self.assertEqual(window.clipboard_service.calls[0][1]["data_type"], "entry")
         self.assertEqual(window.clipboard_service.calls[0][1]["application_name"], "cryptosafe-manager")
+        self.assertEqual(window.clipboard_service.calls[0][1]["entry_clipboard_policy"], "allow")
         self.assertTrue(window._activity_called)
+
+    def test_copy_selected_username_passes_never_policy_for_protected_entry(self):
+        window = MainWindow.__new__(MainWindow)
+        window.clipboard_service = FakeClipboardService()
+        window._on_activity = lambda: setattr(window, "_activity_called", True)
+        window._get_clipboard_application_name = lambda: "cryptosafe-manager"
+        entry = EntryView(
+            {
+                "id": 12,
+                "title": "Protected",
+                "username": "demo-user",
+                "encrypted_password": "Secret!123",
+                "url": "",
+                "notes": "",
+                "clipboard_policy": "never",
+            }
+        )
+        window._get_single_selected_entry = lambda _action: entry
+
+        window.copy_selected_username()
+
+        self.assertEqual(window.clipboard_service.calls[0][1]["entry_clipboard_policy"], "never")
 
     def test_refresh_clipboard_status_shows_preview_and_warning(self):
         window = MainWindow.__new__(MainWindow)
@@ -883,7 +910,7 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
 
         window._on_clipboard_status_changed(status)
 
-        self.assertEqual(window._notification_message, "Буфер обмена: скопирован пароль")
+        self.assertEqual(window._notification_message, "Буфер обмена: скопирован пароль (системный буфер)")
 
     def test_show_in_system_tray_withdraws_window_when_tray_available(self):
         window = MainWindow.__new__(MainWindow)
@@ -936,12 +963,14 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
             notifications_enabled=True,
             security_level="advanced",
             blocked_on_suspicious=False,
+            delivery_mode="system",
         )
         custom_preset = window._detect_clipboard_preset(
             timeout_seconds=42,
             notifications_enabled=False,
             security_level="advanced",
             blocked_on_suspicious=True,
+            delivery_mode="memory_only",
         )
 
         self.assertEqual(secure_preset, "secure")
@@ -955,6 +984,7 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
             notifications_enabled=True,
             security_level="advanced",
             blocked_on_suspicious=True,
+            delivery_mode="memory_only",
             allowed_applications="explorer, code, keepassxc",
         )
 
@@ -965,6 +995,7 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
         timeout_var = FakeVar(30)
         notifications_var = FakeVar(True)
         security_level_var = FakeVar("basic")
+        delivery_mode_var = FakeVar("memory_only")
         blocked_var = FakeVar(False)
 
         applied = window._apply_clipboard_preset_to_vars(
@@ -972,6 +1003,7 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
             timeout_var=timeout_var,
             notifications_var=notifications_var,
             security_level_var=security_level_var,
+            delivery_mode_var=delivery_mode_var,
             blocked_var=blocked_var,
         )
 
@@ -979,6 +1011,7 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
         self.assertEqual(timeout_var.get(), 5)
         self.assertTrue(notifications_var.get())
         self.assertEqual(security_level_var.get(), "paranoid")
+        self.assertEqual(delivery_mode_var.get(), "system")
         self.assertTrue(blocked_var.get())
 
     def test_update_clipboard_notice_respects_notification_setting(self):

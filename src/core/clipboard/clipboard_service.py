@@ -123,6 +123,7 @@ class ClipboardStatus:
     warning_emitted: bool = False
     suspicious_activity: bool = False
     blocked_future_copies: bool = False
+    delivery_mode: str = "system"
 
 
 class ClipboardService:
@@ -134,18 +135,21 @@ class ClipboardService:
             "notifications_enabled": True,
             "security_level": "basic",
             "blocked_on_suspicious": False,
+            "delivery_mode": "system",
         },
         "secure": {
             "timeout_seconds": 15,
             "notifications_enabled": True,
             "security_level": "advanced",
             "blocked_on_suspicious": False,
+            "delivery_mode": "system",
         },
         "public_computer": {
             "timeout_seconds": 5,
             "notifications_enabled": True,
             "security_level": "paranoid",
             "blocked_on_suspicious": True,
+            "delivery_mode": "system",
         },
     }
 
@@ -180,6 +184,7 @@ class ClipboardService:
         security_level: Optional[str] = None,
         blocked_on_suspicious: Optional[bool] = None,
         allowed_applications=None,
+        delivery_mode: Optional[str] = None,
         preset: Optional[str] = None,
     ):
         with self._lock:
@@ -199,6 +204,8 @@ class ClipboardService:
                 self._settings["blocked_on_suspicious"] = bool(blocked_on_suspicious)
             if allowed_applications is not None:
                 self._settings["allowed_applications"] = self._normalize_allowed_applications(allowed_applications)
+            if delivery_mode is not None:
+                self._settings["delivery_mode"] = self._normalize_delivery_mode(delivery_mode)
 
             self._persist_settings()
             self._notify()
@@ -239,6 +246,7 @@ class ClipboardService:
         source_entry_id: Optional[int] = None,
         source_label: str = "",
         application_name: str = "",
+        entry_clipboard_policy: str = "allow",
     ):
         normalized_value = str(value or "")
         if "\x00" in normalized_value:
@@ -267,6 +275,14 @@ class ClipboardService:
                     source_entry_id=source_entry_id,
                 )
                 raise ClipboardAccessError("Копирование временно заблокировано из-за подозрительной активности")
+            if self._normalize_entry_clipboard_policy(entry_clipboard_policy) == "never":
+                self._publish_clipboard_error(
+                    operation="copy",
+                    error_code="entry_copy_disabled",
+                    data_type=data_type,
+                    source_entry_id=source_entry_id,
+                )
+                raise ClipboardAccessError("Для этой записи копирование в буфер обмена запрещено")
             if self.state_manager is not None and hasattr(self.state_manager, "is_locked") and self.state_manager.is_locked():
                 self._publish_clipboard_error(
                     operation="copy",
@@ -294,7 +310,7 @@ class ClipboardService:
                 source_label=self._sanitize_metadata_value(source_label),
                 timeout_seconds=self._settings["timeout_seconds"],
             )
-            if not self.adapter.copy_to_clipboard(normalized_value):
+            if self.uses_system_clipboard() and not self.adapter.copy_to_clipboard(normalized_value):
                 item.secure_wipe()
                 self._publish_clipboard_error(
                     operation="copy",
@@ -322,6 +338,7 @@ class ClipboardService:
                         "timeout_seconds": self._settings["timeout_seconds"],
                         "source_label": self._sanitize_metadata_value(source_label),
                         "application_name": self._normalize_application_name(application_name),
+                        "delivery_mode": self._settings.get("delivery_mode", "system"),
                     },
                 )
             )
@@ -332,10 +349,11 @@ class ClipboardService:
             had_content = self._current_item is not None
             adapter_cleared = True
             if had_content:
-                try:
-                    adapter_cleared = bool(self.adapter.clear_clipboard())
-                except Exception:
-                    adapter_cleared = False
+                if self.uses_system_clipboard():
+                    try:
+                        adapter_cleared = bool(self.adapter.clear_clipboard())
+                    except Exception:
+                        adapter_cleared = False
                 self._current_item.secure_wipe()
                 self._current_item = None
 
@@ -409,6 +427,7 @@ class ClipboardService:
                     active=False,
                     suspicious_activity=self._suspicious_activity,
                     blocked_future_copies=self._blocked_future_copies,
+                    delivery_mode=self._settings.get("delivery_mode", "system"),
                 )
 
             remaining_seconds = 0
@@ -425,6 +444,7 @@ class ClipboardService:
                 warning_emitted=self._warning_emitted,
                 suspicious_activity=self._suspicious_activity,
                 blocked_future_copies=self._blocked_future_copies,
+                delivery_mode=self._settings.get("delivery_mode", "system"),
             )
 
     def get_last_clear_reason(self) -> Optional[str]:
@@ -441,6 +461,9 @@ class ClipboardService:
 
     def has_active_content(self) -> bool:
         return self._current_item is not None
+
+    def uses_system_clipboard(self) -> bool:
+        return self._normalize_delivery_mode(self._settings.get("delivery_mode", "system")) == "system"
 
     def matches_current_text(self, value: Optional[str]) -> bool:
         with self._lock:
@@ -471,6 +494,9 @@ class ClipboardService:
             "security_level": "basic",
             "blocked_on_suspicious": False,
             "allowed_applications": [],
+            "delivery_mode": self.config.get("security.clipboard_delivery_mode", "system")
+            if self.config is not None
+            else "system",
             "preset": "standard",
         }
 
@@ -487,6 +513,7 @@ class ClipboardService:
         defaults["allowed_applications"] = self._normalize_allowed_applications(
             defaults.get("allowed_applications", [])
         )
+        defaults["delivery_mode"] = self._normalize_delivery_mode(defaults.get("delivery_mode", "system"))
         defaults["preset"] = str(defaults.get("preset", "standard")).strip().lower() or "standard"
         return defaults
 
@@ -496,6 +523,7 @@ class ClipboardService:
             self.database.set_setting(self.PROFILE_KEY, self._settings.get("preset", "standard"), encrypted=True)
         if self.config is not None:
             self.config.set("security.clipboard_timeout", self._settings["timeout_seconds"])
+            self.config.set("security.clipboard_delivery_mode", self._settings["delivery_mode"])
 
     def _normalize_timeout(self, timeout_seconds: int) -> int:
         try:
@@ -510,6 +538,18 @@ class ClipboardService:
         normalized = str(security_level or "basic").strip().lower()
         if normalized not in {"basic", "advanced", "paranoid"}:
             return "basic"
+        return normalized
+
+    def _normalize_delivery_mode(self, delivery_mode: str) -> str:
+        normalized = str(delivery_mode or "system").strip().lower()
+        if normalized not in {"system", "memory_only"}:
+            return "system"
+        return normalized
+
+    def _normalize_entry_clipboard_policy(self, clipboard_policy: str) -> str:
+        normalized = str(clipboard_policy or "allow").strip().lower()
+        if normalized not in {"allow", "never"}:
+            return "allow"
         return normalized
 
     def _get_max_payload_length(self) -> int:

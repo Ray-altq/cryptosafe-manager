@@ -25,6 +25,10 @@ class ClipboardMonitor:
         self._pending_mismatch_count = 0
 
     def poll(self):
+        if hasattr(self.service, "uses_system_clipboard") and not self.service.uses_system_clipboard():
+            self._reset_pending_mismatch()
+            self._last_observed = None
+            return
         observed = self.adapter.get_clipboard_content()
         active = self.service.has_active_content()
 
