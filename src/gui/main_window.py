@@ -79,6 +79,8 @@ class MainWindow:
         self._initial_login_completed = False
         self._clipboard_monitor_warning_shown = False
         self._clipboard_notification_toast = None
+        self._system_tray_icon = None
+        self._system_tray_visible = False
         self.audit_logger = AuditLogger(self.db, event_bus)
         self.clipboard_service = ClipboardService(
             create_platform_adapter(self.root),
@@ -115,6 +117,7 @@ class MainWindow:
         self._create_toolbar()
         self._create_main_area()
         self._create_statusbar()
+        self._initialize_system_tray()
         self._run_startup_clipboard_recovery()
         self._setup_events()
         self._setup_activity_tracking()
@@ -442,6 +445,81 @@ class MainWindow:
             self.state.update_activity()
             self.key_storage.touch_cached_key(self.state.key_cache_timeout)
 
+    def _initialize_system_tray(self):
+        try:
+            import pystray  # type: ignore
+            from PIL import Image, ImageDraw  # type: ignore
+        except Exception:
+            self._system_tray_icon = None
+            return
+
+        image = Image.new("RGB", (16, 16), color="#183153")
+        draw = ImageDraw.Draw(image)
+        draw.rounded_rectangle((1, 1, 14, 14), radius=3, fill="#183153", outline="#7dd3fc")
+        draw.rectangle((5, 6, 11, 12), fill="#f8fafc")
+        draw.arc((4, 2, 12, 8), start=0, end=180, fill="#f8fafc", width=2)
+
+        menu = pystray.Menu(
+            pystray.MenuItem("Развернуть", lambda icon, item: self._restore_from_system_tray()),
+            pystray.MenuItem("Выход", lambda icon, item: self._on_close()),
+        )
+        try:
+            self._system_tray_icon = pystray.Icon("cryptosafe-manager", image, "CryptoSafe Manager", menu)
+            self._system_tray_icon.run_detached()
+        except Exception:
+            self._system_tray_icon = None
+
+    def _build_system_tray_title(self, status: Optional[ClipboardStatus] = None) -> str:
+        status = status or self._get_clipboard_status()
+        if not status.active:
+            return "CryptoSafe Manager: буфер обмена пуст"
+        data_type_label = self._format_clipboard_data_type(status.data_type)
+        if status.remaining_seconds > 0:
+            return f"CryptoSafe Manager: {data_type_label}, осталось {status.remaining_seconds} сек"
+        return f"CryptoSafe Manager: {data_type_label}"
+
+    def _update_system_tray_status(self, status: Optional[ClipboardStatus] = None):
+        tray_icon = getattr(self, "_system_tray_icon", None)
+        if tray_icon is None:
+            return
+        try:
+            tray_icon.title = self._build_system_tray_title(status)
+        except Exception:
+            return
+
+    def _show_in_system_tray(self):
+        if getattr(self, "_system_tray_icon", None) is None or getattr(self, "_system_tray_visible", False):
+            return
+        try:
+            self.root.withdraw()
+        except Exception:
+            return
+        self._system_tray_visible = True
+        self._update_system_tray_status()
+
+    def _restore_from_system_tray(self):
+        if getattr(self, "_system_tray_icon", None) is None:
+            return
+        try:
+            self.root.deiconify()
+            self.root.state("normal")
+            self.root.update()
+        except Exception:
+            return
+        self._system_tray_visible = False
+        self._update_system_tray_status()
+
+    def _shutdown_system_tray(self):
+        tray_icon = getattr(self, "_system_tray_icon", None)
+        if tray_icon is None:
+            return
+        try:
+            tray_icon.stop()
+        except Exception:
+            pass
+        self._system_tray_icon = None
+        self._system_tray_visible = False
+
     def _on_focus_in(self, _event=None):
         self.state.set_application_active(True)
 
@@ -451,10 +529,12 @@ class MainWindow:
 
     def _on_unmap(self, _event=None):
         self.state.set_application_active(False)
+        self._show_in_system_tray()
         self.root.after(100, self._lock_if_window_minimized)
 
     def _on_map(self, _event=None):
         self.state.set_application_active(True)
+        self._system_tray_visible = False
         if getattr(self, "_initial_login_completed", False):
             self.root.after(100, self._prompt_unlock_if_needed)
 
@@ -518,6 +598,7 @@ class MainWindow:
         self._sync_clipboard_row_marker(previous_status, status)
         self._update_clipboard_notice(previous_status, status)
         self._update_clipboard_notification_area(previous_status, status)
+        self._update_system_tray_status(status)
         self._handle_clipboard_security_alert(previous_status, status)
         self._refresh_clipboard_status(status)
 
@@ -2406,6 +2487,7 @@ class MainWindow:
         self._clear_system_clipboard()
         self._handle_clipboard_clear_failure()
         self._clear_clipboard_recovery_pending()
+        self._shutdown_system_tray()
         try:
             self.audit_logger.close()
         except Exception:

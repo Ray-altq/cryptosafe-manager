@@ -273,7 +273,9 @@ class FakeRoot:
         self.after_calls.append((_delay, _callback))
         return len(self.after_calls)
 
-    def state(self):
+    def state(self, value=None):
+        if value is not None:
+            self.window_state = value
         return self.window_state
 
     def focus_displayof(self):
@@ -287,6 +289,12 @@ class FakeRoot:
 
     def update(self):
         self.update_calls += 1
+
+    def withdraw(self):
+        self.window_state = "withdrawn"
+
+    def deiconify(self):
+        self.window_state = "normal"
 
     def config(self, **_kwargs):
         pass
@@ -876,6 +884,33 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
         window._on_clipboard_status_changed(status)
 
         self.assertEqual(window._notification_message, "Буфер обмена: скопирован пароль")
+
+    def test_show_in_system_tray_withdraws_window_when_tray_available(self):
+        window = MainWindow.__new__(MainWindow)
+        window.root = FakeRoot()
+        window._system_tray_icon = object()
+        window._system_tray_visible = False
+        window._update_system_tray_status = lambda status=None: setattr(window, "_tray_status_updated", True)
+
+        window._show_in_system_tray()
+
+        self.assertEqual(window.root.window_state, "withdrawn")
+        self.assertTrue(window._system_tray_visible)
+        self.assertTrue(window._tray_status_updated)
+
+    def test_restore_from_system_tray_restores_window_state(self):
+        window = MainWindow.__new__(MainWindow)
+        window.root = FakeRoot()
+        window.root.window_state = "withdrawn"
+        window._system_tray_icon = object()
+        window._system_tray_visible = True
+        window._update_system_tray_status = lambda status=None: setattr(window, "_tray_status_updated", True)
+
+        window._restore_from_system_tray()
+
+        self.assertEqual(window.root.window_state, "normal")
+        self.assertFalse(window._system_tray_visible)
+        self.assertTrue(window._tray_status_updated)
 
     def test_update_clipboard_notification_area_shows_failed_clear_message_when_window_unfocused(self):
         window = MainWindow.__new__(MainWindow)
