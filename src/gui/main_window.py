@@ -12,7 +12,14 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
-from ..core.clipboard import ClipboardAccessError, ClipboardMonitor, ClipboardService, ClipboardStatus, create_platform_adapter
+from ..core.clipboard import (
+    ClipboardAccessError,
+    ClipboardMonitor,
+    ClipboardService,
+    ClipboardStatus,
+    create_platform_adapter,
+    get_platform_validation_report,
+)
 from ..core.config import Config
 from ..core.crypto.authentication import AuthenticationError, AuthenticationService
 from ..core.crypto.key_derivation import KeyDerivation
@@ -235,6 +242,7 @@ class MainWindow:
         menubar.add_cascade(label="Безопасность", menu=security_menu)
         security_menu.add_command(label="Очистить буфер обмена", command=self.clear_clipboard_from_ui)
         security_menu.add_command(label="Просмотр буфера обмена", command=self.show_clipboard_preview_dialog)
+        security_menu.add_command(label="Диагностика буфера обмена", command=self.show_clipboard_diagnostics)
         security_menu.add_separator()
         security_menu.add_command(label="Сменить мастер-пароль", command=self.change_master_password)
         security_menu.add_command(label="Настройки", command=self.show_settings)
@@ -2267,6 +2275,67 @@ class MainWindow:
         text.pack(fill=tk.BOTH, expand=True)
         for log in self.db.get_audit_logs():
             text.insert("end", f"{self._format_audit_log_line(log)}\n")
+        text.config(state=tk.DISABLED)
+
+    def _build_clipboard_diagnostics_lines(self) -> list[str]:
+        status = self._get_clipboard_status()
+        service_settings = (
+            self.clipboard_service.get_settings()
+            if hasattr(self, "clipboard_service")
+            else {"delivery_mode": "system", "security_level": "basic"}
+        )
+        memory_probe = ""
+        if hasattr(self, "clipboard_service") and hasattr(self.clipboard_service, "reveal_current_text"):
+            memory_probe = self.clipboard_service.reveal_current_text()
+        memory_report = (
+            self.clipboard_service.inspect_memory_exposure(memory_probe)
+            if memory_probe and hasattr(self, "clipboard_service") and hasattr(self.clipboard_service, "inspect_memory_exposure")
+            else {}
+        )
+        platform_report = get_platform_validation_report(
+            root_available=hasattr(self, "root"),
+            linux_selection_mode="clipboard",
+        )
+
+        lines = [
+            "Диагностика secure clipboard",
+            f"Активен: {'да' if status.active else 'нет'}",
+            f"Тип данных: {self._format_clipboard_data_type(status.data_type)}",
+            f"Режим доставки: {self._format_clipboard_delivery_mode(service_settings.get('delivery_mode', 'system'))}",
+            f"Уровень защиты: {service_settings.get('security_level', 'basic')}",
+            f"Источник: {status.source_label or 'не указан'}",
+            f"Осталось времени: {status.remaining_seconds} сек" if status.active else "Осталось времени: нет активных данных",
+            "",
+            "Проверка platform adapter:",
+        ]
+
+        for adapter_info in platform_report.get("adapters", []):
+            state_text = "доступен" if adapter_info.get("available") else "недоступен"
+            lines.append(f"- {adapter_info.get('name')}: {state_text}")
+
+        lines.extend(
+            [
+                "",
+                "Проверка memory exposure:",
+            ]
+        )
+        if memory_report:
+            lines.append(f"- delivery_mode: {memory_report.get('delivery_mode', 'system')}")
+            lines.append(f"- plaintext в mask: {'да' if memory_report.get('in_mask_buffer') else 'нет'}")
+            lines.append(f"- plaintext в text_mask: {'да' if memory_report.get('in_text_mask_buffer') else 'нет'}")
+            lines.append(f"- plaintext в source_label: {'да' if memory_report.get('in_source_label') else 'нет'}")
+            lines.append(f"- plaintext в state_manager: {'да' if memory_report.get('in_state_manager') else 'нет'}")
+        else:
+            lines.append("- активных данных для self-check нет")
+        return lines
+
+    def show_clipboard_diagnostics(self):
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Диагностика буфера обмена")
+        dialog.geometry("720x420")
+        text = tk.Text(dialog, wrap=tk.WORD)
+        text.pack(fill=tk.BOTH, expand=True)
+        text.insert("1.0", "\n".join(self._build_clipboard_diagnostics_lines()))
         text.config(state=tk.DISABLED)
 
     def show_settings(self):

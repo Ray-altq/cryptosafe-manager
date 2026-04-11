@@ -1215,6 +1215,45 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
 
         self.assertIn("telegram", line)
 
+    def test_build_clipboard_diagnostics_lines_includes_platform_and_memory_sections(self):
+        window = MainWindow.__new__(MainWindow)
+        window.root = FakeRoot()
+        window.clipboard_service = FakeClipboardService()
+        window.clipboard_service.status = ClipboardStatus(
+            active=True,
+            data_type="password",
+            source_label="GitHub",
+            preview="Sec*****",
+            remaining_seconds=12,
+            delivery_mode="memory_only",
+        )
+        window.clipboard_service.settings["delivery_mode"] = "memory_only"
+        window.clipboard_service.settings["security_level"] = "advanced"
+        window.clipboard_service.inspect_memory_exposure = lambda _probe: {
+            "delivery_mode": "memory_only",
+            "in_mask_buffer": False,
+            "in_text_mask_buffer": False,
+            "in_source_label": False,
+            "in_state_manager": False,
+        }
+
+        with patch("src.gui.main_window.get_platform_validation_report", return_value={
+            "adapters": [
+                {"name": "macos_appkit", "available": True},
+                {"name": "pyperclip", "available": False},
+            ]
+        }):
+            lines = window._build_clipboard_diagnostics_lines()
+
+        joined = "\n".join(lines)
+        self.assertIn("Диагностика secure clipboard", joined)
+        self.assertIn("Режим доставки: внутренняя память", joined)
+        self.assertIn("Проверка platform adapter", joined)
+        self.assertIn("macos_appkit: доступен", joined)
+        self.assertIn("pyperclip: недоступен", joined)
+        self.assertIn("Проверка memory exposure", joined)
+        self.assertIn("plaintext в state_manager: нет", joined)
+
     def test_check_security_timers_publishes_clipboard_error_when_monitor_fails(self):
         window = MainWindow.__new__(MainWindow)
         window.state = FakeStateManager()
