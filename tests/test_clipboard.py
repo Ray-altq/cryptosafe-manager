@@ -243,7 +243,30 @@ class ClipboardServiceTestCase(unittest.TestCase):
         self.assertEqual(self.adapter.copy_calls, 0)
         self.assertEqual(self.adapter.clear_calls, 0)
         self.assertEqual(self.service.reveal_current_text(), "Secret!123")
+        self.assertEqual(self.state.get_clipboard(), self.state.CLIPBOARD_REDACTED_MARKER)
         self.assertEqual(copied_events[-1].data["delivery_mode"], "memory_only")
+
+    def test_memory_exposure_probe_does_not_find_plaintext_in_memory_only_mode(self):
+        self.service.configure(delivery_mode="memory_only")
+        self.service.copy_text("Secret!123", source_label="Example")
+
+        exposure = self.service.inspect_memory_exposure("Secret!123")
+
+        self.assertFalse(exposure["in_mask_buffer"])
+        self.assertFalse(exposure["in_text_mask_buffer"])
+        self.assertFalse(exposure["in_source_label"])
+        self.assertFalse(exposure["in_state_manager"])
+        self.assertEqual(exposure["delivery_mode"], "memory_only")
+
+    def test_memory_exposure_probe_detects_plaintext_copy_in_state_manager_for_system_mode(self):
+        self.service.copy_text("Secret!123")
+
+        exposure = self.service.inspect_memory_exposure("Secret!123")
+
+        self.assertFalse(exposure["in_mask_buffer"])
+        self.assertFalse(exposure["in_text_mask_buffer"])
+        self.assertTrue(exposure["in_state_manager"])
+        self.assertEqual(exposure["delivery_mode"], "system")
 
     def test_copy_rejects_null_bytes_in_value(self):
         clipboard_errors = []

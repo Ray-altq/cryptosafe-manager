@@ -327,7 +327,11 @@ class ClipboardService:
             self._last_clear_failed = False
 
             if self.state_manager is not None and hasattr(self.state_manager, "set_clipboard"):
-                self.state_manager.set_clipboard(normalized_value, self._settings["timeout_seconds"])
+                self.state_manager.set_clipboard(
+                    normalized_value,
+                    self._settings["timeout_seconds"],
+                    redact=not self.uses_system_clipboard(),
+                )
 
             self.event_bus.publish(
                 Event(
@@ -470,6 +474,29 @@ class ClipboardService:
             if self._current_item is None:
                 return value in {None, ""}
             return value == self._current_item.reveal()
+
+    def inspect_memory_exposure(self, probe_text: str) -> dict:
+        normalized_probe = str(probe_text or "")
+        probe_bytes = normalized_probe.encode("utf-8")
+        with self._lock:
+            exposures = {
+                "probe_text": normalized_probe,
+                "in_mask_buffer": False,
+                "in_text_mask_buffer": False,
+                "in_source_label": False,
+                "in_state_manager": False,
+                "delivery_mode": self._settings.get("delivery_mode", "system"),
+            }
+            if self._current_item is not None:
+                exposures["in_mask_buffer"] = probe_bytes in bytes(self._current_item.mask)
+                exposures["in_text_mask_buffer"] = probe_bytes in bytes(self._current_item.text_mask)
+                exposures["in_source_label"] = normalized_probe in self._current_item.source_label
+
+            if self.state_manager is not None and hasattr(self.state_manager, "clipboard_content"):
+                state_value = getattr(self.state_manager, "clipboard_content", None)
+                exposures["in_state_manager"] = normalized_probe in str(state_value or "")
+
+            return exposures
 
     def is_application_allowed(self, application_name: str) -> bool:
         normalized_name = self._normalize_application_name(application_name)

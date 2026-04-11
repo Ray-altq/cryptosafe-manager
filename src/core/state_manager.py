@@ -3,12 +3,14 @@ from enum import Enum
 from typing import Optional
 
 
-class SessionState(Enum):  #состояние сессии пользователя
+class SessionState(Enum):
     LOCKED = "locked"
     UNLOCKED = "unlocked"
 
 
-class StateManager:  #управление состоянием
+class StateManager:
+    CLIPBOARD_REDACTED_MARKER = "[protected]"
+
     def __init__(self):
         self.session_state = SessionState.LOCKED
         self.login_timestamp: Optional[datetime] = None
@@ -20,34 +22,34 @@ class StateManager:  #управление состоянием
         self.inactivity_timeout = 300
         self.key_cache_timeout = 3600
 
-    def unlock(self):  #разблок
+    def unlock(self):
         now = datetime.now()
         self.session_state = SessionState.UNLOCKED
         self.login_timestamp = now
         self.last_activity = now
         self.application_active = True
 
-    def lock(self):  #блок
+    def lock(self):
         self.session_state = SessionState.LOCKED
         self.login_timestamp = None
         self.clipboard_content = None
         self.clipboard_timer = None
 
-    def is_locked(self) -> bool:  #проверка, заблокировано ли приложение
+    def is_locked(self) -> bool:
         return self.session_state == SessionState.LOCKED
 
-    def is_unlocked(self) -> bool:  #проверка, разблокировано ли приложение
+    def is_unlocked(self) -> bool:
         return self.session_state == SessionState.UNLOCKED
 
-    def update_activity(self):  #обновление времени последней активности
+    def update_activity(self):
         self.last_activity = datetime.now()
 
-    def get_idle_time(self) -> float:   #сколько секунд прошло с последней активности
+    def get_idle_time(self) -> float:
         if self.last_activity is None:
             return 0
         return (datetime.now() - self.last_activity).total_seconds()
 
-    def should_auto_lock(self) -> bool:  #проверка на автоблокировку
+    def should_auto_lock(self) -> bool:
         if self.session_state != SessionState.UNLOCKED or self.last_activity is None:
             return False
         return self.get_idle_time() >= self.inactivity_timeout
@@ -57,7 +59,7 @@ class StateManager:  #управление состоянием
             return False
         return self.get_idle_time() >= self.key_cache_timeout
 
-    def set_inactivity_timeout(self, seconds: int):  #установка таймаута неактивности (берем из кфг)
+    def set_inactivity_timeout(self, seconds: int):
         self.inactivity_timeout = max(1, int(seconds))
 
     def set_key_cache_timeout(self, seconds: int):
@@ -74,20 +76,20 @@ class StateManager:  #управление состоянием
     def reset_failed_attempts(self):
         self.failed_attempt_count = 0
 
-    def set_clipboard(self, content: str, timeout_seconds: int = 30):  #установка содержимого буфера обмена с таймером
-        self.clipboard_content = content
+    def set_clipboard(self, content: str, timeout_seconds: int = 30, redact: bool = False):
+        self.clipboard_content = self.CLIPBOARD_REDACTED_MARKER if redact else content
         if timeout_seconds > 0:
             self.clipboard_timer = datetime.now() + timedelta(seconds=timeout_seconds)
         else:
             self.clipboard_timer = None
 
-    def get_clipboard(self) -> Optional[str]:  #получение содержимого буфера
+    def get_clipboard(self) -> Optional[str]:
         if self.clipboard_timer and datetime.now() >= self.clipboard_timer:
             self.clipboard_content = None
             self.clipboard_timer = None
         return self.clipboard_content
 
-    def clear_clipboard(self):  #принудительная очистка буфера
+    def clear_clipboard(self):
         self.clipboard_content = None
         self.clipboard_timer = None
 
