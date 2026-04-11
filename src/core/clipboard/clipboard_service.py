@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ctypes
 import hashlib
+import os
 import secrets
 import threading
 from dataclasses import dataclass, field
@@ -17,13 +19,14 @@ class ClipboardAccessError(RuntimeError):
 @dataclass
 class SecureClipboardItem:
     text_mask: bytearray
-    mask: bytes
+    mask: bytearray
     data_type: str
     source_entry_id: Optional[int] = None
     source_label: str = ""
     copied_at: datetime = field(default_factory=datetime.now)
     expires_at: Optional[datetime] = None
     fingerprint: str = ""
+    memory_locked: bool = False
 
     @classmethod
     def create(
@@ -35,11 +38,11 @@ class SecureClipboardItem:
         timeout_seconds: int = 30,
     ) -> "SecureClipboardItem":
         plain_bytes = value.encode("utf-8")
-        mask = secrets.token_bytes(max(len(plain_bytes), 1))
+        mask = bytearray(secrets.token_bytes(max(len(plain_bytes), 1)))
         masked = bytearray(byte ^ mask[index] for index, byte in enumerate(plain_bytes))
         expires_at = None if timeout_seconds <= 0 else datetime.now() + timedelta(seconds=timeout_seconds)
         fingerprint = hashlib.sha256(plain_bytes).hexdigest()
-        return cls(
+        item = cls(
             text_mask=masked,
             mask=mask,
             data_type=data_type,
@@ -48,6 +51,8 @@ class SecureClipboardItem:
             expires_at=expires_at,
             fingerprint=fingerprint,
         )
+        item._lock_memory_buffers()
+        return item
 
     def reveal(self) -> str:
         plain_bytes = bytes(byte ^ self.mask[index] for index, byte in enumerate(self.text_mask))
@@ -56,6 +61,55 @@ class SecureClipboardItem:
     def secure_wipe(self):
         for index in range(len(self.text_mask)):
             self.text_mask[index] = 0
+        for index in range(len(self.mask)):
+            self.mask[index] = 0
+        self._unlock_memory_buffers()
+
+    def _iter_memory_buffers(self):
+        return [self.text_mask, self.mask]
+
+    def _lock_memory_buffers(self):
+        lock_succeeded = False
+        for buffer in self._iter_memory_buffers():
+            lock_succeeded = self._lock_buffer(buffer) or lock_succeeded
+        self.memory_locked = lock_succeeded
+
+    def _unlock_memory_buffers(self):
+        if not self.memory_locked:
+            return
+        for buffer in self._iter_memory_buffers():
+            self._unlock_buffer(buffer)
+        self.memory_locked = False
+
+    def _lock_buffer(self, buffer: bytearray) -> bool:
+        if not buffer:
+            return False
+        try:
+            raw = (ctypes.c_char * len(buffer)).from_buffer(buffer)
+            if os.name == "nt":
+                kernel32 = ctypes.windll.kernel32
+                return bool(kernel32.VirtualLock(raw, len(buffer)))
+            libc = ctypes.CDLL(None)
+            if hasattr(libc, "mlock"):
+                return bool(libc.mlock(raw, len(buffer)) == 0)
+        except Exception:
+            return False
+        return False
+
+    def _unlock_buffer(self, buffer: bytearray):
+        if not buffer:
+            return
+        try:
+            raw = (ctypes.c_char * len(buffer)).from_buffer(buffer)
+            if os.name == "nt":
+                kernel32 = ctypes.windll.kernel32
+                kernel32.VirtualUnlock(raw, len(buffer))
+                return
+            libc = ctypes.CDLL(None)
+            if hasattr(libc, "munlock"):
+                libc.munlock(raw, len(buffer))
+        except Exception:
+            return
 
 
 @dataclass

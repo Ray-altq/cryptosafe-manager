@@ -2,17 +2,19 @@ import os
 import sys
 import tempfile
 import threading
+import types
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from src.core.clipboard import ClipboardAccessError, ClipboardMonitor, ClipboardService
+from src.core.clipboard import ClipboardAccessError, ClipboardMonitor, ClipboardService, SecureClipboardItem
 from src.core.config import Config
 from src.core.events import EventBus, EventType
 from src.core.state_manager import StateManager
 from src.database.db import Database
+from unittest.mock import patch
 
 
 class FakeClipboardAdapter:
@@ -405,6 +407,45 @@ class ClipboardServiceTestCase(unittest.TestCase):
 
         self.assertFalse(self.service.did_last_clear_fail())
         self.assertIsNone(self.service.get_last_clear_reason())
+
+    def test_secure_clipboard_item_uses_virtual_lock_on_windows_when_available(self):
+        calls = {"lock": 0, "unlock": 0}
+        fake_kernel32 = types.SimpleNamespace(
+            VirtualLock=lambda _buffer, _size: calls.update(lock=calls["lock"] + 1) or True,
+            VirtualUnlock=lambda _buffer, _size: calls.update(unlock=calls["unlock"] + 1) or True,
+        )
+
+        with patch("src.core.clipboard.clipboard_service.os.name", "nt"), patch.object(
+            sys.modules["src.core.clipboard.clipboard_service"].ctypes,
+            "windll",
+            types.SimpleNamespace(kernel32=fake_kernel32),
+            create=True,
+        ):
+            item = SecureClipboardItem.create("Secret!123", data_type="password")
+            self.assertTrue(item.memory_locked)
+            item.secure_wipe()
+
+        self.assertEqual(calls["lock"], 2)
+        self.assertEqual(calls["unlock"], 2)
+
+    def test_secure_clipboard_item_uses_mlock_on_unix_when_available(self):
+        calls = {"mlock": 0, "munlock": 0}
+        fake_libc = types.SimpleNamespace(
+            mlock=lambda _buffer, _size: calls.update(mlock=calls["mlock"] + 1) or 0,
+            munlock=lambda _buffer, _size: calls.update(munlock=calls["munlock"] + 1) or 0,
+        )
+
+        with patch("src.core.clipboard.clipboard_service.os.name", "posix"), patch.object(
+            sys.modules["src.core.clipboard.clipboard_service"].ctypes,
+            "CDLL",
+            return_value=fake_libc,
+        ):
+            item = SecureClipboardItem.create("Secret!123", data_type="password")
+            self.assertTrue(item.memory_locked)
+            item.secure_wipe()
+
+        self.assertEqual(calls["mlock"], 2)
+        self.assertEqual(calls["munlock"], 2)
 
 
 if __name__ == "__main__":
