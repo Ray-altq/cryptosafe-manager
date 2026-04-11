@@ -171,6 +171,37 @@ class MacOSClipboardAdapter(ClipboardAdapter):
         return None
 
 
+class AppKitClipboardAdapter(ClipboardAdapter):
+    def __init__(self):
+        try:
+            from AppKit import NSPasteboard, NSPasteboardTypeString  # type: ignore
+        except Exception as error:
+            raise ClipboardAdapterError("AppKit clipboard недоступен") from error
+        self._pasteboard = NSPasteboard.generalPasteboard()
+        self._string_type = NSPasteboardTypeString
+
+    def copy_to_clipboard(self, data: str) -> bool:
+        try:
+            self._pasteboard.clearContents()
+            self._pasteboard.declareTypes_owner_([self._string_type], None)
+            return bool(self._pasteboard.setString_forType_(data, self._string_type))
+        except Exception:
+            return False
+
+    def clear_clipboard(self) -> bool:
+        try:
+            self._pasteboard.clearContents()
+            return True
+        except Exception:
+            return False
+
+    def get_clipboard_content(self) -> Optional[str]:
+        try:
+            return self._pasteboard.stringForType_(self._string_type)
+        except Exception:
+            return None
+
+
 class LinuxClipboardAdapter(ClipboardAdapter):
     def __init__(self, selection_mode: str = "clipboard"):
         normalized_mode = str(selection_mode or "clipboard").strip().lower()
@@ -294,6 +325,10 @@ def create_platform_adapter(root=None, *, linux_selection_mode: str = "clipboard
     if os.name == "nt":
         adapters.append(WindowsClipboardAdapter())
     elif sys.platform == "darwin":
+        try:
+            adapters.append(AppKitClipboardAdapter())
+        except ClipboardAdapterError:
+            pass
         adapters.append(MacOSClipboardAdapter())
     elif sys.platform.startswith("linux"):
         adapters.append(LinuxClipboardAdapter(selection_mode=linux_selection_mode))

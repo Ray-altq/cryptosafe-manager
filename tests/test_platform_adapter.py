@@ -33,6 +33,25 @@ class FakeProcessResult:
         self.stdout = stdout
 
 
+class FakePasteboard:
+    def __init__(self):
+        self.value = ""
+        self.declared_types = []
+
+    def clearContents(self):
+        self.value = ""
+
+    def declareTypes_owner_(self, types_list, _owner):
+        self.declared_types = list(types_list)
+
+    def setString_forType_(self, value, _string_type):
+        self.value = value
+        return True
+
+    def stringForType_(self, _string_type):
+        return self.value
+
+
 class TestCompositeClipboardAdapter(unittest.TestCase):
     def test_copy_and_clear_return_true_when_any_adapter_succeeds(self):
         class AdapterA:
@@ -78,6 +97,24 @@ class TestCreatePlatformAdapter(unittest.TestCase):
         self.assertIsInstance(adapter, platform_adapter.CompositeClipboardAdapter)
         self.assertEqual(adapter.adapters, [windows_adapter, tk_adapter])
 
+    def test_create_platform_adapter_uses_appkit_then_command_adapter_on_macos(self):
+        appkit_adapter = object()
+        command_adapter = object()
+
+        with patch.object(platform_adapter.os, "name", "posix"), patch.object(
+            platform_adapter.sys, "platform", "darwin"
+        ), patch.object(
+            platform_adapter, "AppKitClipboardAdapter", return_value=appkit_adapter
+        ), patch.object(
+            platform_adapter, "MacOSClipboardAdapter", return_value=command_adapter
+        ), patch.object(
+            platform_adapter, "PyperclipClipboardAdapter", side_effect=platform_adapter.ClipboardAdapterError("missing")
+        ):
+            adapter = platform_adapter.create_platform_adapter()
+
+        self.assertIsInstance(adapter, platform_adapter.CompositeClipboardAdapter)
+        self.assertEqual(adapter.adapters, [appkit_adapter, command_adapter])
+
     def test_create_platform_adapter_uses_pyperclip_when_platform_specific_adapter_missing(self):
         pyperclip_adapter = object()
 
@@ -116,6 +153,22 @@ class TestCreatePlatformAdapter(unittest.TestCase):
 
 
 class TestPlatformAdapters(unittest.TestCase):
+    def test_appkit_clipboard_adapter_roundtrip(self):
+        fake_pasteboard = FakePasteboard()
+        fake_appkit = types.SimpleNamespace(
+            NSPasteboard=types.SimpleNamespace(generalPasteboard=lambda: fake_pasteboard),
+            NSPasteboardTypeString="public.utf8-plain-text",
+        )
+
+        with patch.dict(sys.modules, {"AppKit": fake_appkit}):
+            adapter = platform_adapter.AppKitClipboardAdapter()
+
+        self.assertTrue(adapter.copy_to_clipboard("Secret!123"))
+        self.assertEqual(adapter.get_clipboard_content(), "Secret!123")
+        self.assertTrue(adapter.clear_clipboard())
+        self.assertEqual(adapter.get_clipboard_content(), "")
+        self.assertEqual(fake_pasteboard.declared_types, ["public.utf8-plain-text"])
+
     def test_windows_clipboard_adapter_retries_busy_clipboard_and_succeeds(self):
         state = {"open_calls": 0, "closed_calls": 0, "stored_text": None}
 
