@@ -2,6 +2,7 @@ import os
 import sys
 import types
 import unittest
+from builtins import __import__ as builtin_import
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -150,6 +151,72 @@ class TestCreatePlatformAdapter(unittest.TestCase):
         self.assertIsInstance(adapter, platform_adapter.CompositeClipboardAdapter)
         self.assertEqual(adapter.adapters, [linux_adapter])
         linux_factory.assert_called_once_with(selection_mode="primary")
+
+
+class TestPlatformValidationReport(unittest.TestCase):
+    def test_validation_report_detects_windows_backends(self):
+        fake_user32 = object()
+
+        with patch.object(platform_adapter.os, "name", "nt"), patch.object(
+            platform_adapter.sys, "platform", "win32"
+        ), patch.dict(
+            sys.modules, {"win32clipboard": object()}
+        ), patch.object(
+            platform_adapter.ctypes, "windll", types.SimpleNamespace(user32=fake_user32), create=True
+        ):
+            report = platform_adapter.get_platform_validation_report(root_available=True)
+
+        self.assertTrue(report["ready"])
+        self.assertEqual(report["platform"], "win32")
+        self.assertTrue(any(item["name"] == "windows_win32clipboard" and item["available"] for item in report["adapters"]))
+        self.assertTrue(any(item["name"] == "windows_user32" and item["available"] for item in report["adapters"]))
+        self.assertTrue(any(item["name"] == "tk_root" and item["available"] for item in report["adapters"]))
+
+    def test_validation_report_detects_macos_backends(self):
+        with patch.object(platform_adapter.os, "name", "posix"), patch.object(
+            platform_adapter.sys, "platform", "darwin"
+        ), patch.dict(
+            sys.modules, {"AppKit": object()}
+        ), patch.object(
+            platform_adapter.shutil, "which", side_effect=lambda name: "/usr/bin/" + name if name in {"pbcopy", "pbpaste", "osascript"} else None
+        ):
+            report = platform_adapter.get_platform_validation_report()
+
+        self.assertTrue(report["ready"])
+        self.assertTrue(any(item["name"] == "macos_appkit" and item["available"] for item in report["adapters"]))
+        self.assertTrue(any(item["name"] == "macos_pbcopy" and item["available"] for item in report["adapters"]))
+        self.assertTrue(any(item["name"] == "macos_osascript" and item["available"] for item in report["adapters"]))
+
+    def test_validation_report_detects_linux_backends_for_primary_mode(self):
+        with patch.object(platform_adapter.os, "name", "posix"), patch.object(
+            platform_adapter.sys, "platform", "linux"
+        ), patch.object(
+            platform_adapter.shutil, "which", side_effect=lambda name: "/usr/bin/" + name if name in {"xclip", "xsel"} else None
+        ):
+            report = platform_adapter.get_platform_validation_report(linux_selection_mode="primary")
+
+        self.assertTrue(report["ready"])
+        self.assertEqual(report["linux_selection_mode"], "primary")
+        self.assertTrue(any(item["name"] == "linux_xclip" and item["available"] for item in report["adapters"]))
+        self.assertTrue(any(item["name"] == "linux_xsel" and item["available"] for item in report["adapters"]))
+
+    def test_validation_report_marks_not_ready_when_no_backends_exist(self):
+        def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+            if name in {"pyperclip", "AppKit", "win32clipboard"}:
+                raise ImportError(name)
+            return builtin_import(name, globals, locals, fromlist, level)
+
+        with patch.object(platform_adapter.os, "name", "posix"), patch.object(
+            platform_adapter.sys, "platform", "linux"
+        ), patch.object(
+            platform_adapter.shutil, "which", return_value=None
+        ), patch(
+            "builtins.__import__", side_effect=fake_import
+        ):
+            report = platform_adapter.get_platform_validation_report(root_available=False)
+
+        self.assertFalse(report["ready"])
+        self.assertTrue(any(item["name"] == "tk_root" and not item["available"] for item in report["adapters"]))
 
 
 class TestPlatformAdapters(unittest.TestCase):

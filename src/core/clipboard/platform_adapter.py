@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -11,6 +12,71 @@ from typing import Optional
 
 class ClipboardAdapterError(RuntimeError):
     pass
+
+
+def get_platform_validation_report(*, root_available: bool = False, linux_selection_mode: str = "clipboard") -> dict:
+    normalized_linux_mode = str(linux_selection_mode or "clipboard").strip().lower()
+    if normalized_linux_mode not in {"clipboard", "primary", "both"}:
+        normalized_linux_mode = "clipboard"
+
+    report = {
+        "platform": sys.platform,
+        "os_name": os.name,
+        "root_available": bool(root_available),
+        "linux_selection_mode": normalized_linux_mode,
+        "adapters": [],
+        "ready": False,
+    }
+
+    if os.name == "nt":
+        try:
+            import win32clipboard  # type: ignore  # noqa: F401
+
+            report["adapters"].append({"name": "windows_win32clipboard", "available": True})
+        except Exception:
+            report["adapters"].append({"name": "windows_win32clipboard", "available": False})
+
+        try:
+            user32 = ctypes.windll.user32
+            report["adapters"].append({"name": "windows_user32", "available": bool(user32)})
+        except Exception:
+            report["adapters"].append({"name": "windows_user32", "available": False})
+    elif sys.platform == "darwin":
+        try:
+            import AppKit  # type: ignore  # noqa: F401
+
+            report["adapters"].append({"name": "macos_appkit", "available": True})
+        except Exception:
+            report["adapters"].append({"name": "macos_appkit", "available": False})
+
+        report["adapters"].append({"name": "macos_pbcopy", "available": shutil.which("pbcopy") is not None})
+        report["adapters"].append({"name": "macos_pbpaste", "available": shutil.which("pbpaste") is not None})
+        report["adapters"].append({"name": "macos_osascript", "available": shutil.which("osascript") is not None})
+    elif sys.platform.startswith("linux"):
+        linux_commands = {
+            "clipboard": ["wl-copy", "wl-paste", "xclip", "xsel"],
+            "primary": ["xclip", "xsel"],
+            "both": ["wl-copy", "wl-paste", "xclip", "xsel"],
+        }
+        for command_name in linux_commands[normalized_linux_mode]:
+            report["adapters"].append(
+                {
+                    "name": f"linux_{command_name}",
+                    "available": shutil.which(command_name) is not None,
+                }
+            )
+
+    report["adapters"].append({"name": "tk_root", "available": bool(root_available)})
+
+    try:
+        import pyperclip  # type: ignore  # noqa: F401
+
+        report["adapters"].append({"name": "pyperclip", "available": True})
+    except Exception:
+        report["adapters"].append({"name": "pyperclip", "available": False})
+
+    report["ready"] = any(adapter["available"] for adapter in report["adapters"])
+    return report
 
 
 class ClipboardAdapter(ABC):
