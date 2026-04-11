@@ -2,6 +2,8 @@ import os
 import sys
 import tempfile
 import threading
+import time
+import tracemalloc
 import types
 import unittest
 from datetime import datetime, timedelta
@@ -101,6 +103,23 @@ class ClipboardServiceTestCase(unittest.TestCase):
         self.assertEqual(result, "timeout")
         self.assertFalse(self.service.get_status().active)
         self.assertEqual(self.adapter.clear_calls, 1)
+
+    def test_auto_clear_short_expiry_completes_within_100ms_tolerance(self):
+        self.service.copy_text("Secret!123")
+        expected_delay = 0.08
+        self.service._current_item.expires_at = datetime.now() + timedelta(seconds=expected_delay)
+
+        started_at = time.perf_counter()
+        result = None
+        while time.perf_counter() - started_at < 1:
+            result = self.service.tick()
+            if result == "timeout":
+                break
+            time.sleep(0.01)
+        elapsed = time.perf_counter() - started_at
+
+        self.assertEqual(result, "timeout")
+        self.assertLess(abs(elapsed - expected_delay), 0.1)
 
     def test_copy_is_blocked_when_state_is_locked(self):
         self.state.lock()
@@ -407,6 +426,37 @@ class ClipboardServiceTestCase(unittest.TestCase):
 
         self.assertFalse(self.service.did_last_clear_fail())
         self.assertIsNone(self.service.get_last_clear_reason())
+
+    def test_copy_operation_completes_under_100ms_with_fake_adapter(self):
+        started_at = time.perf_counter()
+        self.service.copy_text("Secret!123", data_type="password", source_entry_id=7, source_label="GitHub")
+        elapsed = time.perf_counter() - started_at
+
+        self.assertLess(elapsed, 0.1)
+
+    def test_idle_clipboard_monitor_poll_loop_stays_lightweight(self):
+        monitor = ClipboardMonitor(self.adapter, self.service)
+        self.adapter.value = None
+
+        started_at = time.perf_counter()
+        for _index in range(1000):
+            monitor.poll()
+        elapsed = time.perf_counter() - started_at
+
+        self.assertLess(elapsed, 0.5)
+
+    def test_clipboard_service_memory_overhead_stays_below_10mb_for_large_payload(self):
+        large_value = "A" * 4096
+
+        tracemalloc.start()
+        try:
+            self.service.copy_text(large_value, data_type="entry", source_label="Large payload")
+            _revealed = self.service.reveal_current_text()
+            current_bytes, peak_bytes = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+
+        self.assertLess(peak_bytes, 10 * 1024 * 1024)
 
     def test_secure_clipboard_item_uses_virtual_lock_on_windows_when_available(self):
         calls = {"lock": 0, "unlock": 0}
