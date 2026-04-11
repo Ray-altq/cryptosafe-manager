@@ -3,6 +3,7 @@ import queue
 import threading
 import tkinter as tk
 import ctypes
+import sys
 from base64 import b64encode
 from datetime import datetime
 from typing import Optional
@@ -2023,11 +2024,20 @@ class MainWindow:
                 data_type=data_type,
                 source_entry_id=entry.id,
                 source_label=entry.title,
+                application_name=self._get_clipboard_application_name(),
             )
         except ClipboardAccessError as error:
             messagebox.showerror("Ошибка буфера обмена", str(error))
             return False
         return True
+
+    def _get_clipboard_application_name(self) -> str:
+        application_name = os.path.basename(sys.argv[0] or "").strip()
+        if application_name.lower().endswith(".py"):
+            return "cryptosafe-manager"
+        if application_name.lower().endswith(".exe"):
+            application_name = application_name[:-4]
+        return application_name or "cryptosafe-manager"
 
     def _parse_audit_details(self, details: str) -> dict[str, str]:
         parsed_details: dict[str, str] = {}

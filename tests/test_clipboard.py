@@ -187,6 +187,18 @@ class ClipboardServiceTestCase(unittest.TestCase):
         self.assertTrue(self.service.is_application_allowed("Keepassxc"))
         self.assertFalse(self.service.is_application_allowed("telegram"))
 
+    def test_copy_is_blocked_for_application_outside_whitelist(self):
+        clipboard_errors = []
+        self.bus.subscribe(EventType.CLIPBOARD_ERROR, clipboard_errors.append)
+        self.service.configure(allowed_applications=["cryptosafe-manager"])
+
+        with self.assertRaises(ClipboardAccessError):
+            self.service.copy_text("Secret!123", application_name="telegram")
+
+        self.assertFalse(self.service.get_status().active)
+        self.assertEqual(clipboard_errors[-1].data["error_code"], "application_not_allowed")
+        self.assertEqual(clipboard_errors[-1].data["application_name"], "telegram")
+
     def test_replacement_copy_clears_previous_clipboard_content(self):
         self.service.copy_text("first-secret", source_entry_id=1)
         self.service.copy_text("second-secret", source_entry_id=2)

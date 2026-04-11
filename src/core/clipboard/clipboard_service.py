@@ -184,6 +184,7 @@ class ClipboardService:
         data_type: str = "password",
         source_entry_id: Optional[int] = None,
         source_label: str = "",
+        application_name: str = "",
     ):
         normalized_value = str(value or "")
         if not normalized_value:
@@ -207,6 +208,16 @@ class ClipboardService:
                     source_entry_id=source_entry_id,
                 )
                 raise ClipboardAccessError("Буфер обмена доступен только при разблокированном vault")
+
+            if not self.is_application_allowed(application_name):
+                self._publish_clipboard_error(
+                    operation="copy",
+                    error_code="application_not_allowed",
+                    data_type=data_type,
+                    source_entry_id=source_entry_id,
+                    extra_details={"application_name": self._normalize_application_name(application_name)},
+                )
+                raise ClipboardAccessError("Копирование в буфер обмена запрещено для этого приложения")
 
             self.clear(reason="replacement", publish_event=False)
             item = SecureClipboardItem.create(
@@ -243,6 +254,7 @@ class ClipboardService:
                         "data_type": data_type,
                         "timeout_seconds": self._settings["timeout_seconds"],
                         "source_label": source_label,
+                        "application_name": self._normalize_application_name(application_name),
                     },
                 )
             )

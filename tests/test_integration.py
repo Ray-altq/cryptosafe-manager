@@ -686,6 +686,7 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
         window = MainWindow.__new__(MainWindow)
         window.clipboard_service = FakeClipboardService()
         window._on_activity = lambda: setattr(window, "_activity_called", True)
+        window._get_clipboard_application_name = lambda: "cryptosafe-manager"
         entry = EntryView(
             {
                 "id": 10,
@@ -702,12 +703,14 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
 
         self.assertEqual(window.clipboard_service.calls[0][0], "demo-user")
         self.assertEqual(window.clipboard_service.calls[0][1]["data_type"], "username")
+        self.assertEqual(window.clipboard_service.calls[0][1]["application_name"], "cryptosafe-manager")
         self.assertTrue(window._activity_called)
 
     def test_copy_selected_all_uses_clipboard_service(self):
         window = MainWindow.__new__(MainWindow)
         window.clipboard_service = FakeClipboardService()
         window._on_activity = lambda: setattr(window, "_activity_called", True)
+        window._get_clipboard_application_name = lambda: "cryptosafe-manager"
         window._decrypt_password = lambda _value: "Secret!123"
         entry = EntryView(
             {
@@ -727,6 +730,7 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
         self.assertIn("Название: Example", copied_text)
         self.assertIn("Пароль: Secret!123", copied_text)
         self.assertEqual(window.clipboard_service.calls[0][1]["data_type"], "entry")
+        self.assertEqual(window.clipboard_service.calls[0][1]["application_name"], "cryptosafe-manager")
         self.assertTrue(window._activity_called)
 
     def test_refresh_clipboard_status_shows_preview_and_warning(self):
