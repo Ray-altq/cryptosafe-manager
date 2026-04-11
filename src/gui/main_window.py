@@ -2101,7 +2101,10 @@ class MainWindow:
             }
             error_map = {
                 "empty_value": "пустое значение",
+                "invalid_content": "недопустимое содержимое",
+                "value_too_large": "превышен безопасный лимит данных",
                 "blocked_on_suspicious": "копирование заблокировано защитой",
+                "application_not_allowed": "приложение не входит в whitelist",
                 "vault_locked": "vault заблокирован",
                 "adapter_write_failed": "сбой записи через системный адаптер",
                 "adapter_clear_failed": "сбой системной очистки буфера обмена",
@@ -2118,6 +2121,8 @@ class MainWindow:
                 detail_parts.append(self._format_clipboard_clear_reason(parsed_details["clear_reason"]))
             if parsed_details.get("entry_id") not in {None, "", "None"}:
                 detail_parts.append(f"entry={parsed_details['entry_id']}")
+            if parsed_details.get("application_name"):
+                detail_parts.append(f"приложение={parsed_details['application_name']}")
             return " | ".join(detail_parts)
 
         return str(details or "")

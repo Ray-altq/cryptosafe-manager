@@ -199,6 +199,33 @@ class ClipboardServiceTestCase(unittest.TestCase):
         self.assertEqual(clipboard_errors[-1].data["error_code"], "application_not_allowed")
         self.assertEqual(clipboard_errors[-1].data["application_name"], "telegram")
 
+    def test_copy_rejects_null_bytes_in_value(self):
+        clipboard_errors = []
+        self.bus.subscribe(EventType.CLIPBOARD_ERROR, clipboard_errors.append)
+
+        with self.assertRaises(ClipboardAccessError):
+            self.service.copy_text("Secret\x00Value")
+
+        self.assertEqual(clipboard_errors[-1].data["error_code"], "invalid_content")
+
+    def test_copy_rejects_oversized_value_for_paranoid_level(self):
+        clipboard_errors = []
+        self.bus.subscribe(EventType.CLIPBOARD_ERROR, clipboard_errors.append)
+        self.service.configure(security_level="paranoid")
+
+        with self.assertRaises(ClipboardAccessError):
+            self.service.copy_text("x" * 4097, data_type="entry")
+
+        self.assertEqual(clipboard_errors[-1].data["error_code"], "value_too_large")
+        self.assertEqual(clipboard_errors[-1].data["max_length"], 4096)
+        self.assertEqual(clipboard_errors[-1].data["actual_length"], 4097)
+
+    def test_copy_sanitizes_source_label_before_storing_status(self):
+        self.service.copy_text("Secret!123", source_label="Example\nInjected\tLabel")
+
+        status = self.service.get_status()
+        self.assertEqual(status.source_label, "ExampleInjected\tLabel")
+
     def test_replacement_copy_clears_previous_clipboard_content(self):
         self.service.copy_text("first-secret", source_entry_id=1)
         self.service.copy_text("second-secret", source_entry_id=2)

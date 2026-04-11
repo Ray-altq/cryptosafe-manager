@@ -187,11 +187,24 @@ class ClipboardService:
         application_name: str = "",
     ):
         normalized_value = str(value or "")
+        if "\x00" in normalized_value:
+            self._publish_clipboard_error(operation="copy", error_code="invalid_content", data_type=data_type)
+            raise ClipboardAccessError("Буфер обмена не принимает данные с недопустимыми символами")
         if not normalized_value:
             self._publish_clipboard_error(operation="copy", error_code="empty_value", data_type=data_type)
             raise ClipboardAccessError("Нельзя копировать пустое значение")
 
         with self._lock:
+            max_payload_length = self._get_max_payload_length()
+            if len(normalized_value) > max_payload_length:
+                self._publish_clipboard_error(
+                    operation="copy",
+                    error_code="value_too_large",
+                    data_type=data_type,
+                    source_entry_id=source_entry_id,
+                    extra_details={"max_length": max_payload_length, "actual_length": len(normalized_value)},
+                )
+                raise ClipboardAccessError("Размер данных превышает безопасный лимит для текущего уровня защиты")
             if self._blocked_future_copies:
                 self._publish_clipboard_error(
                     operation="copy",
@@ -224,7 +237,7 @@ class ClipboardService:
                 normalized_value,
                 data_type=data_type,
                 source_entry_id=source_entry_id,
-                source_label=source_label,
+                source_label=self._sanitize_metadata_value(source_label),
                 timeout_seconds=self._settings["timeout_seconds"],
             )
             if not self.adapter.copy_to_clipboard(normalized_value):
@@ -253,7 +266,7 @@ class ClipboardService:
                         "entry_id": source_entry_id,
                         "data_type": data_type,
                         "timeout_seconds": self._settings["timeout_seconds"],
-                        "source_label": source_label,
+                        "source_label": self._sanitize_metadata_value(source_label),
                         "application_name": self._normalize_application_name(application_name),
                     },
                 )
@@ -384,7 +397,7 @@ class ClipboardService:
     def is_application_allowed(self, application_name: str) -> bool:
         normalized_name = self._normalize_application_name(application_name)
         if not normalized_name:
-            return False
+            return True
         allowed_applications = self.get_settings().get("allowed_applications", [])
         if not allowed_applications:
             return True
@@ -445,6 +458,14 @@ class ClipboardService:
             return "basic"
         return normalized
 
+    def _get_max_payload_length(self) -> int:
+        security_level = self._normalize_security_level(self._settings.get("security_level", "basic"))
+        if security_level == "paranoid":
+            return 4096
+        if security_level == "advanced":
+            return 8192
+        return 16384
+
     def _normalize_allowed_applications(self, allowed_applications) -> list[str]:
         if isinstance(allowed_applications, str):
             raw_items = allowed_applications.replace(";", ",").replace("\n", ",").split(",")
@@ -468,6 +489,10 @@ class ClipboardService:
         if normalized.endswith(".exe"):
             normalized = normalized[:-4]
         return normalized
+
+    def _sanitize_metadata_value(self, value: str) -> str:
+        sanitized = "".join(character for character in str(value or "") if character >= " " or character == "\t")
+        return sanitized.strip()[:120]
 
     def _build_masked_preview(self, value: str, data_type: str) -> str:
         if not value:

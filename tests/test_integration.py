@@ -1134,6 +1134,19 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
         self.assertIn("сбой записи через системный адаптер", line)
         self.assertIn("тип=пароль", line)
 
+    def test_format_audit_log_line_for_application_not_allowed_error(self):
+        window = MainWindow.__new__(MainWindow)
+
+        class AuditLogRecord:
+            action = "clipboard_error"
+            timestamp = datetime(2026, 4, 10, 10, 31, 0)
+            entry_id = 7
+            details = "operation=copy, error_code=application_not_allowed, application_name=telegram, entry_id=7, data_type=password"
+
+        line = window._format_audit_log_line(AuditLogRecord())
+
+        self.assertIn("telegram", line)
+
     def test_check_security_timers_publishes_clipboard_error_when_monitor_fails(self):
         window = MainWindow.__new__(MainWindow)
         window.state = FakeStateManager()
