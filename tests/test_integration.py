@@ -1405,8 +1405,8 @@ class TestMainWindowSecurityState(IntegrationTestCase):
         self.assertTrue(window.root.destroyed)
         self.assertFalse(window.db.get_setting(MainWindow.CLIPBOARD_RECOVERY_PENDING_KEY, True))
 
-    @unittest.skip("Старая проверка использует битую строку ожидания")
-    def _legacy_on_close_warns_when_clipboard_clear_failed(self):
+    # Устаревшая локальная проверка не входит в автоматический набор.
+    def legacy_on_close_warns_when_clipboard_clear_failed(self):
         window = MainWindow.__new__(MainWindow)
         window.auth_service = FakeAuthService()
         window.key_manager = FakeKeyManager()
