@@ -3,6 +3,7 @@ import queue
 import threading
 import tkinter as tk
 import ctypes
+import json
 import sys
 from base64 import b64encode
 from datetime import datetime
@@ -52,6 +53,8 @@ class EntryView(dict):
 
 class MainWindow:
     CLIPBOARD_RECOVERY_PENDING_KEY = "runtime.clipboard_recovery_pending"
+    AUDIT_PAGE_SIZE = 50
+    AUDIT_VERIFICATION_INTERVAL_SECONDS = 24 * 60 * 60
 
     def __init__(self):
         self.root = tk.Tk()
@@ -88,6 +91,7 @@ class MainWindow:
         self._clipboard_notification_toast = None
         self._system_tray_icon = None
         self._system_tray_visible = False
+        self._last_audit_verification_at = None
         self.audit_logger = AuditLogger(self.db, event_bus, key_provider=self.auth_service.get_active_key)
         self.clipboard_service = ClipboardService(
             create_platform_adapter(self.root),
@@ -219,30 +223,10 @@ class MainWindow:
     def _verify_audit_log_on_startup(self):
         if not hasattr(self, "audit_logger") or not hasattr(self.audit_logger, "verify_integrity"):
             return
-        verification_result = self.audit_logger.verify_integrity()
+        verification_result = self.run_audit_verification(manual=False)
         self._audit_integrity_status = verification_result
         if verification_result.get("verified", True):
-            event_bus.publish(
-                Event(
-                    EventType.AUDIT_VERIFICATION_PASSED,
-                    {
-                        "total_entries": verification_result.get("total_entries", 0),
-                        "valid_entries": verification_result.get("valid_entries", 0),
-                    },
-                )
-            )
             return
-
-        event_bus.publish(
-            Event(
-                EventType.AUDIT_VERIFICATION_FAILED,
-                {
-                    "invalid_entries": len(verification_result.get("invalid_entries", [])),
-                    "chain_breaks": len(verification_result.get("chain_breaks", [])),
-                    "total_entries": verification_result.get("total_entries", 0),
-                },
-            )
-        )
         messagebox.showwarning(
             "Проверка аудита",
             "Обнаружены признаки нарушения целостности журнала аудита. Проверьте журнал безопасности.",
@@ -445,6 +429,7 @@ class MainWindow:
 
     def _schedule_security_tasks(self):
         self._check_security_timers()
+        self._run_periodic_audit_verification_if_due()
         self.root.after(1000, self._schedule_security_tasks)
 
     def _check_security_timers(self):
@@ -2204,6 +2189,16 @@ class MainWindow:
 
     def _parse_audit_details(self, details: str) -> dict[str, str]:
         parsed_details: dict[str, str] = {}
+        raw_details = str(details or "").strip()
+        if raw_details.startswith("{") and raw_details.endswith("}"):
+            try:
+                payload = json.loads(raw_details)
+                if isinstance(payload, dict):
+                    for key, value in payload.items():
+                        parsed_details[str(key).strip()] = str(value).strip()
+                    return parsed_details
+            except (TypeError, json.JSONDecodeError):
+                pass
         for chunk in str(details or "").split(", "):
             if "=" not in chunk:
                 continue
@@ -2214,15 +2209,24 @@ class MainWindow:
     def _format_audit_action(self, action: str) -> str:
         action_labels = {
             "entry_added": "Добавление записи",
+            "entry_viewed": "Просмотр записи",
             "entry_updated": "Обновление записи",
             "entry_deleted": "Удаление записи",
             "user_logged_in": "Вход в vault",
+            "user_login_failed": "Неуспешный вход",
             "user_logged_out": "Выход из vault",
+            "password_changed": "Смена мастер-пароля",
             "clipboard_copied": "Копирование в буфер обмена",
             "clipboard_cleared": "Очистка буфера обмена",
             "clipboard_error": "Ошибка буфера обмена",
             "vault_locked": "Блокировка vault",
             "vault_unlocked": "Разблокировка vault",
+            "settings_changed": "Изменение настроек",
+            "search_performed": "Поиск по vault",
+            "app_started": "Запуск приложения",
+            "app_shutdown": "Завершение приложения",
+            "audit_verification_passed": "Проверка аудита пройдена",
+            "audit_verification_failed": "Проверка аудита не пройдена",
         }
         return action_labels.get(str(action or "").strip(), str(action or ""))
 
@@ -2291,6 +2295,38 @@ class MainWindow:
                 detail_parts.append(f"приложение={parsed_details['application_name']}")
             return " | ".join(detail_parts)
 
+        if action == "settings_changed":
+            detail_parts = []
+            if parsed_details.get("scope"):
+                detail_parts.append(f"область={parsed_details['scope']}")
+            if parsed_details.get("changed_keys"):
+                detail_parts.append(f"изменения={parsed_details['changed_keys']}")
+            return " | ".join(detail_parts)
+
+        if action == "search_performed":
+            detail_parts = []
+            if parsed_details.get("query_length"):
+                detail_parts.append(f"длина запроса={parsed_details['query_length']}")
+            if parsed_details.get("category"):
+                detail_parts.append(f"категория={parsed_details['category']}")
+            if parsed_details.get("tag"):
+                detail_parts.append(f"тег={parsed_details['tag']}")
+            if parsed_details.get("result_count"):
+                detail_parts.append(f"результатов={parsed_details['result_count']}")
+            return " | ".join(detail_parts)
+
+        if action in {"audit_verification_passed", "audit_verification_failed"}:
+            detail_parts = []
+            if parsed_details.get("total_entries"):
+                detail_parts.append(f"всего={parsed_details['total_entries']}")
+            if parsed_details.get("valid_entries"):
+                detail_parts.append(f"валидных={parsed_details['valid_entries']}")
+            if parsed_details.get("invalid_entries"):
+                detail_parts.append(f"ошибок={parsed_details['invalid_entries']}")
+            if parsed_details.get("chain_breaks"):
+                detail_parts.append(f"разрывов цепочки={parsed_details['chain_breaks']}")
+            return " | ".join(detail_parts)
+
         return str(details or "")
 
     def _format_audit_log_line(self, log) -> str:
@@ -2302,15 +2338,287 @@ class MainWindow:
             return f"{timestamp} | {action_text} | {entry_text} | {details_text}"
         return f"{timestamp} | {action_text} | {entry_text}"
 
+    def _build_audit_log_view_model(
+        self,
+        *,
+        search_text: str = "",
+        event_type: str = "",
+        severity: str = "",
+        user_id: str = "",
+        date_from: str = "",
+        date_to: str = "",
+        page: int = 1,
+        page_size: Optional[int] = None,
+    ) -> dict:
+        normalized_page_size = max(1, int(page_size or self.AUDIT_PAGE_SIZE))
+        normalized_page = max(1, int(page or 1))
+        offset = (normalized_page - 1) * normalized_page_size
+        logs = self.db.query_audit_logs(
+            search_text=search_text,
+            event_type=event_type,
+            severity=severity,
+            user_id=user_id,
+            date_from=date_from,
+            date_to=date_to,
+            limit=normalized_page_size,
+            offset=offset,
+        )
+        total_count = self.db.count_audit_logs(
+            search_text=search_text,
+            event_type=event_type,
+            severity=severity,
+            user_id=user_id,
+            date_from=date_from,
+            date_to=date_to,
+        )
+        total_pages = max(1, (total_count + normalized_page_size - 1) // normalized_page_size)
+        current_page = min(normalized_page, total_pages)
+        if current_page != normalized_page:
+            return self._build_audit_log_view_model(
+                search_text=search_text,
+                event_type=event_type,
+                severity=severity,
+                user_id=user_id,
+                date_from=date_from,
+                date_to=date_to,
+                page=current_page,
+                page_size=normalized_page_size,
+            )
+        return {
+            "logs": logs,
+            "page": current_page,
+            "page_size": normalized_page_size,
+            "total_count": total_count,
+            "total_pages": total_pages,
+        }
+
+    def _build_audit_log_detail_lines(self, log) -> list[str]:
+        parsed_details = self._parse_audit_details(getattr(log, "details", ""))
+        details_payload = str(getattr(log, "entry_data", "") or "")
+        verification_status = "не проверено"
+        if hasattr(self, "audit_logger") and hasattr(self.audit_logger, "signer"):
+            if getattr(log, "signature", "") and getattr(log, "public_key", ""):
+                try:
+                    is_valid = self.audit_logger.signer.verify(
+                        details_payload.encode("utf-8"),
+                        getattr(log, "signature", ""),
+                        getattr(log, "public_key", ""),
+                    )
+                    verification_status = "валидна" if is_valid else "невалидна"
+                except Exception:
+                    verification_status = "ошибка проверки"
+
+        lines = [
+            f"Последовательность: {getattr(log, 'sequence_number', '-')}",
+            f"Время: {getattr(log, 'timestamp', '')}",
+            f"Событие: {getattr(log, 'event_type', getattr(log, 'action', ''))}",
+            f"Серьёзность: {getattr(log, 'severity', 'INFO')}",
+            f"Пользователь: {getattr(log, 'user_id', 'local-user')}",
+            f"Источник: {getattr(log, 'source', 'unknown')}",
+            f"Entry ID: {getattr(log, 'entry_id', '-')}",
+            f"Статус подписи: {verification_status}",
+            f"Previous hash: {getattr(log, 'previous_hash', '')}",
+            f"Current hash: {getattr(log, 'entry_hash', '')}",
+            "",
+            "Структурированные детали:",
+        ]
+        if parsed_details:
+            for key, value in parsed_details.items():
+                lines.append(f"- {key}: {value}")
+        else:
+            lines.append(str(getattr(log, "details", "") or "{}"))
+        return lines
+
+    def run_audit_verification(self, manual: bool = False) -> dict:
+        if not hasattr(self, "audit_logger") or not hasattr(self.audit_logger, "verify_integrity"):
+            result = {
+                "verified": False,
+                "total_entries": 0,
+                "valid_entries": 0,
+                "invalid_entries": [{"reason": "audit_logger_unavailable"}],
+                "chain_breaks": [],
+            }
+            self._audit_integrity_status = result
+            return result
+
+        result = self.audit_logger.verify_integrity()
+        self._audit_integrity_status = result
+        self._last_audit_verification_at = datetime.now()
+        if result.get("verified", False):
+            event_bus.publish(
+                Event(
+                    EventType.AUDIT_VERIFICATION_PASSED,
+                    {
+                        "total_entries": result.get("total_entries", 0),
+                        "valid_entries": result.get("valid_entries", 0),
+                        "manual": manual,
+                    },
+                )
+            )
+            if manual:
+                messagebox.showinfo(
+                    "Проверка аудита",
+                    f"Проверка завершена успешно. Проверено записей: {result.get('valid_entries', 0)}.",
+                    parent=self.root,
+                )
+            return result
+
+        event_bus.publish(
+            Event(
+                EventType.AUDIT_VERIFICATION_FAILED,
+                {
+                    "invalid_entries": len(result.get("invalid_entries", [])),
+                    "chain_breaks": len(result.get("chain_breaks", [])),
+                    "total_entries": result.get("total_entries", 0),
+                    "manual": manual,
+                },
+            )
+        )
+        if manual:
+            messagebox.showwarning(
+                "Проверка аудита",
+                "Обнаружены ошибки целостности журнала аудита. Подробности сохранены в журнале безопасности.",
+                parent=self.root,
+            )
+        return result
+
+    def _run_periodic_audit_verification_if_due(self):
+        if not hasattr(self, "auth_service") or not self.auth_service.is_authenticated():
+            return
+        if getattr(self, "_last_audit_verification_at", None) is None:
+            return
+        elapsed = (datetime.now() - self._last_audit_verification_at).total_seconds()
+        if elapsed < self.AUDIT_VERIFICATION_INTERVAL_SECONDS:
+            return
+        self.run_audit_verification(manual=False)
+
     def show_logs(self):
         dialog = tk.Toplevel(self.root)
         dialog.title("Журнал аудита")
-        dialog.geometry("760x420")
-        text = tk.Text(dialog, wrap=tk.NONE)
-        text.pack(fill=tk.BOTH, expand=True)
-        for log in self.db.get_audit_logs():
-            text.insert("end", f"{self._format_audit_log_line(log)}\n")
-        text.config(state=tk.DISABLED)
+        dialog.geometry("980x620")
+
+        filter_frame = ttk.Frame(dialog)
+        filter_frame.pack(fill=tk.X, padx=8, pady=8)
+
+        search_var = tk.StringVar()
+        event_type_var = tk.StringVar(value="all")
+        severity_var = tk.StringVar(value="ALL")
+        user_var = tk.StringVar()
+        date_from_var = tk.StringVar()
+        date_to_var = tk.StringVar()
+        page_var = tk.IntVar(value=1)
+        page_status_var = tk.StringVar(value="Страница 1 из 1")
+
+        ttk.Label(filter_frame, text="Поиск").grid(row=0, column=0, padx=4, pady=4, sticky="w")
+        ttk.Entry(filter_frame, textvariable=search_var, width=18).grid(row=0, column=1, padx=4, pady=4, sticky="we")
+        ttk.Label(filter_frame, text="Событие").grid(row=0, column=2, padx=4, pady=4, sticky="w")
+        ttk.Combobox(
+            filter_frame,
+            textvariable=event_type_var,
+            values=["all", "clipboard_copied", "clipboard_cleared", "clipboard_error", "entry_added", "entry_updated", "entry_deleted", "user_logged_in", "user_login_failed", "settings_changed", "search_performed", "audit_verification_failed"],
+            width=24,
+            state="readonly",
+        ).grid(row=0, column=3, padx=4, pady=4, sticky="we")
+        ttk.Label(filter_frame, text="Серьёзность").grid(row=0, column=4, padx=4, pady=4, sticky="w")
+        ttk.Combobox(
+            filter_frame,
+            textvariable=severity_var,
+            values=["ALL", "INFO", "WARN", "ERROR", "CRITICAL"],
+            width=12,
+            state="readonly",
+        ).grid(row=0, column=5, padx=4, pady=4, sticky="we")
+
+        ttk.Label(filter_frame, text="Пользователь").grid(row=1, column=0, padx=4, pady=4, sticky="w")
+        ttk.Entry(filter_frame, textvariable=user_var, width=18).grid(row=1, column=1, padx=4, pady=4, sticky="we")
+        ttk.Label(filter_frame, text="От").grid(row=1, column=2, padx=4, pady=4, sticky="w")
+        ttk.Entry(filter_frame, textvariable=date_from_var, width=12).grid(row=1, column=3, padx=4, pady=4, sticky="w")
+        ttk.Label(filter_frame, text="До").grid(row=1, column=4, padx=4, pady=4, sticky="w")
+        ttk.Entry(filter_frame, textvariable=date_to_var, width=12).grid(row=1, column=5, padx=4, pady=4, sticky="w")
+
+        content = ttk.Panedwindow(dialog, orient=tk.VERTICAL)
+        content.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+
+        upper = ttk.Frame(content)
+        lower = ttk.Frame(content)
+        content.add(upper, weight=3)
+        content.add(lower, weight=2)
+
+        columns = ("timestamp", "event_type", "severity", "source", "user_id", "entry_id")
+        tree = ttk.Treeview(upper, columns=columns, show="headings", height=14)
+        headers = {
+            "timestamp": "Время",
+            "event_type": "Событие",
+            "severity": "Серьёзность",
+            "source": "Источник",
+            "user_id": "Пользователь",
+            "entry_id": "Entry ID",
+        }
+        for key, label in headers.items():
+            tree.heading(key, text=label)
+            tree.column(key, width=120 if key != "event_type" else 180, anchor="w")
+        tree.pack(fill=tk.BOTH, expand=True)
+
+        details_text = tk.Text(lower, wrap=tk.WORD, height=12)
+        details_text.pack(fill=tk.BOTH, expand=True)
+
+        pager = ttk.Frame(dialog)
+        pager.pack(fill=tk.X, padx=8, pady=(0, 8))
+
+        def load_page(page: Optional[int] = None):
+            if page is not None:
+                page_var.set(max(1, int(page)))
+            model = self._build_audit_log_view_model(
+                search_text=search_var.get(),
+                event_type=event_type_var.get(),
+                severity=severity_var.get(),
+                user_id=user_var.get(),
+                date_from=date_from_var.get(),
+                date_to=date_to_var.get(),
+                page=page_var.get(),
+            )
+            tree.delete(*tree.get_children())
+            for log in model["logs"]:
+                tree.insert(
+                    "",
+                    "end",
+                    iid=str(getattr(log, "sequence_number", getattr(log, "id", ""))),
+                    values=(
+                        log.timestamp.strftime("%Y-%m-%d %H:%M:%S") if log.timestamp else "",
+                        self._format_audit_action(log.action),
+                        getattr(log, "severity", "INFO"),
+                        getattr(log, "source", "unknown"),
+                        getattr(log, "user_id", "local-user"),
+                        getattr(log, "entry_id", "-"),
+                    ),
+                )
+            page_var.set(model["page"])
+            page_status_var.set(f"Страница {model['page']} из {model['total_pages']} | записей: {model['total_count']}")
+            details_text.config(state=tk.NORMAL)
+            details_text.delete("1.0", tk.END)
+            details_text.config(state=tk.DISABLED)
+            dialog._audit_logs = {str(getattr(log, "sequence_number", getattr(log, "id", ""))): log for log in model["logs"]}
+
+        def on_select(_event=None):
+            selected = tree.selection()
+            if not selected:
+                return
+            log = getattr(dialog, "_audit_logs", {}).get(selected[0])
+            if log is None:
+                return
+            details_text.config(state=tk.NORMAL)
+            details_text.delete("1.0", tk.END)
+            details_text.insert("1.0", "\n".join(self._build_audit_log_detail_lines(log)))
+            details_text.config(state=tk.DISABLED)
+
+        tree.bind("<<TreeviewSelect>>", on_select)
+
+        ttk.Button(filter_frame, text="Применить", command=lambda: load_page(1)).grid(row=2, column=0, padx=4, pady=6, sticky="w")
+        ttk.Button(filter_frame, text="Проверить целостность", command=lambda: self.run_audit_verification(manual=True)).grid(row=2, column=1, padx=4, pady=6, sticky="w")
+        ttk.Button(pager, text="Назад", command=lambda: load_page(page_var.get() - 1)).pack(side=tk.LEFT, padx=4)
+        ttk.Label(pager, textvariable=page_status_var).pack(side=tk.LEFT, padx=8)
+        ttk.Button(pager, text="Вперёд", command=lambda: load_page(page_var.get() + 1)).pack(side=tk.LEFT, padx=4)
+
+        load_page(1)
 
     def _build_clipboard_diagnostics_lines(self) -> list[str]:
         status = self._get_clipboard_status()

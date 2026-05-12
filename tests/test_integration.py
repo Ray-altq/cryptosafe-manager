@@ -208,9 +208,19 @@ class FakeKeyManager:
 class FakeAuditLogger:
     def __init__(self):
         self.closed = False
+        self.verification_result = {
+            "verified": True,
+            "total_entries": 2,
+            "valid_entries": 2,
+            "invalid_entries": [],
+            "chain_breaks": [],
+        }
 
     def close(self):
         self.closed = True
+
+    def verify_integrity(self, start_sequence=0, limit=None):
+        return dict(self.verification_result)
 
 
 class FakeKeyStorage:
@@ -1214,6 +1224,116 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
         line = window._format_audit_log_line(AuditLogRecord())
 
         self.assertIn("telegram", line)
+
+    def test_parse_audit_details_supports_json_payload(self):
+        window = MainWindow.__new__(MainWindow)
+
+        parsed = window._parse_audit_details('{"reason":"monitor_warning","entry_id":7,"data_type":"password"}')
+
+        self.assertEqual(parsed["reason"], "monitor_warning")
+        self.assertEqual(parsed["entry_id"], "7")
+        self.assertEqual(parsed["data_type"], "password")
+
+    def test_build_audit_log_view_model_uses_filters_and_pagination(self):
+        window = MainWindow.__new__(MainWindow)
+
+        class FakeAuditDb:
+            def __init__(self):
+                self.query_calls = []
+                self.count_calls = []
+
+            def query_audit_logs(self, **kwargs):
+                self.query_calls.append(kwargs)
+
+                class AuditLogRecord:
+                    sequence_number = 5
+                    action = "settings_changed"
+                    event_type = "settings_changed"
+                    timestamp = datetime(2026, 5, 12, 10, 0, 0)
+                    severity = "WARN"
+                    user_id = "local-user"
+                    source = "configuration"
+                    entry_id = None
+                    details = '{"scope":"security"}'
+                    previous_hash = "a" * 64
+                    entry_hash = "b" * 64
+                    entry_data = '{"event_type":"settings_changed"}'
+                    signature = "deadbeef"
+                    public_key = "cafebabe"
+
+                return [AuditLogRecord()]
+
+            def count_audit_logs(self, **kwargs):
+                self.count_calls.append(kwargs)
+                return 75
+
+        window.db = FakeAuditDb()
+
+        model = window._build_audit_log_view_model(
+            search_text="settings",
+            event_type="settings_changed",
+            severity="WARN",
+            user_id="local-user",
+            date_from="2026-05-01",
+            date_to="2026-05-31",
+            page=2,
+        )
+
+        self.assertEqual(model["page"], 2)
+        self.assertEqual(model["total_pages"], 2)
+        self.assertEqual(model["total_count"], 75)
+        self.assertEqual(len(model["logs"]), 1)
+        self.assertEqual(window.db.query_calls[-1]["offset"], 50)
+        self.assertEqual(window.db.query_calls[-1]["search_text"], "settings")
+        self.assertEqual(window.db.count_calls[-1]["severity"], "WARN")
+
+    def test_build_audit_log_detail_lines_include_signature_status_and_hash_chain(self):
+        window = MainWindow.__new__(MainWindow)
+        window.audit_logger = FakeAuditLogger()
+        window.audit_logger.signer = type(
+            "Signer",
+            (),
+            {"verify": staticmethod(lambda data, signature, public_key: True)},
+        )()
+
+        class AuditLogRecord:
+            sequence_number = 8
+            action = "settings_changed"
+            event_type = "settings_changed"
+            timestamp = datetime(2026, 5, 12, 10, 0, 0)
+            severity = "WARN"
+            user_id = "local-user"
+            source = "configuration"
+            entry_id = None
+            details = '{"scope":"security","changed_keys":"clipboard_timeout"}'
+            previous_hash = "a" * 64
+            entry_hash = "b" * 64
+            entry_data = '{"event_type":"settings_changed","details":{"scope":"security"}}'
+            signature = "deadbeef"
+            public_key = "cafebabe"
+
+        lines = window._build_audit_log_detail_lines(AuditLogRecord())
+        joined = "\n".join(lines)
+
+        self.assertIn("Статус подписи: валидна", joined)
+        self.assertIn("Previous hash:", joined)
+        self.assertIn("Current hash:", joined)
+        self.assertIn("- scope: security", joined)
+
+    def test_run_audit_verification_manual_success_shows_message(self):
+        window = MainWindow.__new__(MainWindow)
+        window.root = FakeRoot()
+        window.audit_logger = FakeAuditLogger()
+
+        published_events = []
+        with patch("src.gui.main_window.event_bus.publish", side_effect=lambda event: published_events.append(event)), patch(
+            "src.gui.main_window.messagebox.showinfo"
+        ) as showinfo:
+            result = window.run_audit_verification(manual=True)
+
+        self.assertTrue(result["verified"])
+        self.assertEqual(published_events[-1].type.value, "audit_verification_passed")
+        self.assertTrue(showinfo.called)
 
     def test_build_clipboard_diagnostics_lines_includes_platform_and_memory_sections(self):
         window = MainWindow.__new__(MainWindow)

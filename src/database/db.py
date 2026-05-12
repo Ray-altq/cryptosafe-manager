@@ -2,7 +2,7 @@ import json
 import queue
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import date, datetime, time
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional
 
@@ -503,6 +503,117 @@ class Database:
                 logs.append(AuditLog(**data))
             return logs
 
+    def query_audit_logs(
+        self,
+        *,
+        search_text: str = "",
+        event_type: str = "",
+        severity: str = "",
+        user_id: str = "",
+        date_from: Optional[Any] = None,
+        date_to: Optional[Any] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List[AuditLog]:
+        where_clauses = []
+        params: List[Any] = []
+
+        normalized_search = str(search_text or "").strip().lower()
+        if normalized_search:
+            where_clauses.append(
+                "(LOWER(event_type) LIKE ? OR LOWER(severity) LIKE ? OR LOWER(user_id) LIKE ? OR LOWER(source) LIKE ? OR LOWER(details) LIKE ?)"
+            )
+            like_value = f"%{normalized_search}%"
+            params.extend([like_value, like_value, like_value, like_value, like_value])
+
+        normalized_event_type = str(event_type or "").strip().lower()
+        if normalized_event_type and normalized_event_type not in {"all", "все"}:
+            where_clauses.append("LOWER(event_type) = ?")
+            params.append(normalized_event_type)
+
+        normalized_severity = str(severity or "").strip().upper()
+        if normalized_severity and normalized_severity not in {"ALL", "ВСЕ"}:
+            where_clauses.append("severity = ?")
+            params.append(normalized_severity)
+
+        normalized_user = str(user_id or "").strip().lower()
+        if normalized_user and normalized_user not in {"all", "все"}:
+            where_clauses.append("LOWER(user_id) LIKE ?")
+            params.append(f"%{normalized_user}%")
+
+        from_dt = self._normalize_audit_datetime(date_from, is_end=False)
+        if from_dt is not None:
+            where_clauses.append("timestamp >= ?")
+            params.append(from_dt.isoformat())
+
+        to_dt = self._normalize_audit_datetime(date_to, is_end=True)
+        if to_dt is not None:
+            where_clauses.append("timestamp <= ?")
+            params.append(to_dt.isoformat())
+
+        query = "SELECT rowid AS id, * FROM audit_log"
+        if where_clauses:
+            query += " WHERE " + " AND ".join(where_clauses)
+        query += " ORDER BY sequence_number DESC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+
+        with self._get_connection() as conn:
+            rows = conn.execute(query, tuple(params)).fetchall()
+            return self._rows_to_audit_logs(rows)
+
+    def count_audit_logs(
+        self,
+        *,
+        search_text: str = "",
+        event_type: str = "",
+        severity: str = "",
+        user_id: str = "",
+        date_from: Optional[Any] = None,
+        date_to: Optional[Any] = None,
+    ) -> int:
+        where_clauses = []
+        params: List[Any] = []
+
+        normalized_search = str(search_text or "").strip().lower()
+        if normalized_search:
+            where_clauses.append(
+                "(LOWER(event_type) LIKE ? OR LOWER(severity) LIKE ? OR LOWER(user_id) LIKE ? OR LOWER(source) LIKE ? OR LOWER(details) LIKE ?)"
+            )
+            like_value = f"%{normalized_search}%"
+            params.extend([like_value, like_value, like_value, like_value, like_value])
+
+        normalized_event_type = str(event_type or "").strip().lower()
+        if normalized_event_type and normalized_event_type not in {"all", "все"}:
+            where_clauses.append("LOWER(event_type) = ?")
+            params.append(normalized_event_type)
+
+        normalized_severity = str(severity or "").strip().upper()
+        if normalized_severity and normalized_severity not in {"ALL", "ВСЕ"}:
+            where_clauses.append("severity = ?")
+            params.append(normalized_severity)
+
+        normalized_user = str(user_id or "").strip().lower()
+        if normalized_user and normalized_user not in {"all", "все"}:
+            where_clauses.append("LOWER(user_id) LIKE ?")
+            params.append(f"%{normalized_user}%")
+
+        from_dt = self._normalize_audit_datetime(date_from, is_end=False)
+        if from_dt is not None:
+            where_clauses.append("timestamp >= ?")
+            params.append(from_dt.isoformat())
+
+        to_dt = self._normalize_audit_datetime(date_to, is_end=True)
+        if to_dt is not None:
+            where_clauses.append("timestamp <= ?")
+            params.append(to_dt.isoformat())
+
+        query = "SELECT COUNT(*) AS total FROM audit_log"
+        if where_clauses:
+            query += " WHERE " + " AND ".join(where_clauses)
+
+        with self._get_connection() as conn:
+            return int(conn.execute(query, tuple(params)).fetchone()["total"])
+
     def get_audit_log_chain(self, start_sequence: int = 0, limit: Optional[int] = None) -> List[AuditLog]:
         query = "SELECT rowid AS id, * FROM audit_log WHERE sequence_number >= ? ORDER BY sequence_number ASC"
         params: List[Any] = [start_sequence]
@@ -511,15 +622,7 @@ class Database:
             params.append(limit)
         with self._get_connection() as conn:
             rows = conn.execute(query, tuple(params)).fetchall()
-            result: List[AuditLog] = []
-            for row in rows:
-                data = dict(row)
-                if data.get("timestamp"):
-                    data["timestamp"] = datetime.fromisoformat(data["timestamp"])
-                if not data.get("action"):
-                    data["action"] = data.get("event_type", "")
-                result.append(AuditLog(**data))
-            return result
+            return self._rows_to_audit_logs(rows)
 
     def register_audit_public_key(self, algorithm: str, public_key: str):
         with self._get_connection() as conn:
@@ -669,6 +772,40 @@ class Database:
         import hashlib
 
         return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+    def _rows_to_audit_logs(self, rows) -> List[AuditLog]:
+        result: List[AuditLog] = []
+        for row in rows:
+            data = dict(row)
+            if data.get("timestamp"):
+                data["timestamp"] = datetime.fromisoformat(data["timestamp"])
+            if not data.get("action"):
+                data["action"] = data.get("event_type", "")
+            if not data.get("details") and data.get("entry_data"):
+                try:
+                    payload = json.loads(data["entry_data"])
+                    data["details"] = json.dumps(payload.get("details", {}), ensure_ascii=False, sort_keys=True)
+                except (TypeError, json.JSONDecodeError):
+                    data["details"] = ""
+            result.append(AuditLog(**data))
+        return result
+
+    def _normalize_audit_datetime(self, raw_value: Any, *, is_end: bool) -> Optional[datetime]:
+        if isinstance(raw_value, datetime):
+            return raw_value
+        if isinstance(raw_value, date):
+            return datetime.combine(raw_value, time.max if is_end else time.min)
+
+        value = str(raw_value or "").strip()
+        if not value:
+            return None
+
+        try:
+            parsed_date = datetime.strptime(value, "%Y-%m-%d").date()
+        except ValueError:
+            return None
+
+        return datetime.combine(parsed_date, time.max if is_end else time.min)
 
     def _row_to_entry(self, row: sqlite3.Row) -> VaultEntry:
         data = dict(row)
