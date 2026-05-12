@@ -10,6 +10,7 @@ from src.core.crypto.key_derivation import KeyDerivation
 from src.core.crypto.key_storage import KeyStorage
 from src.core.crypto.password_validator import PasswordValidator
 from src.core.crypto.placeholder import AES256Placeholder
+from src.core.events import EventType, event_bus
 from src.core.state_manager import StateManager
 from src.database.db import Database
 from src.database.models import VaultEntry
@@ -66,6 +67,24 @@ class TestAuthentication(unittest.TestCase):  #класс для тестиро�
 
         self.assertFalse(self.auth.authenticate("wrong-3"))
         self.assertLessEqual(self.auth.get_lockout_remaining_seconds(), 5)
+
+    def test_invalid_authentication_publishes_login_failed_event(self):
+        self.auth.register_master_password(self.password)
+        self.auth.logout()
+        received_events = []
+
+        def handler(event):
+            received_events.append(event)
+
+        event_bus.subscribe(EventType.USER_LOGIN_FAILED, handler)
+        try:
+            self.assertFalse(self.auth.authenticate("wrong-password"))
+        finally:
+            event_bus.unsubscribe(EventType.USER_LOGIN_FAILED, handler)
+
+        self.assertEqual(len(received_events), 1)
+        self.assertEqual(received_events[0].data["reason"], "invalid_password")
+        self.assertGreaterEqual(received_events[0].data["failed_attempts"], 1)
 
     def test_change_master_password_reencrypts_entries(self):
         self.auth.register_master_password(self.password)
@@ -159,6 +178,22 @@ class TestAuthentication(unittest.TestCase):  #класс для тестиро�
         metadata = self.key_storage.load_metadata()
         self.assertIsNotNone(metadata)
         self.assertEqual(metadata.params["pbkdf2_iterations"], 220000)
+
+    def test_change_master_password_publishes_password_changed_event(self):
+        self.auth.register_master_password(self.password)
+        received_events = []
+
+        def handler(event):
+            received_events.append(event)
+
+        event_bus.subscribe(EventType.PASSWORD_CHANGED, handler)
+        try:
+            self.auth.change_master_password(self.password, "NewValidMasterPass!7Q")
+        finally:
+            event_bus.unsubscribe(EventType.PASSWORD_CHANGED, handler)
+
+        self.assertEqual(len(received_events), 1)
+        self.assertEqual(received_events[0].data["status"], "success")
 
 
 if __name__ == "__main__":

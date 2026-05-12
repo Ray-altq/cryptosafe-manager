@@ -275,6 +275,33 @@ class TestEntryManager(unittest.TestCase):
         explicit_tag_filter_results = self.manager.search_entries("", tag="dev")
         self.assertEqual([entry["title"] for entry in explicit_tag_filter_results], ["GitHub"])
 
+    def test_search_entries_publish_anonymized_audit_event(self):
+        self.manager.create_entry(
+            {
+                "title": "GitHub",
+                "username": "octocat",
+                "password": "Secret!123",
+                "notes": "repository",
+            }
+        )
+        received_events = []
+
+        def handler(event):
+            received_events.append(event)
+
+        event_bus.subscribe(EventType.SEARCH_PERFORMED, handler)
+        try:
+            results = self.manager.search_entries("github")
+        finally:
+            event_bus.unsubscribe(EventType.SEARCH_PERFORMED, handler)
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(len(received_events), 1)
+        self.assertEqual(received_events[0].data["query_length"], 6)
+        self.assertEqual(received_events[0].data["result_count"], 1)
+        self.assertNotEqual(received_events[0].data["query_hash"], "")
+        self.assertNotIn("github", str(received_events[0].data).lower())
+
     def test_search_entries_supports_fuzzy_matching_for_typos(self):
         self.manager.create_entry(
             {

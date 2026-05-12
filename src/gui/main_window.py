@@ -133,6 +133,8 @@ class MainWindow:
         self._initial_login_completed = True
         if not self.auth_service.is_authenticated():
             return
+        self._verify_audit_log_on_startup()
+        event_bus.publish(Event(EventType.APP_STARTED, {"component": "main_window"}))
         self._load_entries()
         self._schedule_security_tasks()
 
@@ -213,6 +215,39 @@ class MainWindow:
             for item in loaded_history
             if isinstance(item, str) and str(item).strip()
         ][:10]
+
+    def _verify_audit_log_on_startup(self):
+        if not hasattr(self, "audit_logger") or not hasattr(self.audit_logger, "verify_integrity"):
+            return
+        verification_result = self.audit_logger.verify_integrity()
+        self._audit_integrity_status = verification_result
+        if verification_result.get("verified", True):
+            event_bus.publish(
+                Event(
+                    EventType.AUDIT_VERIFICATION_PASSED,
+                    {
+                        "total_entries": verification_result.get("total_entries", 0),
+                        "valid_entries": verification_result.get("valid_entries", 0),
+                    },
+                )
+            )
+            return
+
+        event_bus.publish(
+            Event(
+                EventType.AUDIT_VERIFICATION_FAILED,
+                {
+                    "invalid_entries": len(verification_result.get("invalid_entries", [])),
+                    "chain_breaks": len(verification_result.get("chain_breaks", [])),
+                    "total_entries": verification_result.get("total_entries", 0),
+                },
+            )
+        )
+        messagebox.showwarning(
+            "Проверка аудита",
+            "Обнаружены признаки нарушения целостности журнала аудита. Проверьте журнал безопасности.",
+            parent=self.root,
+        )
 
     def _create_menu(self):
         menubar = tk.Menu(self.root)
@@ -2562,6 +2597,27 @@ class MainWindow:
             self.state.set_inactivity_timeout(auto_lock_minutes.get() * 60)
             self.state.set_key_cache_timeout(key_cache_timeout_minutes.get() * 60)
             self._persist_runtime_settings()
+            event_bus.publish(
+                Event(
+                    EventType.SETTINGS_CHANGED,
+                    {
+                        "scope": "security",
+                        "changed_keys": [
+                            "clipboard_timeout",
+                            "clipboard_notifications",
+                            "clipboard_security_level",
+                            "clipboard_delivery_mode",
+                            "clipboard_blocked_on_suspicious",
+                            "clipboard_allowed_applications",
+                            "auto_lock_minutes",
+                            "min_password_length",
+                            "key_cache_timeout_minutes",
+                            "lock_on_focus_loss",
+                            "lock_on_minimize",
+                        ],
+                    },
+                )
+            )
             self._refresh_clipboard_status()
             messagebox.showinfo("Настройки", "Настройки сохранены.", parent=dialog)
             dialog.destroy()
@@ -2607,6 +2663,7 @@ class MainWindow:
                 self._load_entries()
 
     def _on_close(self):
+        event_bus.publish(Event(EventType.APP_SHUTDOWN, {"component": "main_window"}))
         try:
             self.auth_service.logout()
         except Exception:

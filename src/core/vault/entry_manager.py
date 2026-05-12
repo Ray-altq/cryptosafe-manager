@@ -1,4 +1,5 @@
 import json
+import hashlib
 import re
 from difflib import SequenceMatcher
 from datetime import date, datetime, time, timedelta
@@ -62,7 +63,9 @@ class EntryManager:
         row = self.database.get_entry(entry_id)
         if row is None:
             raise EntryNotFoundError("Requested entry is unavailable")
-        return self._deserialize_entry(row)
+        entry = self._deserialize_entry(row)
+        event_bus.publish(Event(EventType.ENTRY_VIEWED, {"id": entry_id, "title": entry["title"]}))
+        return entry
 
     def get_all_entries(self) -> List[Dict[str, Any]]:
         entries = self.database.get_all_entries()
@@ -112,6 +115,12 @@ class EntryManager:
             if self._matches_general_terms(entry, general_terms):
                 filtered_entries.append(entry)
 
+        self._publish_search_event(
+            query=search_text,
+            category=selected_category,
+            tag=selected_tag,
+            result_count=len(filtered_entries),
+        )
         return filtered_entries
 
     def update_entry(self, entry_id: int, data_dict: Dict[str, Any]) -> Dict[str, Any]:
@@ -474,3 +483,19 @@ class EntryManager:
 
     def _default_soft_delete_expiration(self) -> datetime:
         return (datetime.now() + timedelta(days=30)).replace(microsecond=0)
+
+    def _publish_search_event(self, *, query: str, category: str, tag: str, result_count: int):
+        normalized_query = str(query or "").strip().lower()
+        query_hash = hashlib.sha256(normalized_query.encode("utf-8")).hexdigest() if normalized_query else ""
+        event_bus.publish(
+            Event(
+                EventType.SEARCH_PERFORMED,
+                {
+                    "query_hash": query_hash,
+                    "query_length": len(normalized_query),
+                    "category": category or "",
+                    "tag": tag or "",
+                    "result_count": result_count,
+                },
+            )
+        )

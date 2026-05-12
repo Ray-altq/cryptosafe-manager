@@ -166,6 +166,38 @@ class TestEvents(unittest.TestCase):
         self.assertIn('"error_code": "adapter_write_failed"', database.records[-1]["details"])
         self.assertNotIn("Secret!123", database.records[-1]["details"])
 
+    def test_audit_logger_hashes_personal_data_fields(self):
+        database = FakeAuditDatabase()
+        logger = AuditLogger(database, self.event_bus, key_provider=lambda: b"a" * 32)
+        self.addCleanup(logger.close)
+
+        self.event_bus.publish(
+            Event(
+                EventType.USER_LOGIN_FAILED,
+                {
+                    "reason": "invalid_password",
+                    "username": "user@example.com",
+                    "failed_attempts": 3,
+                },
+            )
+        )
+
+        self.assertEqual(database.records[-1]["action"], "user_login_failed")
+        self.assertIn('"failed_attempts": 3', database.records[-1]["details"])
+        self.assertNotIn("user@example.com", database.records[-1]["details"])
+
+    def test_audit_logger_verifies_integrity_for_valid_chain(self):
+        database = FakeAuditDatabase()
+        logger = AuditLogger(database, self.event_bus, key_provider=lambda: b"a" * 32)
+        self.addCleanup(logger.close)
+
+        self.event_bus.publish(Event(EventType.SETTINGS_CHANGED, {"scope": "security"}))
+        results = logger.verify_integrity()
+
+        self.assertTrue(results["verified"])
+        self.assertEqual(results["total_entries"], 2)
+        self.assertEqual(results["valid_entries"], 2)
+
     def test_audit_log_signer_signs_and_verifies_with_separate_context_key(self):
         signer = AuditLogSigner(lambda: b"k" * 32)
         payload = b'{"event":"clipboard_copied"}'

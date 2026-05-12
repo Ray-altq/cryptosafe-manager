@@ -52,6 +52,15 @@ class AuthenticationService:
 
     def authenticate(self, password: str) -> bool:
         if self._is_locked_out():
+            event_bus.publish(
+                Event(
+                    EventType.USER_LOGIN_FAILED,
+                    {
+                        "reason": "lockout_active",
+                        "remaining_seconds": self.get_lockout_remaining_seconds(),
+                    },
+                )
+            )
             return False
 
         metadata = self.key_storage.load_metadata()
@@ -113,6 +122,7 @@ class AuthenticationService:
         self._failed_attempts = 0
         self._locked_until = None
         self.state_manager.reset_failed_attempts()
+        event_bus.publish(Event(EventType.PASSWORD_CHANGED, {"status": "success"}))
 
     def logout(self):
         event_bus.publish(Event(EventType.USER_LOGGED_OUT, {}))
@@ -154,3 +164,13 @@ class AuthenticationService:
         else:
             delay_seconds = 30
         self._locked_until = datetime.now() + timedelta(seconds=delay_seconds)
+        event_bus.publish(
+            Event(
+                EventType.USER_LOGIN_FAILED,
+                {
+                    "reason": "invalid_password",
+                    "failed_attempts": self._failed_attempts,
+                    "lockout_seconds": delay_seconds,
+                },
+            )
+        )

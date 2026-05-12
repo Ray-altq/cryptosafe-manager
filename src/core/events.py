@@ -7,15 +7,24 @@ from .audit import AuditLogger
 
 class EventType(Enum):
     ENTRY_ADDED = "entry_added"
+    ENTRY_VIEWED = "entry_viewed"
     ENTRY_UPDATED = "entry_updated"
     ENTRY_DELETED = "entry_deleted"
     USER_LOGGED_IN = "user_logged_in"
+    USER_LOGIN_FAILED = "user_login_failed"
     USER_LOGGED_OUT = "user_logged_out"
+    PASSWORD_CHANGED = "password_changed"
     CLIPBOARD_COPIED = "clipboard_copied"
     CLIPBOARD_CLEARED = "clipboard_cleared"
     CLIPBOARD_ERROR = "clipboard_error"
     VAULT_UNLOCKED = "vault_unlocked"
     VAULT_LOCKED = "vault_locked"
+    SETTINGS_CHANGED = "settings_changed"
+    SEARCH_PERFORMED = "search_performed"
+    APP_STARTED = "app_started"
+    APP_SHUTDOWN = "app_shutdown"
+    AUDIT_VERIFICATION_PASSED = "audit_verification_passed"
+    AUDIT_VERIFICATION_FAILED = "audit_verification_failed"
 
 
 class Event:
