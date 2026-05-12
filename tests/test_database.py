@@ -80,7 +80,21 @@ class TestDatabase(unittest.TestCase):  #класс для тестирован�
         with self.db._get_connection() as conn:
             cursor = conn.execute("PRAGMA user_version")
             version = cursor.fetchone()[0]
-            self.assertEqual(version, 4)
+            self.assertEqual(version, 5)
+
+            archive_table = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'audit_archives'"
+            ).fetchone()
+            self.assertIsNotNone(archive_table)
+
+            update_trigger = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = 'trg_audit_log_no_update'"
+            ).fetchone()
+            delete_trigger = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = 'trg_audit_log_no_delete'"
+            ).fetchone()
+            self.assertIsNotNone(update_trigger)
+            self.assertIsNotNone(delete_trigger)
 
     def test_settings_roundtrip(self):  #тест для проверки сохранения и получения настроек из базы данных
         self.db.set_setting("security.password_policy", {"min_length": 12})
