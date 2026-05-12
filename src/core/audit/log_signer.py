@@ -50,9 +50,14 @@ class AuditLogSigner:
         expected = hmac.new(self._hmac_key, data, hashlib.sha256).hexdigest()
         return hmac.compare_digest(expected, signature_hex)
 
+    def clear(self):
+        self._clear_cached_material()
+
     def _ensure_initialized(self):
         active_key = self._key_provider()
         if not active_key:
+            if self._cached_key_fingerprint and self._algorithm:
+                return
             raise RuntimeError("Активный ключ шифрования недоступен для подписи журнала аудита")
 
         key_fingerprint = hashlib.sha256(active_key).hexdigest()

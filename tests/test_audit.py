@@ -44,11 +44,13 @@ class TestAuditLogging(unittest.TestCase):
                 },
                 user_id="local-user",
             )
+        self.logger.flush()
 
     def test_integrity_test_detects_database_tampering_after_1000_entries(self):
         self._generate_logs(1000)
 
         with self.database._get_connection() as conn:
+            conn.execute("DROP TRIGGER IF EXISTS trg_audit_log_no_update")
             conn.execute(
                 "UPDATE audit_log SET entry_data = ? WHERE sequence_number = ?",
                 ('{"tampered":true}', 501),
@@ -134,6 +136,63 @@ class TestAuditLogging(unittest.TestCase):
 
         self.assertEqual(results, [])
         self.assertEqual(remaining_count, 11)
+
+    def test_append_only_protection_blocks_update_attempt_and_logs_violation(self):
+        self._generate_logs(3)
+
+        with self.assertRaises(sqlite3.DatabaseError):
+            self.database.try_update_audit_log_entry(2, '{"tampered":true}')
+        with self.assertRaises(PermissionError):
+            self.database.try_disable_audit_guards()
+        self.logger.flush()
+
+        logs = self.database.get_audit_log_chain()
+        self.assertEqual(logs[-2].event_type, "audit_log_protection_triggered")
+        self.assertIn('"operation": "update"', logs[-2].details)
+        self.assertEqual(logs[-1].event_type, "audit_log_protection_triggered")
+        self.assertIn('"operation": "disable_protection"', logs[-1].details)
+
+    def test_rotation_policy_archives_ranges_without_breaking_active_chain(self):
+        self.logger.close()
+        self.database.set_audit_retention_policy(max_entries=5, max_age_days=3650, enabled=True)
+        self.logger = AuditLogger(
+            self.database,
+            self.event_bus,
+            key_provider=lambda: b"a" * 32,
+            config={"async_logging_enabled": False},
+        )
+        self.verifier = AuditLogVerifier(self.database, self.logger.signer)
+
+        self._generate_logs(7)
+
+        archives = self.database.get_audit_archives()
+        archived_count = sum(int(item["entry_count"]) for item in archives)
+        verification_result = self.verifier.verify()
+
+        self.assertGreaterEqual(archived_count, 3)
+        self.assertTrue(verification_result["verified"])
+
+    def test_async_logging_flushes_non_critical_events_and_keeps_critical_sync(self):
+        record_id = self.logger.log_event(
+            event_type="settings_changed",
+            severity="INFO",
+            source="configuration",
+            details={"scope": "security"},
+            user_id="local-user",
+        )
+        self.assertEqual(record_id, 0)
+
+        self.logger.flush()
+        self.assertEqual(self.database.count_audit_logs(), 2)
+
+        critical_record_id = self.logger.log_event(
+            event_type="audit_verification_failed",
+            severity="ERROR",
+            source="audit",
+            details={"reason": "chain_break"},
+            user_id="system",
+        )
+        self.assertGreater(critical_record_id, 0)
 
 
 if __name__ == "__main__":

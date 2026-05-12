@@ -2227,6 +2227,8 @@ class MainWindow:
             "app_started": "Запуск приложения",
             "app_shutdown": "Завершение приложения",
             "audit_log_exported": "Экспорт журнала аудита",
+            "audit_log_archived": "Архивирование журнала аудита",
+            "audit_log_protection_triggered": "Срабатывание защиты журнала аудита",
             "audit_verification_passed": "Проверка аудита пройдена",
             "audit_verification_failed": "Проверка аудита не пройдена",
         }
@@ -2337,6 +2339,28 @@ class MainWindow:
                 detail_parts.append(f"записей={parsed_details['record_count']}")
             if parsed_details.get("path"):
                 detail_parts.append(f"путь={parsed_details['path']}")
+            return " | ".join(detail_parts)
+
+        if action == "audit_log_archived":
+            detail_parts = []
+            if parsed_details.get("entry_count"):
+                detail_parts.append(f"архивировано={parsed_details['entry_count']}")
+            if parsed_details.get("range_start_sequence") and parsed_details.get("range_end_sequence"):
+                detail_parts.append(
+                    f"диапазон={parsed_details['range_start_sequence']}-{parsed_details['range_end_sequence']}"
+                )
+            if parsed_details.get("reason"):
+                detail_parts.append(f"причина={parsed_details['reason']}")
+            return " | ".join(detail_parts)
+
+        if action == "audit_log_protection_triggered":
+            detail_parts = []
+            if parsed_details.get("operation"):
+                detail_parts.append(f"операция={parsed_details['operation']}")
+            if parsed_details.get("sequence_number"):
+                detail_parts.append(f"sequence={parsed_details['sequence_number']}")
+            if parsed_details.get("message"):
+                detail_parts.append(str(parsed_details["message"]))
             return " | ".join(detail_parts)
 
         return str(details or "")

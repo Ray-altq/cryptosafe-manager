@@ -1,8 +1,9 @@
+import hashlib
 import json
 import queue
 import sqlite3
 from contextlib import contextmanager
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional
 
@@ -16,6 +17,7 @@ class Database:
         self.db_path = db_path
         self.pool_size = max(1, int(pool_size))
         self._connection_pool: "queue.LifoQueue[sqlite3.Connection]" = queue.LifoQueue(maxsize=self.pool_size)
+        self._audit_protection_callback: Optional[Callable[[str, Dict[str, Any]], None]] = None
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
@@ -97,6 +99,7 @@ class Database:
                     self._migrate_v4_to_v5(conn)
                     version = 5
                 conn.execute(f"PRAGMA user_version = {max(version, self.SCHEMA_VERSION)}")
+            self._ensure_audit_hardening_schema(conn)
 
     def _create_schema(self, conn: sqlite3.Connection):
         conn.execute(
@@ -171,6 +174,8 @@ class Database:
             """
         )
         conn.execute("CREATE UNIQUE INDEX idx_audit_public_keys_active ON audit_public_keys(public_key)")
+        self._create_audit_archive_schema(conn)
+        self._create_audit_guards(conn)
 
         conn.execute(
             """
@@ -361,6 +366,52 @@ class Database:
             """
         )
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_audit_public_keys_active ON audit_public_keys(public_key)")
+        self._create_audit_archive_schema(conn)
+        self._create_audit_guards(conn)
+
+    def _ensure_audit_hardening_schema(self, conn: sqlite3.Connection):
+        self._create_audit_archive_schema(conn)
+        self._create_audit_guards(conn)
+
+    def _create_audit_archive_schema(self, conn: sqlite3.Connection):
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS audit_archives (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TIMESTAMP NOT NULL,
+                reason TEXT NOT NULL,
+                range_start_sequence INTEGER NOT NULL,
+                range_end_sequence INTEGER NOT NULL,
+                entry_count INTEGER NOT NULL,
+                archive_data BLOB NOT NULL,
+                archive_hash TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_archives_created_at ON audit_archives(created_at)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_audit_archives_sequence_range ON audit_archives(range_start_sequence, range_end_sequence)"
+        )
+
+    def _create_audit_guards(self, conn: sqlite3.Connection):
+        conn.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_audit_log_no_update
+            BEFORE UPDATE ON audit_log
+            BEGIN
+                SELECT RAISE(ABORT, 'audit_log_is_append_only');
+            END
+            """
+        )
+        conn.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_audit_log_no_delete
+            BEFORE DELETE ON audit_log
+            BEGIN
+                SELECT RAISE(ABORT, 'audit_log_is_append_only');
+            END
+            """
+        )
 
     def add_entry(self, entry: VaultEntry) -> int:
         with self._get_connection() as conn:
@@ -656,6 +707,157 @@ class Database:
                 (algorithm, public_key, datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")),
             )
 
+    def set_audit_protection_callback(self, callback: Optional[Callable[[str, Dict[str, Any]], None]]):
+        self._audit_protection_callback = callback
+
+    def get_audit_retention_policy(self) -> Dict[str, Any]:
+        default_policy = {"enabled": True, "max_entries": 10000, "max_age_days": 365}
+        stored_policy = self.get_setting("audit.retention_policy", default_policy)
+        if not isinstance(stored_policy, dict):
+            return dict(default_policy)
+        normalized_policy = dict(default_policy)
+        normalized_policy.update(stored_policy)
+        normalized_policy["enabled"] = bool(normalized_policy.get("enabled", True))
+        normalized_policy["max_entries"] = max(1, int(normalized_policy.get("max_entries", 10000) or 10000))
+        normalized_policy["max_age_days"] = max(1, int(normalized_policy.get("max_age_days", 365) or 365))
+        return normalized_policy
+
+    def set_audit_retention_policy(self, *, max_entries: int = 10000, max_age_days: int = 365, enabled: bool = True):
+        self.set_setting(
+            "audit.retention_policy",
+            {
+                "enabled": bool(enabled),
+                "max_entries": max(1, int(max_entries)),
+                "max_age_days": max(1, int(max_age_days)),
+            },
+        )
+
+    def archive_audit_logs(
+        self,
+        *,
+        max_entries: int = 10000,
+        max_age_days: int = 365,
+        reason: str = "retention_policy",
+        exporter: str = "CryptoSafe Manager",
+    ) -> Dict[str, Any]:
+        with self._get_connection() as conn:
+            rows = conn.execute("SELECT rowid AS id, * FROM audit_log ORDER BY sequence_number ASC").fetchall()
+            logs = self._rows_to_audit_logs(rows)
+            if not logs:
+                return {"archived": False, "entry_count": 0}
+
+            latest_archived_end = conn.execute("SELECT MAX(range_end_sequence) AS max_seq FROM audit_archives").fetchone()[
+                "max_seq"
+            ]
+            latest_archived_end = int(latest_archived_end or 0)
+            cutoff_timestamp = datetime.now(timezone.utc) - timedelta(days=max(1, int(max_age_days)))
+
+            candidate_end_sequence = 0
+            total_logs = len(logs)
+            if total_logs > max_entries:
+                candidate_end_sequence = logs[total_logs - max_entries - 1].sequence_number
+
+            for log in logs:
+                timestamp = log.timestamp
+                if timestamp.tzinfo is None:
+                    timestamp = timestamp.replace(tzinfo=timezone.utc)
+                if timestamp <= cutoff_timestamp:
+                    candidate_end_sequence = max(candidate_end_sequence, int(log.sequence_number))
+
+            if candidate_end_sequence <= latest_archived_end:
+                return {"archived": False, "entry_count": 0}
+
+            logs_to_archive = [
+                log
+                for log in logs
+                if latest_archived_end < int(log.sequence_number) <= int(candidate_end_sequence)
+            ]
+            if not logs_to_archive:
+                return {"archived": False, "entry_count": 0}
+
+            from ..core.audit.log_formatters import export_logs_to_json
+
+            archive_data = export_logs_to_json(logs_to_archive, exporter=exporter)
+            archive_hash = hashlib.sha256(archive_data.encode("utf-8")).hexdigest()
+            created_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            cursor = conn.execute(
+                """
+                INSERT INTO audit_archives (
+                    created_at,
+                    reason,
+                    range_start_sequence,
+                    range_end_sequence,
+                    entry_count,
+                    archive_data,
+                    archive_hash
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    created_at,
+                    reason,
+                    int(logs_to_archive[0].sequence_number),
+                    int(logs_to_archive[-1].sequence_number),
+                    len(logs_to_archive),
+                    archive_data,
+                    archive_hash,
+                ),
+            )
+            return {
+                "archived": True,
+                "archive_id": int(cursor.lastrowid),
+                "entry_count": len(logs_to_archive),
+                "range_start_sequence": int(logs_to_archive[0].sequence_number),
+                "range_end_sequence": int(logs_to_archive[-1].sequence_number),
+                "archive_hash": archive_hash,
+                "reason": reason,
+            }
+
+    def get_audit_archives(self, limit: int = 50) -> List[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, created_at, reason, range_start_sequence, range_end_sequence, entry_count, archive_hash
+                FROM audit_archives
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def try_update_audit_log_entry(self, sequence_number: int, entry_data: str):
+        try:
+            with self._get_connection() as conn:
+                conn.execute(
+                    "UPDATE audit_log SET entry_data = ? WHERE sequence_number = ?",
+                    (entry_data, sequence_number),
+                )
+        except sqlite3.DatabaseError as error:
+            self._notify_audit_protection_violation(
+                "update",
+                {"sequence_number": sequence_number, "message": str(error)},
+            )
+            raise
+
+    def try_delete_audit_log_entry(self, sequence_number: int):
+        try:
+            with self._get_connection() as conn:
+                conn.execute("DELETE FROM audit_log WHERE sequence_number = ?", (sequence_number,))
+        except sqlite3.DatabaseError as error:
+            self._notify_audit_protection_violation(
+                "delete",
+                {"sequence_number": sequence_number, "message": str(error)},
+            )
+            raise
+
+    def try_disable_audit_guards(self):
+        self._notify_audit_protection_violation(
+            "disable_protection",
+            {"message": "Отключение append-only защиты журнала аудита запрещено"},
+        )
+        raise PermissionError("Отключение append-only защиты журнала аудита запрещено")
+
     def import_audit_logs(self, entries: List[Dict[str, Any]]):
         with self.transaction() as conn:
             for entry in entries:
@@ -829,8 +1031,6 @@ class Database:
             return total
 
     def _compute_hash(self, value: str) -> str:
-        import hashlib
-
         return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
     def _rows_to_audit_logs(self, rows) -> List[AuditLog]:
@@ -866,6 +1066,14 @@ class Database:
             return None
 
         return datetime.combine(parsed_date, time.max if is_end else time.min)
+
+    def _notify_audit_protection_violation(self, operation: str, details: Dict[str, Any]):
+        if self._audit_protection_callback is None:
+            return
+        try:
+            self._audit_protection_callback(operation, dict(details))
+        except Exception:
+            pass
 
     def _row_to_entry(self, row: sqlite3.Row) -> VaultEntry:
         data = dict(row)

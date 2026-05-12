@@ -145,6 +145,7 @@ class TestEvents(unittest.TestCase):
 
         self.event_bus.publish(copied_event)
         self.event_bus.publish(cleared_event)
+        logger.flush()
 
         self.assertEqual(len(database.records), 3)
         self.assertEqual(database.records[1]["action"], "clipboard_copied")
@@ -166,6 +167,7 @@ class TestEvents(unittest.TestCase):
             {"operation": "copy", "error_code": "adapter_write_failed", "entry_id": 7, "data_type": "password"},
         )
         self.event_bus.publish(error_event)
+        logger.flush()
 
         self.assertEqual(database.records[-1]["action"], "clipboard_error")
         self.assertEqual(database.records[-1]["entry_id"], 7)
@@ -187,6 +189,7 @@ class TestEvents(unittest.TestCase):
                 },
             )
         )
+        logger.flush()
 
         self.assertEqual(database.records[-1]["action"], "user_login_failed")
         self.assertIn('"failed_attempts": 3', database.records[-1]["details"])
@@ -198,6 +201,7 @@ class TestEvents(unittest.TestCase):
         self.addCleanup(logger.close)
 
         self.event_bus.publish(Event(EventType.SETTINGS_CHANGED, {"scope": "security"}))
+        logger.flush()
         results = logger.verify_integrity()
 
         self.assertTrue(results["verified"])
