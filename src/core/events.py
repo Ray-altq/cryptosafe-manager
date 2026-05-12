@@ -23,6 +23,7 @@ class EventType(Enum):
     SEARCH_PERFORMED = "search_performed"
     APP_STARTED = "app_started"
     APP_SHUTDOWN = "app_shutdown"
+    AUDIT_LOG_EXPORTED = "audit_log_exported"
     AUDIT_VERIFICATION_PASSED = "audit_verification_passed"
     AUDIT_VERIFICATION_FAILED = "audit_verification_failed"
 

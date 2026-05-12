@@ -21,6 +21,7 @@ from ..core.clipboard import (
     create_platform_adapter,
     get_platform_validation_report,
 )
+from ..core.audit import export_logs_to_csv, export_logs_to_json, export_logs_to_pdf
 from ..core.config import Config
 from ..core.crypto.authentication import AuthenticationError, AuthenticationService
 from ..core.crypto.key_derivation import KeyDerivation
@@ -2225,6 +2226,7 @@ class MainWindow:
             "search_performed": "Поиск по vault",
             "app_started": "Запуск приложения",
             "app_shutdown": "Завершение приложения",
+            "audit_log_exported": "Экспорт журнала аудита",
             "audit_verification_passed": "Проверка аудита пройдена",
             "audit_verification_failed": "Проверка аудита не пройдена",
         }
@@ -2327,6 +2329,16 @@ class MainWindow:
                 detail_parts.append(f"разрывов цепочки={parsed_details['chain_breaks']}")
             return " | ".join(detail_parts)
 
+        if action == "audit_log_exported":
+            detail_parts = []
+            if parsed_details.get("format"):
+                detail_parts.append(f"формат={parsed_details['format']}")
+            if parsed_details.get("record_count"):
+                detail_parts.append(f"записей={parsed_details['record_count']}")
+            if parsed_details.get("path"):
+                detail_parts.append(f"путь={parsed_details['path']}")
+            return " | ".join(detail_parts)
+
         return str(details or "")
 
     def _format_audit_log_line(self, log) -> str:
@@ -2427,7 +2439,131 @@ class MainWindow:
                 lines.append(f"- {key}: {value}")
         else:
             lines.append(str(getattr(log, "details", "") or "{}"))
+        if details_payload:
+            try:
+                formatted_payload = json.dumps(json.loads(details_payload), ensure_ascii=False, indent=2, sort_keys=True)
+            except (TypeError, json.JSONDecodeError):
+                formatted_payload = details_payload
+            lines.extend(["", "Подписанный JSON:", formatted_payload])
         return lines
+
+    def _get_audit_logs_for_export(
+        self,
+        *,
+        search_text: str = "",
+        event_type: str = "",
+        severity: str = "",
+        user_id: str = "",
+        date_from: str = "",
+        date_to: str = "",
+    ) -> list:
+        total_count = self.db.count_audit_logs(
+            search_text=search_text,
+            event_type=event_type,
+            severity=severity,
+            user_id=user_id,
+            date_from=date_from,
+            date_to=date_to,
+        )
+        return self.db.query_audit_logs(
+            search_text=search_text,
+            event_type=event_type,
+            severity=severity,
+            user_id=user_id,
+            date_from=date_from,
+            date_to=date_to,
+            limit=max(1, total_count),
+            offset=0,
+        )
+
+    def _build_audit_export_payload(self, logs, export_format: str):
+        public_key = ""
+        if hasattr(self, "audit_logger") and hasattr(self.audit_logger, "signer"):
+            try:
+                public_key = self.audit_logger.signer.public_key_hex
+            except Exception:
+                public_key = ""
+
+        normalized_format = str(export_format or "").strip().lower()
+        if normalized_format == "json":
+            return export_logs_to_json(logs, public_key=public_key)
+        if normalized_format == "csv":
+            return export_logs_to_csv(logs)
+        if normalized_format == "pdf":
+            return export_logs_to_pdf(logs)
+        raise ValueError(f"Unsupported audit export format: {export_format}")
+
+    def export_audit_logs(
+        self,
+        export_format: str,
+        *,
+        search_text: str = "",
+        event_type: str = "",
+        severity: str = "",
+        user_id: str = "",
+        date_from: str = "",
+        date_to: str = "",
+    ) -> bool:
+        logs = self._get_audit_logs_for_export(
+            search_text=search_text,
+            event_type=event_type,
+            severity=severity,
+            user_id=user_id,
+            date_from=date_from,
+            date_to=date_to,
+        )
+        if not logs:
+            messagebox.showinfo("Экспорт аудита", "Для выбранных фильтров журнал аудита пуст.", parent=self.root)
+            return False
+        if not self._reauthenticate_for_sensitive_action("Экспорт журнала аудита"):
+            return False
+
+        normalized_format = str(export_format or "").strip().lower()
+        extension_map = {
+            "json": ".json",
+            "csv": ".csv",
+            "pdf": ".pdf",
+        }
+        target_path = filedialog.asksaveasfilename(
+            parent=self.root,
+            title="Экспорт журнала аудита",
+            defaultextension=extension_map.get(normalized_format, ".txt"),
+            filetypes=[
+                ("JSON", "*.json"),
+                ("CSV", "*.csv"),
+                ("PDF", "*.pdf"),
+                ("Все файлы", "*.*"),
+            ],
+        )
+        if not target_path:
+            return False
+
+        payload = self._build_audit_export_payload(logs, normalized_format)
+        if isinstance(payload, bytes):
+            with open(target_path, "wb") as handle:
+                handle.write(payload)
+        else:
+            with open(target_path, "w", encoding="utf-8", newline="") as handle:
+                handle.write(payload)
+
+        event_bus.publish(
+            Event(
+                EventType.AUDIT_LOG_EXPORTED,
+                {
+                    "format": normalized_format,
+                    "record_count": len(logs),
+                    "path": os.path.basename(target_path),
+                    "date_from": date_from,
+                    "date_to": date_to,
+                },
+            )
+        )
+        messagebox.showinfo(
+            "Экспорт аудита",
+            f"Журнал аудита экспортирован в формате {normalized_format.upper()}.",
+            parent=self.root,
+        )
+        return True
 
     def run_audit_verification(self, manual: bool = False) -> dict:
         if not hasattr(self, "audit_logger") or not hasattr(self.audit_logger, "verify_integrity"):
@@ -2610,10 +2746,24 @@ class MainWindow:
             details_text.insert("1.0", "\n".join(self._build_audit_log_detail_lines(log)))
             details_text.config(state=tk.DISABLED)
 
+        def export_current_view(export_format: str):
+            self.export_audit_logs(
+                export_format,
+                search_text=search_var.get(),
+                event_type=event_type_var.get(),
+                severity=severity_var.get(),
+                user_id=user_var.get(),
+                date_from=date_from_var.get(),
+                date_to=date_to_var.get(),
+            )
+
         tree.bind("<<TreeviewSelect>>", on_select)
 
         ttk.Button(filter_frame, text="Применить", command=lambda: load_page(1)).grid(row=2, column=0, padx=4, pady=6, sticky="w")
         ttk.Button(filter_frame, text="Проверить целостность", command=lambda: self.run_audit_verification(manual=True)).grid(row=2, column=1, padx=4, pady=6, sticky="w")
+        ttk.Button(filter_frame, text="Экспорт JSON", command=lambda: export_current_view("json")).grid(row=2, column=2, padx=4, pady=6, sticky="w")
+        ttk.Button(filter_frame, text="Экспорт CSV", command=lambda: export_current_view("csv")).grid(row=2, column=3, padx=4, pady=6, sticky="w")
+        ttk.Button(filter_frame, text="Экспорт PDF", command=lambda: export_current_view("pdf")).grid(row=2, column=4, padx=4, pady=6, sticky="w")
         ttk.Button(pager, text="Назад", command=lambda: load_page(page_var.get() - 1)).pack(side=tk.LEFT, padx=4)
         ttk.Label(pager, textvariable=page_status_var).pack(side=tk.LEFT, padx=8)
         ttk.Button(pager, text="Вперёд", command=lambda: load_page(page_var.get() + 1)).pack(side=tk.LEFT, padx=4)

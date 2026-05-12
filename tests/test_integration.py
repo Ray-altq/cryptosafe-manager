@@ -1335,6 +1335,81 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
         self.assertEqual(published_events[-1].type.value, "audit_verification_passed")
         self.assertTrue(showinfo.called)
 
+    def test_build_audit_export_payload_includes_signed_json_metadata(self):
+        window = MainWindow.__new__(MainWindow)
+        window.audit_logger = FakeAuditLogger()
+        window.audit_logger.signer = type("Signer", (), {"public_key_hex": "cafebabe"})()
+
+        class AuditLogRecord:
+            sequence_number = 3
+            timestamp = datetime(2026, 5, 12, 10, 0, 0)
+            action = "settings_changed"
+            event_type = "settings_changed"
+            severity = "WARN"
+            user_id = "local-user"
+            source = "configuration"
+            entry_id = None
+            details = '{"scope":"security"}'
+            previous_hash = "a" * 64
+            entry_hash = "b" * 64
+            signature = "deadbeef"
+            public_key = "cafebabe"
+
+        payload = window._build_audit_export_payload([AuditLogRecord()], "json")
+
+        self.assertIn('"public_key": "cafebabe"', payload)
+        self.assertIn('"event_type": "settings_changed"', payload)
+        self.assertIn('"entries"', payload)
+
+    def test_export_audit_logs_requires_reauth_and_logs_export_operation(self):
+        temp_dir = Path(self.make_db_path("audit-export-target")).parent
+        export_path = temp_dir / "audit-log.json"
+        self.addCleanup(lambda: export_path.unlink(missing_ok=True) if export_path.exists() else None)
+
+        window = MainWindow.__new__(MainWindow)
+        window.root = FakeRoot()
+        window.audit_logger = FakeAuditLogger()
+        window.audit_logger.signer = type("Signer", (), {"public_key_hex": "cafebabe"})()
+        window._reauthenticate_for_sensitive_action = lambda action_name: True
+
+        class FakeAuditDb:
+            def count_audit_logs(self, **kwargs):
+                return 1
+
+            def query_audit_logs(self, **kwargs):
+                class AuditLogRecord:
+                    sequence_number = 3
+                    timestamp = datetime(2026, 5, 12, 10, 0, 0)
+                    action = "settings_changed"
+                    event_type = "settings_changed"
+                    severity = "WARN"
+                    user_id = "local-user"
+                    source = "configuration"
+                    entry_id = None
+                    details = '{"scope":"security"}'
+                    previous_hash = "a" * 64
+                    entry_hash = "b" * 64
+                    signature = "deadbeef"
+                    public_key = "cafebabe"
+
+                return [AuditLogRecord()]
+
+        window.db = FakeAuditDb()
+        published_events = []
+
+        with patch("src.gui.main_window.filedialog.asksaveasfilename", return_value=str(export_path)), patch(
+            "src.gui.main_window.event_bus.publish", side_effect=lambda event: published_events.append(event)
+        ), patch("src.gui.main_window.messagebox.showinfo"):
+            result = window.export_audit_logs("json", severity="WARN")
+
+        self.assertTrue(result)
+        self.assertTrue(export_path.exists())
+        exported_text = export_path.read_text(encoding="utf-8")
+        self.assertIn('"event_type": "settings_changed"', exported_text)
+        self.assertEqual(published_events[-1].type.value, "audit_log_exported")
+        self.assertEqual(published_events[-1].data["format"], "json")
+        self.assertEqual(published_events[-1].data["record_count"], 1)
+
     def test_build_clipboard_diagnostics_lines_includes_platform_and_memory_sections(self):
         window = MainWindow.__new__(MainWindow)
         window.root = FakeRoot()
