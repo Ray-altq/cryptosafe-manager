@@ -4,7 +4,7 @@ from typing import Optional
 
 
 @dataclass
-class VaultEntry:  #класс для представления записи в хранилище паролей
+class VaultEntry:  # Класс для представления записи в хранилище паролей.
     id: Optional[int] = None
     title: str = ""
     username: str = ""
@@ -29,17 +29,26 @@ class DeletedEntry:
 
 
 @dataclass
-class AuditLog:  #класс для представления записи в журнале аудита
+class AuditLog:  # Класс для представления записи в журнале аудита.
     id: Optional[int] = None
+    sequence_number: Optional[int] = None
     action: str = ""
+    event_type: str = ""
     timestamp: Optional[datetime] = None
+    severity: str = "INFO"
+    user_id: str = "local-user"
+    source: str = "unknown"
     entry_id: Optional[int] = None
     details: str = ""
-    signature: bytes = b""
+    previous_hash: str = ""
+    entry_hash: str = ""
+    entry_data: str = ""
+    signature: str = ""
+    public_key: str = ""
 
 
 @dataclass
-class Setting:  #класс для представления настройки приложения
+class Setting:  # Класс для представления настройки приложения.
     id: Optional[int] = None
     setting_key: str = ""
     setting_value: str = ""
@@ -47,7 +56,7 @@ class Setting:  #класс для представления настройки
 
 
 @dataclass
-class KeyStore:  #класс для представления информации о ключе шифрования
+class KeyStore:  # Класс для представления информации о ключе шифрования.
     id: Optional[int] = None
     key_type: str = ""
     key_data: bytes = b""

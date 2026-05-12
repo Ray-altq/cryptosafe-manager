@@ -2,6 +2,8 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional
 
+from .audit import AuditLogger
+
 
 class EventType(Enum):
     ENTRY_ADDED = "entry_added"
@@ -41,37 +43,6 @@ class EventBus:
 
 
 event_bus = EventBus()
-
-
-class AuditLogger:
-    def __init__(self, database, bus: EventBus):
-        self.database = database
-        self.event_bus = bus
-        self._subscribed_types = list(EventType)
-        for event_type in EventType:
-            self.event_bus.subscribe(event_type, self._log_event)
-
-    def close(self):
-        for event_type in self._subscribed_types:
-            self.event_bus.unsubscribe(event_type, self._log_event)
-
-    def _log_event(self, event: Event):
-        entry_id: Optional[int] = None
-        details = ""
-
-        if isinstance(event.data, dict):
-            entry_id = event.data.get("id") or event.data.get("entry_id")
-            details = ", ".join(f"{key}={value}" for key, value in event.data.items())
-        elif event.data is not None:
-            details = str(event.data)
-
-        self.database.add_audit_log(
-            action=event.type.value,
-            timestamp=event.timestamp,
-            entry_id=entry_id,
-            details=details,
-        )
-
 
 class AuditLoggerStub:
     def __init__(self, bus: EventBus):

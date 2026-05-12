@@ -88,7 +88,7 @@ class MainWindow:
         self._clipboard_notification_toast = None
         self._system_tray_icon = None
         self._system_tray_visible = False
-        self.audit_logger = AuditLogger(self.db, event_bus)
+        self.audit_logger = AuditLogger(self.db, event_bus, key_provider=self.auth_service.get_active_key)
         self.clipboard_service = ClipboardService(
             create_platform_adapter(self.root),
             database=self.db,
@@ -114,7 +114,7 @@ class MainWindow:
             self.key_storage = self.auth_service.key_storage
             self.entry_manager = EntryManager(self.db, self.vault_crypto, legacy_encryption_service=self.crypto)
             self.audit_logger.close()
-            self.audit_logger = AuditLogger(self.db, event_bus)
+            self.audit_logger = AuditLogger(self.db, event_bus, key_provider=self.auth_service.get_active_key)
             self._persist_runtime_settings()
             self._load_password_policy()
             self.password_visibility_overrides = {}
@@ -1933,7 +1933,7 @@ class MainWindow:
             self.state,
         )
         self.entry_manager = EntryManager(self.db, self.vault_crypto, legacy_encryption_service=self.crypto)
-        self.audit_logger = AuditLogger(self.db, event_bus)
+        self.audit_logger = AuditLogger(self.db, event_bus, key_provider=self.auth_service.get_active_key)
         self._persist_runtime_settings()
         self._load_password_policy()
         SetupWizard(self.root, self.config, self.auth_service)
@@ -1963,7 +1963,7 @@ class MainWindow:
             self.state,
         )
         self.entry_manager = EntryManager(self.db, self.vault_crypto, legacy_encryption_service=self.crypto)
-        self.audit_logger = AuditLogger(self.db, event_bus)
+        self.audit_logger = AuditLogger(self.db, event_bus, key_provider=self.auth_service.get_active_key)
         self._persist_runtime_settings()
         self._load_password_policy()
         if not self.auth_service.is_initialized():

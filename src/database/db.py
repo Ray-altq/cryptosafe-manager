@@ -4,13 +4,13 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Iterator, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional
 
 from .models import AuditLog, KeyStore, VaultEntry
 
 
 class Database:
-    SCHEMA_VERSION = 4
+    SCHEMA_VERSION = 5
 
     def __init__(self, db_path: str = "cryptosafe.db", pool_size: int = 4):
         self.db_path = db_path
@@ -93,6 +93,9 @@ class Database:
                 if version == 3:
                     self._migrate_v3_to_v4(conn)
                     version = 4
+                if version == 4:
+                    self._migrate_v4_to_v5(conn)
+                    version = 5
                 conn.execute(f"PRAGMA user_version = {max(version, self.SCHEMA_VERSION)}")
 
     def _create_schema(self, conn: sqlite3.Connection):
@@ -135,16 +138,39 @@ class Database:
         conn.execute(
             """
             CREATE TABLE audit_log (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                action TEXT NOT NULL,
+                sequence_number INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp TIMESTAMP NOT NULL,
+                event_type TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                source TEXT NOT NULL,
                 entry_id INTEGER,
                 details TEXT,
-                signature BLOB
+                action TEXT NOT NULL,
+                previous_hash TEXT NOT NULL,
+                entry_hash TEXT NOT NULL,
+                entry_data BLOB NOT NULL,
+                signature TEXT NOT NULL,
+                public_key TEXT NOT NULL
             )
             """
         )
         conn.execute("CREATE INDEX idx_audit_timestamp ON audit_log(timestamp)")
+        conn.execute("CREATE INDEX idx_audit_event_type ON audit_log(event_type)")
+        conn.execute("CREATE UNIQUE INDEX idx_audit_sequence ON audit_log(sequence_number)")
+
+        conn.execute(
+            """
+            CREATE TABLE audit_public_keys (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                algorithm TEXT NOT NULL,
+                public_key TEXT NOT NULL,
+                created_at TIMESTAMP NOT NULL,
+                is_active INTEGER NOT NULL DEFAULT 1
+            )
+            """
+        )
+        conn.execute("CREATE UNIQUE INDEX idx_audit_public_keys_active ON audit_public_keys(public_key)")
 
         conn.execute(
             """
@@ -249,6 +275,93 @@ class Database:
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_deleted_entries_expires_at ON deleted_entries(expires_at)")
 
+    def _migrate_v4_to_v5(self, conn: sqlite3.Connection):
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(audit_log)").fetchall()}
+        if "event_type" not in columns:
+            conn.execute("ALTER TABLE audit_log ADD COLUMN event_type TEXT")
+        if "severity" not in columns:
+            conn.execute("ALTER TABLE audit_log ADD COLUMN severity TEXT")
+        if "user_id" not in columns:
+            conn.execute("ALTER TABLE audit_log ADD COLUMN user_id TEXT")
+        if "source" not in columns:
+            conn.execute("ALTER TABLE audit_log ADD COLUMN source TEXT")
+        if "previous_hash" not in columns:
+            conn.execute("ALTER TABLE audit_log ADD COLUMN previous_hash TEXT")
+        if "entry_hash" not in columns:
+            conn.execute("ALTER TABLE audit_log ADD COLUMN entry_hash TEXT")
+        if "entry_data" not in columns:
+            conn.execute("ALTER TABLE audit_log ADD COLUMN entry_data BLOB")
+        if "public_key" not in columns:
+            conn.execute("ALTER TABLE audit_log ADD COLUMN public_key TEXT")
+        if "sequence_number" not in columns:
+            conn.execute("ALTER TABLE audit_log ADD COLUMN sequence_number INTEGER")
+
+        rows = conn.execute(
+            "SELECT rowid, action, timestamp, entry_id, details FROM audit_log ORDER BY COALESCE(timestamp, ''), rowid"
+        ).fetchall()
+        previous_hash = "0" * 64
+        for index, row in enumerate(rows, start=1):
+            details_text = row["details"] or ""
+            event_payload = {
+                "timestamp": row["timestamp"] or datetime.utcnow().isoformat() + "Z",
+                "event_type": row["action"] or "legacy_event",
+                "severity": "INFO",
+                "user_id": "local-user",
+                "source": "legacy_migration",
+                "entry_id": row["entry_id"],
+                "details": {"legacy_details": details_text},
+                "sequence_number": index,
+                "previous_hash": previous_hash,
+            }
+            entry_data = json.dumps(event_payload, ensure_ascii=False, sort_keys=True)
+            entry_hash = self._compute_hash(entry_data)
+            conn.execute(
+                """
+                UPDATE audit_log
+                SET event_type = COALESCE(event_type, ?),
+                    severity = COALESCE(severity, ?),
+                    user_id = COALESCE(user_id, ?),
+                    source = COALESCE(source, ?),
+                    previous_hash = COALESCE(previous_hash, ?),
+                    entry_hash = COALESCE(entry_hash, ?),
+                    entry_data = COALESCE(entry_data, ?),
+                    public_key = COALESCE(public_key, ?),
+                    sequence_number = COALESCE(sequence_number, ?),
+                    signature = COALESCE(signature, ?)
+                WHERE rowid = ?
+                """,
+                (
+                    row["action"] or "legacy_event",
+                    "INFO",
+                    "local-user",
+                    "legacy_migration",
+                    previous_hash,
+                    entry_hash,
+                    entry_data,
+                    "legacy",
+                    index,
+                    "legacy",
+                    row["rowid"],
+                ),
+            )
+            previous_hash = entry_hash
+
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log(timestamp)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_event_type ON audit_log(event_type)")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_audit_sequence ON audit_log(sequence_number)")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS audit_public_keys (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                algorithm TEXT NOT NULL,
+                public_key TEXT NOT NULL,
+                created_at TIMESTAMP NOT NULL,
+                is_active INTEGER NOT NULL DEFAULT 1
+            )
+            """
+        )
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_audit_public_keys_active ON audit_public_keys(public_key)")
+
     def add_entry(self, entry: VaultEntry) -> int:
         with self._get_connection() as conn:
             created_at = entry.created_at.isoformat() if entry.created_at else datetime.now().isoformat()
@@ -313,29 +426,113 @@ class Database:
         with self._get_connection() as conn:
             conn.execute("DELETE FROM vault_entries WHERE id = ?", (entry_id,))
 
-    def add_audit_log(self, action: str, timestamp: datetime, entry_id: Optional[int] = None, details: str = ""):
+    def add_audit_log(
+        self,
+        action: str,
+        timestamp: datetime,
+        entry_id: Optional[int] = None,
+        details: str = "",
+        *,
+        event_type: Optional[str] = None,
+        severity: str = "INFO",
+        user_id: str = "local-user",
+        source: str = "unknown",
+        previous_hash: str = "",
+        entry_hash: str = "",
+        entry_data: str = "",
+        signature: str = "",
+        public_key: str = "",
+    ) -> int:
         with self._get_connection() as conn:
-            conn.execute(
+            cursor = conn.execute(
                 """
-                INSERT INTO audit_log (action, timestamp, entry_id, details, signature)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO audit_log (
+                    timestamp,
+                    event_type,
+                    severity,
+                    user_id,
+                    source,
+                    entry_id,
+                    details,
+                    action,
+                    previous_hash,
+                    entry_hash,
+                    entry_data,
+                    signature,
+                    public_key
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (action, timestamp.isoformat(), entry_id, details, None),
+                (
+                    timestamp.isoformat(),
+                    event_type or action,
+                    severity,
+                    user_id,
+                    source,
+                    entry_id,
+                    details,
+                    action,
+                    previous_hash,
+                    entry_hash,
+                    entry_data,
+                    signature,
+                    public_key,
+                ),
             )
+            return int(cursor.lastrowid)
 
-    def get_audit_logs(self, limit: int = 200) -> List[AuditLog]:
+    def get_audit_logs(self, limit: int = 200, offset: int = 0) -> List[AuditLog]:
         with self._get_connection() as conn:
             rows = conn.execute(
-                "SELECT * FROM audit_log ORDER BY timestamp DESC LIMIT ?",
-                (limit,),
+                "SELECT rowid AS id, * FROM audit_log ORDER BY sequence_number DESC LIMIT ? OFFSET ?",
+                (limit, offset),
             ).fetchall()
             logs = []
             for row in rows:
                 data = dict(row)
                 if data.get("timestamp"):
                     data["timestamp"] = datetime.fromisoformat(data["timestamp"])
+                if not data.get("action"):
+                    data["action"] = data.get("event_type", "")
+                if not data.get("details") and data.get("entry_data"):
+                    try:
+                        payload = json.loads(data["entry_data"])
+                        data["details"] = json.dumps(payload.get("details", {}), ensure_ascii=False, sort_keys=True)
+                    except (TypeError, json.JSONDecodeError):
+                        data["details"] = ""
                 logs.append(AuditLog(**data))
             return logs
+
+    def get_audit_log_chain(self, start_sequence: int = 0, limit: Optional[int] = None) -> List[AuditLog]:
+        query = "SELECT rowid AS id, * FROM audit_log WHERE sequence_number >= ? ORDER BY sequence_number ASC"
+        params: List[Any] = [start_sequence]
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(limit)
+        with self._get_connection() as conn:
+            rows = conn.execute(query, tuple(params)).fetchall()
+            result: List[AuditLog] = []
+            for row in rows:
+                data = dict(row)
+                if data.get("timestamp"):
+                    data["timestamp"] = datetime.fromisoformat(data["timestamp"])
+                if not data.get("action"):
+                    data["action"] = data.get("event_type", "")
+                result.append(AuditLog(**data))
+            return result
+
+    def register_audit_public_key(self, algorithm: str, public_key: str):
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO audit_public_keys (algorithm, public_key, created_at, is_active)
+                VALUES (?, ?, ?, 1)
+                ON CONFLICT(public_key) DO UPDATE SET
+                    algorithm = excluded.algorithm,
+                    is_active = 1
+                """,
+                (algorithm, public_key, datetime.utcnow().isoformat() + "Z"),
+            )
 
     def backup(self, backup_path: str):
         backup_file = Path(backup_path)
@@ -467,6 +664,11 @@ class Database:
                 if progress_callback is not None:
                     progress_callback(index, total)
             return total
+
+    def _compute_hash(self, value: str) -> str:
+        import hashlib
+
+        return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
     def _row_to_entry(self, row: sqlite3.Row) -> VaultEntry:
         data = dict(row)

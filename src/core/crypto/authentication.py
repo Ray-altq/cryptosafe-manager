@@ -115,9 +115,9 @@ class AuthenticationService:
         self.state_manager.reset_failed_attempts()
 
     def logout(self):
+        event_bus.publish(Event(EventType.USER_LOGGED_OUT, {}))
         self.key_storage.clear_cached_key()
         self.state_manager.lock()
-        event_bus.publish(Event(EventType.USER_LOGGED_OUT, {}))
 
     def is_authenticated(self) -> bool:
         if self.key_storage.is_cache_expired():
