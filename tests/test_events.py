@@ -25,6 +25,12 @@ class FakeAuditDatabase:
     def register_audit_public_key(self, algorithm, public_key):
         self.public_key = {"algorithm": algorithm, "public_key": public_key}
 
+    def get_latest_audit_log(self):
+        if not self.records:
+            return None
+        latest = max(self.records, key=lambda item: item["sequence_number"])
+        return type("AuditRow", (), latest)
+
     def add_audit_log(self, action, timestamp, entry_id=None, details="", **kwargs):
         sequence_number = len(self.records) + 1
         self.records.append(

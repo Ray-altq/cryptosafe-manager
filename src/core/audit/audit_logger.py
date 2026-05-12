@@ -35,7 +35,7 @@ class AuditLogger:
         return self.verifier.verify(start_sequence=start_sequence, limit=limit)
 
     def _ensure_genesis_entry(self):
-        if self.database.get_audit_log_chain(limit=1):
+        if self._get_latest_entry() is not None:
             return
         if not self.key_provider():
             return
@@ -57,11 +57,11 @@ class AuditLogger:
         user_id: str = "local-user",
         entry_id: Optional[int] = None,
     ) -> int:
-        if event_type != "system_genesis" and not self.database.get_audit_log_chain(limit=1):
+        if event_type != "system_genesis" and self._get_latest_entry() is None:
             self._ensure_genesis_entry()
-        previous_entry = self.database.get_audit_log_chain(limit=1)
-        previous_hash = previous_entry[-1].entry_hash if previous_entry else "0" * 64
-        sequence_number = (previous_entry[-1].sequence_number if previous_entry else 0) + 1
+        previous_entry = self._get_latest_entry()
+        previous_hash = previous_entry.entry_hash if previous_entry else "0" * 64
+        sequence_number = (previous_entry.sequence_number if previous_entry else 0) + 1
         timestamp = self._utc_now()
 
         payload = {
@@ -171,3 +171,11 @@ class AuditLogger:
 
     def _utc_now(self) -> str:
         return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    def _get_latest_entry(self):
+        if hasattr(self.database, "get_latest_audit_log"):
+            return self.database.get_latest_audit_log()
+        rows = self.database.get_audit_log_chain(limit=1)
+        if not rows:
+            return None
+        return rows[-1]

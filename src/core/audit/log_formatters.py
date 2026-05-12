@@ -6,13 +6,16 @@ from typing import Iterable
 
 
 def export_logs_to_json(logs: Iterable, public_key: str = "", exporter: str = "CryptoSafe Manager") -> str:
+    serialized_entries = [serialize_log(log) for log in logs]
     payload = {
         "metadata": {
             "exported_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "exporter": exporter,
             "public_key": public_key,
+            "entry_count": len(serialized_entries),
+            "sequence_range": _build_sequence_range(serialized_entries),
         },
-        "entries": [serialize_log(log) for log in logs],
+        "entries": serialized_entries,
     }
     return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
 
@@ -66,9 +69,12 @@ def export_logs_to_pdf(logs: Iterable, title: str = "CryptoSafe Audit Report") -
 
 
 def serialize_log(log) -> dict:
+    timestamp = getattr(log, "timestamp", "")
+    if hasattr(timestamp, "isoformat"):
+        timestamp = timestamp.isoformat()
     return {
         "sequence_number": getattr(log, "sequence_number", getattr(log, "id", "")),
-        "timestamp": getattr(log, "timestamp", ""),
+        "timestamp": timestamp,
         "event_type": getattr(log, "event_type", getattr(log, "action", "")),
         "severity": getattr(log, "severity", "INFO"),
         "user_id": getattr(log, "user_id", "local-user"),
@@ -77,6 +83,27 @@ def serialize_log(log) -> dict:
         "details": getattr(log, "details", ""),
         "previous_hash": getattr(log, "previous_hash", ""),
         "entry_hash": getattr(log, "entry_hash", ""),
+        "entry_data": getattr(log, "entry_data", ""),
         "signature": getattr(log, "signature", ""),
         "public_key": getattr(log, "public_key", ""),
     }
+
+
+def import_logs_from_json(payload: str) -> list[dict]:
+    parsed = json.loads(payload)
+    entries = parsed.get("entries", [])
+    if not isinstance(entries, list):
+        raise ValueError("Экспорт журнала аудита содержит некорректный список записей")
+    normalized_entries = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ValueError("Каждая запись экспорта должна быть объектом")
+        normalized_entries.append(dict(entry))
+    return normalized_entries
+
+
+def _build_sequence_range(entries: list[dict]) -> dict:
+    if not entries:
+        return {"from": None, "to": None}
+    sequences = [int(entry.get("sequence_number", 0) or 0) for entry in entries]
+    return {"from": min(sequences), "to": max(sequences)}

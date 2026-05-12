@@ -2538,6 +2538,10 @@ class MainWindow:
         if not target_path:
             return False
 
+        target_directory = os.path.dirname(target_path)
+        if target_directory:
+            os.makedirs(target_directory, exist_ok=True)
+
         payload = self._build_audit_export_payload(logs, normalized_format)
         if isinstance(payload, bytes):
             with open(target_path, "wb") as handle:

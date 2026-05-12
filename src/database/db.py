@@ -2,7 +2,7 @@ import json
 import queue
 import sqlite3
 from contextlib import contextmanager
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional
 
@@ -624,6 +624,25 @@ class Database:
             rows = conn.execute(query, tuple(params)).fetchall()
             return self._rows_to_audit_logs(rows)
 
+    def get_audit_log_by_sequence(self, sequence_number: int) -> Optional[AuditLog]:
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT rowid AS id, * FROM audit_log WHERE sequence_number = ?",
+                (sequence_number,),
+            ).fetchone()
+            if row is None:
+                return None
+            return self._rows_to_audit_logs([row])[0]
+
+    def get_latest_audit_log(self) -> Optional[AuditLog]:
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT rowid AS id, * FROM audit_log ORDER BY sequence_number DESC LIMIT 1"
+            ).fetchone()
+            if row is None:
+                return None
+            return self._rows_to_audit_logs([row])[0]
+
     def register_audit_public_key(self, algorithm: str, public_key: str):
         with self._get_connection() as conn:
             conn.execute(
@@ -634,8 +653,49 @@ class Database:
                     algorithm = excluded.algorithm,
                     is_active = 1
                 """,
-                (algorithm, public_key, datetime.utcnow().isoformat() + "Z"),
+                (algorithm, public_key, datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")),
             )
+
+    def import_audit_logs(self, entries: List[Dict[str, Any]]):
+        with self.transaction() as conn:
+            for entry in entries:
+                conn.execute(
+                    """
+                    INSERT INTO audit_log (
+                        sequence_number,
+                        timestamp,
+                        event_type,
+                        severity,
+                        user_id,
+                        source,
+                        entry_id,
+                        details,
+                        action,
+                        previous_hash,
+                        entry_hash,
+                        entry_data,
+                        signature,
+                        public_key
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        int(entry.get("sequence_number", 0) or 0),
+                        str(entry.get("timestamp", "")),
+                        str(entry.get("event_type", entry.get("action", "")) or ""),
+                        str(entry.get("severity", "INFO") or "INFO"),
+                        str(entry.get("user_id", "local-user") or "local-user"),
+                        str(entry.get("source", "unknown") or "unknown"),
+                        entry.get("entry_id"),
+                        str(entry.get("details", "") or ""),
+                        str(entry.get("event_type", entry.get("action", "")) or ""),
+                        str(entry.get("previous_hash", "") or ""),
+                        str(entry.get("entry_hash", "") or ""),
+                        str(entry.get("entry_data", "") or ""),
+                        str(entry.get("signature", "") or ""),
+                        str(entry.get("public_key", "") or ""),
+                    ),
+                )
 
     def backup(self, backup_path: str):
         backup_file = Path(backup_path)
