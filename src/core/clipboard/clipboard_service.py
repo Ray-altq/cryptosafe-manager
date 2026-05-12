@@ -330,7 +330,7 @@ class ClipboardService:
                 self.state_manager.set_clipboard(
                     normalized_value,
                     self._settings["timeout_seconds"],
-                    redact=not self.uses_system_clipboard(),
+                    redact=True,
                 )
 
             self.event_bus.publish(
@@ -497,6 +497,30 @@ class ClipboardService:
                 exposures["in_state_manager"] = normalized_probe in str(state_value or "")
 
             return exposures
+
+    def build_memory_dump_snapshot(self) -> bytes:
+        # Собираем только чувствительные внутренние поверхности,
+        # которые сервис реально контролирует и может проверять регрессионными тестами.
+        with self._lock:
+            snapshot_parts: list[bytes] = []
+            if self._current_item is not None:
+                snapshot_parts.append(bytes(self._current_item.mask))
+                snapshot_parts.append(bytes(self._current_item.text_mask))
+                snapshot_parts.append(self._current_item.source_label.encode("utf-8", errors="ignore"))
+                snapshot_parts.append(self._current_item.fingerprint.encode("ascii", errors="ignore"))
+
+            if self.state_manager is not None and hasattr(self.state_manager, "clipboard_content"):
+                state_value = getattr(self.state_manager, "clipboard_content", None)
+                snapshot_parts.append(str(state_value or "").encode("utf-8", errors="ignore"))
+
+            return b"\n".join(snapshot_parts)
+
+    def run_memory_security_self_test(self, probe_text: str) -> dict:
+        report = self.inspect_memory_exposure(probe_text)
+        snapshot = self.build_memory_dump_snapshot()
+        report["in_memory_dump_snapshot"] = str(probe_text or "").encode("utf-8") in snapshot
+        report["snapshot_size_bytes"] = len(snapshot)
+        return report
 
     def is_application_allowed(self, application_name: str) -> bool:
         normalized_name = self._normalize_application_name(application_name)

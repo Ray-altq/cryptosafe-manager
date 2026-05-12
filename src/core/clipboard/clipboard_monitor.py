@@ -8,6 +8,7 @@ class ClipboardMonitor:
         self.adapter = adapter
         self.service = service
         self._last_observed: Optional[str] = None
+        self._last_access_token = None
         self._pending_mismatch_value: Optional[str] = None
         self._pending_mismatch_count = 0
 
@@ -24,25 +25,44 @@ class ClipboardMonitor:
         self._pending_mismatch_value = None
         self._pending_mismatch_count = 0
 
+    def _get_access_token(self):
+        access_token_getter = getattr(self.adapter, "get_clipboard_access_token", None)
+        if callable(access_token_getter):
+            try:
+                return access_token_getter()
+            except Exception:
+                return None
+        return None
+
     def poll(self):
         if hasattr(self.service, "uses_system_clipboard") and not self.service.uses_system_clipboard():
             self._reset_pending_mismatch()
             self._last_observed = None
+            self._last_access_token = None
             return
         observed = self.adapter.get_clipboard_content()
+        access_token = self._get_access_token()
         active = self.service.has_active_content()
 
         if not active:
             self._reset_pending_mismatch()
             self._last_observed = observed
+            self._last_access_token = access_token
             return
 
         if observed is None:
             return
 
         if self.service.matches_current_text(observed):
+            if (
+                access_token is not None
+                and self._last_access_token is not None
+                and access_token != self._last_access_token
+            ):
+                self.service.register_suspicious_activity(reason="external_read", observed_value=observed)
             self._reset_pending_mismatch()
             self._last_observed = observed
+            self._last_access_token = access_token
             return
 
         if observed == self._pending_mismatch_value:
@@ -57,3 +77,4 @@ class ClipboardMonitor:
             self.service.register_suspicious_activity(reason=reason, observed_value=observed)
             self._reset_pending_mismatch()
         self._last_observed = observed
+        self._last_access_token = access_token

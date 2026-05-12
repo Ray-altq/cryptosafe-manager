@@ -24,6 +24,7 @@ class FakeClipboardAdapter:
         self.value = None
         self.copy_calls = 0
         self.clear_calls = 0
+        self.access_token = 0
 
     def copy_to_clipboard(self, data: str) -> bool:
         self.value = data
@@ -37,6 +38,9 @@ class FakeClipboardAdapter:
 
     def get_clipboard_content(self):
         return self.value
+
+    def get_clipboard_access_token(self):
+        return self.access_token
 
 
 class FailingCopyClipboardAdapter(FakeClipboardAdapter):
@@ -85,7 +89,7 @@ class ClipboardServiceTestCase(unittest.TestCase):
         self.assertEqual(status.data_type, "password")
         self.assertEqual(status.source_entry_id, 7)
         self.assertEqual(self.adapter.value, "Secret!123")
-        self.assertEqual(self.state.get_clipboard(), "Secret!123")
+        self.assertEqual(self.state.get_clipboard(), self.state.CLIPBOARD_REDACTED_MARKER)
         self.assertIn("Sec", status.preview)
         self.assertEqual(self.service.reveal_current_text(), "Secret!123")
 
@@ -153,6 +157,24 @@ class ClipboardServiceTestCase(unittest.TestCase):
         status = self.service.get_status()
         self.assertTrue(status.suspicious_activity)
         self.assertLessEqual(status.remaining_seconds, 1)
+
+    def test_monitor_detects_external_read_when_access_token_changes(self):
+        received_events = []
+        self.bus.subscribe(EventType.CLIPBOARD_CLEARED, received_events.append)
+        self.service.configure(security_level="paranoid")
+        self.service.copy_text("Secret!123")
+        monitor = ClipboardMonitor(self.adapter, self.service)
+
+        monitor.poll()
+        self.assertFalse(self.service.get_status().suspicious_activity)
+
+        self.adapter.access_token += 1
+        monitor.poll()
+
+        status = self.service.get_status()
+        self.assertTrue(status.suspicious_activity)
+        self.assertEqual(received_events[-1].data["reason"], "monitor_warning")
+        self.assertEqual(received_events[-1].data["monitor_reason"], "external_read")
 
     def test_monitor_marks_external_clear_with_separate_reason(self):
         received_events = []
@@ -258,6 +280,26 @@ class ClipboardServiceTestCase(unittest.TestCase):
         self.assertFalse(exposure["in_state_manager"])
         self.assertEqual(exposure["delivery_mode"], "memory_only")
 
+    def test_memory_security_self_test_does_not_find_plaintext_in_memory_only_snapshot(self):
+        self.service.configure(delivery_mode="memory_only")
+        self.service.copy_text("Secret!123", source_label="Example")
+
+        report = self.service.run_memory_security_self_test("Secret!123")
+
+        self.assertFalse(report["in_mask_buffer"])
+        self.assertFalse(report["in_text_mask_buffer"])
+        self.assertFalse(report["in_state_manager"])
+        self.assertFalse(report["in_memory_dump_snapshot"])
+        self.assertGreater(report["snapshot_size_bytes"], 0)
+
+    def test_memory_dump_snapshot_does_not_contain_plaintext_after_memory_only_copy(self):
+        self.service.configure(delivery_mode="memory_only")
+        self.service.copy_text("Secret!123", source_label="Example")
+
+        snapshot = self.service.build_memory_dump_snapshot()
+
+        self.assertNotIn(b"Secret!123", snapshot)
+
     def test_memory_exposure_probe_detects_plaintext_copy_in_state_manager_for_system_mode(self):
         self.service.copy_text("Secret!123")
 
@@ -265,8 +307,31 @@ class ClipboardServiceTestCase(unittest.TestCase):
 
         self.assertFalse(exposure["in_mask_buffer"])
         self.assertFalse(exposure["in_text_mask_buffer"])
-        self.assertTrue(exposure["in_state_manager"])
+        self.assertFalse(exposure["in_state_manager"])
         self.assertEqual(exposure["delivery_mode"], "system")
+
+    def test_memory_security_self_test_detects_plaintext_in_system_snapshot(self):
+        self.service.copy_text("Secret!123")
+
+        report = self.service.run_memory_security_self_test("Secret!123")
+
+        self.assertFalse(report["in_state_manager"])
+        self.assertFalse(report["in_memory_dump_snapshot"])
+
+    def test_memory_dump_snapshot_does_not_contain_plaintext_after_system_copy(self):
+        self.service.copy_text("Secret!123", source_label="Example")
+
+        snapshot = self.service.build_memory_dump_snapshot()
+
+        self.assertNotIn(b"Secret!123", snapshot)
+
+    def test_memory_dump_snapshot_stays_clean_after_clear(self):
+        self.service.copy_text("Secret!123", source_label="Example")
+        self.service.clear(reason="manual")
+
+        snapshot = self.service.build_memory_dump_snapshot()
+
+        self.assertNotIn(b"Secret!123", snapshot)
 
     def test_copy_rejects_null_bytes_in_value(self):
         clipboard_errors = []
@@ -406,7 +471,7 @@ class ClipboardServiceTestCase(unittest.TestCase):
         self.assertEqual(errors, [])
         final_value = self.service.reveal_current_text()
         self.assertIn(final_value, values)
-        self.assertEqual(self.state.get_clipboard(), final_value)
+        self.assertEqual(self.state.get_clipboard(), self.state.CLIPBOARD_REDACTED_MARKER)
 
     def test_concurrent_copy_clear_and_tick_operations_keep_state_consistent(self):
         start_event = threading.Event()
@@ -452,7 +517,7 @@ class ClipboardServiceTestCase(unittest.TestCase):
         status = self.service.get_status()
         revealed = self.service.reveal_current_text()
         if status.active:
-            self.assertEqual(self.state.get_clipboard(), revealed)
+            self.assertEqual(self.state.get_clipboard(), self.state.CLIPBOARD_REDACTED_MARKER)
             self.assertEqual(self.adapter.value, revealed)
         else:
             self.assertIn(self.state.get_clipboard(), {None, ""})
@@ -492,6 +557,21 @@ class ClipboardServiceTestCase(unittest.TestCase):
         elapsed = time.perf_counter() - started_at
 
         self.assertLess(elapsed, 0.5)
+
+    def test_idle_clipboard_monitor_cpu_ratio_stays_below_one_percent(self):
+        monitor = ClipboardMonitor(self.adapter, self.service)
+        self.adapter.value = None
+
+        cpu_started_at = time.process_time()
+        wall_started_at = time.perf_counter()
+        for _index in range(200):
+            monitor.poll()
+            time.sleep(0.002)
+        cpu_elapsed = time.process_time() - cpu_started_at
+        wall_elapsed = time.perf_counter() - wall_started_at
+        cpu_ratio = 0 if wall_elapsed <= 0 else cpu_elapsed / wall_elapsed
+
+        self.assertLess(cpu_ratio, 0.01)
 
     def test_clipboard_monitor_ignores_system_clipboard_when_delivery_mode_is_memory_only(self):
         self.service.configure(delivery_mode="memory_only")

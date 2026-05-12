@@ -14,16 +14,25 @@ class ClipboardAdapterError(RuntimeError):
     pass
 
 
-def get_platform_validation_report(*, root_available: bool = False, linux_selection_mode: str = "clipboard") -> dict:
+def get_platform_validation_report(
+    *,
+    root_available: bool = False,
+    linux_selection_mode: str = "clipboard",
+    macos_pasteboard_mode: str = "general",
+) -> dict:
     normalized_linux_mode = str(linux_selection_mode or "clipboard").strip().lower()
     if normalized_linux_mode not in {"clipboard", "primary", "both"}:
         normalized_linux_mode = "clipboard"
+    normalized_macos_mode = str(macos_pasteboard_mode or "general").strip().lower()
+    if normalized_macos_mode not in {"general", "drag"}:
+        normalized_macos_mode = "general"
 
     report = {
         "platform": sys.platform,
         "os_name": os.name,
         "root_available": bool(root_available),
         "linux_selection_mode": normalized_linux_mode,
+        "macos_pasteboard_mode": normalized_macos_mode,
         "adapters": [],
         "ready": False,
     }
@@ -46,8 +55,10 @@ def get_platform_validation_report(*, root_available: bool = False, linux_select
             import AppKit  # type: ignore  # noqa: F401
 
             report["adapters"].append({"name": "macos_appkit", "available": True})
+            report["adapters"].append({"name": f"macos_pasteboard_{normalized_macos_mode}", "available": True})
         except Exception:
             report["adapters"].append({"name": "macos_appkit", "available": False})
+            report["adapters"].append({"name": f"macos_pasteboard_{normalized_macos_mode}", "available": False})
 
         report["adapters"].append({"name": "macos_pbcopy", "available": shutil.which("pbcopy") is not None})
         report["adapters"].append({"name": "macos_pbpaste", "available": shutil.which("pbpaste") is not None})
@@ -238,12 +249,24 @@ class MacOSClipboardAdapter(ClipboardAdapter):
 
 
 class AppKitClipboardAdapter(ClipboardAdapter):
-    def __init__(self):
+    def __init__(self, pasteboard_mode: str = "general"):
         try:
-            from AppKit import NSPasteboard, NSPasteboardTypeString  # type: ignore
+            from AppKit import (  # type: ignore
+                NSPasteboard,
+                NSPasteboardNameDrag,
+                NSPasteboardNameGeneral,
+                NSPasteboardTypeString,
+            )
         except Exception as error:
             raise ClipboardAdapterError("AppKit clipboard недоступен") from error
-        self._pasteboard = NSPasteboard.generalPasteboard()
+        normalized_mode = str(pasteboard_mode or "general").strip().lower()
+        if normalized_mode not in {"general", "drag"}:
+            normalized_mode = "general"
+        self.pasteboard_mode = normalized_mode
+        if normalized_mode == "drag":
+            self._pasteboard = NSPasteboard.pasteboardWithName_(NSPasteboardNameDrag)
+        else:
+            self._pasteboard = NSPasteboard.pasteboardWithName_(NSPasteboardNameGeneral)
         self._string_type = NSPasteboardTypeString
 
     def copy_to_clipboard(self, data: str) -> bool:
@@ -385,14 +408,19 @@ class TkClipboardAdapter(ClipboardAdapter):
             return None
 
 
-def create_platform_adapter(root=None, *, linux_selection_mode: str = "clipboard") -> ClipboardAdapter:
+def create_platform_adapter(
+    root=None,
+    *,
+    linux_selection_mode: str = "clipboard",
+    macos_pasteboard_mode: str = "general",
+) -> ClipboardAdapter:
     adapters: list[ClipboardAdapter] = []
 
     if os.name == "nt":
         adapters.append(WindowsClipboardAdapter())
     elif sys.platform == "darwin":
         try:
-            adapters.append(AppKitClipboardAdapter())
+            adapters.append(AppKitClipboardAdapter(pasteboard_mode=macos_pasteboard_mode))
         except ClipboardAdapterError:
             pass
         adapters.append(MacOSClipboardAdapter())

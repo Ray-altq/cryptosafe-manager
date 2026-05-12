@@ -116,6 +116,25 @@ class TestCreatePlatformAdapter(unittest.TestCase):
         self.assertIsInstance(adapter, platform_adapter.CompositeClipboardAdapter)
         self.assertEqual(adapter.adapters, [appkit_adapter, command_adapter])
 
+    def test_create_platform_adapter_passes_macos_pasteboard_mode(self):
+        appkit_adapter = object()
+        command_adapter = object()
+
+        with patch.object(platform_adapter.os, "name", "posix"), patch.object(
+            platform_adapter.sys, "platform", "darwin"
+        ), patch.object(
+            platform_adapter, "AppKitClipboardAdapter", return_value=appkit_adapter
+        ) as appkit_factory, patch.object(
+            platform_adapter, "MacOSClipboardAdapter", return_value=command_adapter
+        ), patch.object(
+            platform_adapter, "PyperclipClipboardAdapter", side_effect=platform_adapter.ClipboardAdapterError("missing")
+        ):
+            adapter = platform_adapter.create_platform_adapter(macos_pasteboard_mode="drag")
+
+        self.assertIsInstance(adapter, platform_adapter.CompositeClipboardAdapter)
+        self.assertEqual(adapter.adapters, [appkit_adapter, command_adapter])
+        appkit_factory.assert_called_once_with(pasteboard_mode="drag")
+
     def test_create_platform_adapter_uses_pyperclip_when_platform_specific_adapter_missing(self):
         pyperclip_adapter = object()
 
@@ -183,9 +202,24 @@ class TestPlatformValidationReport(unittest.TestCase):
             report = platform_adapter.get_platform_validation_report()
 
         self.assertTrue(report["ready"])
+        self.assertEqual(report["macos_pasteboard_mode"], "general")
         self.assertTrue(any(item["name"] == "macos_appkit" and item["available"] for item in report["adapters"]))
+        self.assertTrue(any(item["name"] == "macos_pasteboard_general" and item["available"] for item in report["adapters"]))
         self.assertTrue(any(item["name"] == "macos_pbcopy" and item["available"] for item in report["adapters"]))
         self.assertTrue(any(item["name"] == "macos_osascript" and item["available"] for item in report["adapters"]))
+
+    def test_validation_report_respects_drag_pasteboard_mode_on_macos(self):
+        with patch.object(platform_adapter.os, "name", "posix"), patch.object(
+            platform_adapter.sys, "platform", "darwin"
+        ), patch.dict(
+            sys.modules, {"AppKit": object()}
+        ), patch.object(
+            platform_adapter.shutil, "which", return_value=None
+        ):
+            report = platform_adapter.get_platform_validation_report(macos_pasteboard_mode="drag")
+
+        self.assertEqual(report["macos_pasteboard_mode"], "drag")
+        self.assertTrue(any(item["name"] == "macos_pasteboard_drag" and item["available"] for item in report["adapters"]))
 
     def test_validation_report_detects_linux_backends_for_primary_mode(self):
         with patch.object(platform_adapter.os, "name", "posix"), patch.object(
@@ -221,9 +255,15 @@ class TestPlatformValidationReport(unittest.TestCase):
 
 class TestPlatformAdapters(unittest.TestCase):
     def test_appkit_clipboard_adapter_roundtrip(self):
-        fake_pasteboard = FakePasteboard()
+        general_pasteboard = FakePasteboard()
+        drag_pasteboard = FakePasteboard()
         fake_appkit = types.SimpleNamespace(
-            NSPasteboard=types.SimpleNamespace(generalPasteboard=lambda: fake_pasteboard),
+            NSPasteboard=types.SimpleNamespace(
+                generalPasteboard=lambda: general_pasteboard,
+                pasteboardWithName_=lambda name: general_pasteboard if name == "general" else drag_pasteboard,
+            ),
+            NSPasteboardNameGeneral="general",
+            NSPasteboardNameDrag="drag",
             NSPasteboardTypeString="public.utf8-plain-text",
         )
 
@@ -234,7 +274,29 @@ class TestPlatformAdapters(unittest.TestCase):
         self.assertEqual(adapter.get_clipboard_content(), "Secret!123")
         self.assertTrue(adapter.clear_clipboard())
         self.assertEqual(adapter.get_clipboard_content(), "")
-        self.assertEqual(fake_pasteboard.declared_types, ["public.utf8-plain-text"])
+        self.assertEqual(general_pasteboard.declared_types, ["public.utf8-plain-text"])
+        self.assertEqual(adapter.pasteboard_mode, "general")
+
+    def test_appkit_clipboard_adapter_supports_drag_pasteboard_mode(self):
+        general_pasteboard = FakePasteboard()
+        drag_pasteboard = FakePasteboard()
+        fake_appkit = types.SimpleNamespace(
+            NSPasteboard=types.SimpleNamespace(
+                generalPasteboard=lambda: general_pasteboard,
+                pasteboardWithName_=lambda name: general_pasteboard if name == "general" else drag_pasteboard,
+            ),
+            NSPasteboardNameGeneral="general",
+            NSPasteboardNameDrag="drag",
+            NSPasteboardTypeString="public.utf8-plain-text",
+        )
+
+        with patch.dict(sys.modules, {"AppKit": fake_appkit}):
+            adapter = platform_adapter.AppKitClipboardAdapter(pasteboard_mode="drag")
+
+        self.assertEqual(adapter.pasteboard_mode, "drag")
+        self.assertTrue(adapter.copy_to_clipboard("Secret!123"))
+        self.assertEqual(drag_pasteboard.declared_types, ["public.utf8-plain-text"])
+        self.assertEqual(drag_pasteboard.value, "Secret!123")
 
     def test_windows_clipboard_adapter_retries_busy_clipboard_and_succeeds(self):
         state = {"open_calls": 0, "closed_calls": 0, "stored_text": None}
