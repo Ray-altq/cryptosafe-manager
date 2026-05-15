@@ -2422,6 +2422,47 @@ class MainWindow:
             "total_pages": total_pages,
         }
 
+    def _get_audit_log_sort_value(self, log, sort_column: str):
+        if sort_column == "timestamp":
+            return getattr(log, "timestamp", datetime.min)
+        if sort_column == "entry_id":
+            return int(getattr(log, "entry_id", -1) if getattr(log, "entry_id", None) is not None else -1)
+        if sort_column == "severity":
+            severity_order = {"INFO": 0, "WARN": 1, "ERROR": 2, "CRITICAL": 3}
+            return severity_order.get(str(getattr(log, "severity", "INFO")).upper(), 0)
+        if sort_column == "event_type":
+            return str(getattr(log, "event_type", getattr(log, "action", "")) or "")
+        if sort_column == "source":
+            return str(getattr(log, "source", "") or "")
+        if sort_column == "user_id":
+            return str(getattr(log, "user_id", "") or "")
+        return str(getattr(log, sort_column, "") or "")
+
+    def _sort_audit_logs(self, logs: list, sort_column: str, descending: bool = False) -> list:
+        return sorted(
+            list(logs),
+            key=lambda log: self._get_audit_log_sort_value(log, sort_column),
+            reverse=bool(descending),
+        )
+
+    def _build_audit_tree_rows(self, logs: list) -> list[tuple]:
+        rows = []
+        for log in logs:
+            rows.append(
+                (
+                    str(getattr(log, "sequence_number", getattr(log, "id", ""))),
+                    (
+                        log.timestamp.strftime("%Y-%m-%d %H:%M:%S") if getattr(log, "timestamp", None) else "",
+                        self._format_audit_action(log.action),
+                        getattr(log, "severity", "INFO"),
+                        getattr(log, "source", "unknown"),
+                        getattr(log, "user_id", "local-user"),
+                        getattr(log, "entry_id", "-"),
+                    ),
+                )
+            )
+        return rows
+
     def _build_audit_log_detail_lines(self, log) -> list[str]:
         parsed_details = self._parse_audit_details(getattr(log, "details", ""))
         details_payload = str(getattr(log, "entry_data", "") or "")
@@ -2452,6 +2493,9 @@ class MainWindow:
             "",
             "Структурированные детали:",
         ]
+        if getattr(log, "event_type", getattr(log, "action", "")) == "user_login_failed":
+            lines.insert(10, f"IP: {parsed_details.get('ip', 'не указано')}")
+            lines.insert(11, f"Время неуспешной попытки: {getattr(log, 'timestamp', '')}")
         if parsed_details:
             for key, value in parsed_details.items():
                 lines.append(f"- {key}: {value}")
@@ -2464,6 +2508,63 @@ class MainWindow:
                 formatted_payload = details_payload
             lines.extend(["", "Подписанный JSON:", formatted_payload])
         return lines
+
+    def _highlight_vault_entry_from_audit_log(self, log) -> bool:
+        entry_id = getattr(log, "entry_id", None)
+        if entry_id is None or not hasattr(self, "table"):
+            return False
+        table_rows = getattr(self.table, "data", [])
+        tree = getattr(self.table, "tree", None)
+        for index, row in enumerate(table_rows):
+            if str(row.get("id")) != str(entry_id):
+                continue
+            if tree is not None:
+                item_id = str(index)
+                if hasattr(tree, "selection_set"):
+                    tree.selection_set(item_id)
+                if hasattr(tree, "focus"):
+                    tree.focus(item_id)
+                if hasattr(tree, "see"):
+                    tree.see(item_id)
+            if hasattr(self, "_set_status"):
+                self._set_status(f"Выбрана связанная запись vault: #{entry_id}")
+            return True
+        return False
+
+    def _build_failed_login_investigation_text(self, log) -> str:
+        parsed_details = self._parse_audit_details(getattr(log, "details", ""))
+        timestamp = getattr(log, "timestamp", "")
+        return (
+            "Неуспешный вход\n"
+            f"Время: {timestamp}\n"
+            f"IP: {parsed_details.get('ip', 'не указано')}\n"
+            f"Детали: {parsed_details or '{}'}"
+        )
+
+    def _get_audit_log_context_actions(self, log) -> list[dict]:
+        actions = []
+        event_type = getattr(log, "event_type", getattr(log, "action", ""))
+        if event_type.startswith("entry_") and getattr(log, "entry_id", None) is not None:
+            actions.append({"id": "show_vault_entry", "label": "Показать связанную запись"})
+        if event_type == "user_login_failed":
+            actions.append({"id": "inspect_failed_login", "label": "Исследовать неуспешный вход"})
+        return actions
+
+    def _apply_audit_log_context_action(self, log, action_id: str):
+        if action_id == "show_vault_entry":
+            if not self._highlight_vault_entry_from_audit_log(log):
+                messagebox.showinfo(
+                    "Журнал аудита",
+                    "Связанная запись vault не найдена в текущем списке.",
+                    parent=self.root,
+                )
+            return
+        if action_id == "inspect_failed_login":
+            messagebox.showinfo(
+                "Неуспешный вход",
+                self._build_failed_login_investigation_text(log),
+                parent=self.root,
+            )
 
     def _get_audit_logs_for_export(
         self,
@@ -2826,6 +2927,8 @@ class MainWindow:
         date_to_var = tk.StringVar()
         page_var = tk.IntVar(value=1)
         page_status_var = tk.StringVar(value="Страница 1 из 1")
+        sort_column_var = tk.StringVar(value="timestamp")
+        sort_desc_var = tk.BooleanVar(value=True)
 
         ttk.Label(filter_frame, text="Поиск").grid(row=0, column=0, padx=4, pady=4, sticky="w")
         ttk.Entry(filter_frame, textvariable=search_var, width=18).grid(row=0, column=1, padx=4, pady=4, sticky="we")
@@ -2871,8 +2974,17 @@ class MainWindow:
             "user_id": "Пользователь",
             "entry_id": "Entry ID",
         }
+
+        def toggle_sort(column_name: str):
+            if sort_column_var.get() == column_name:
+                sort_desc_var.set(not sort_desc_var.get())
+            else:
+                sort_column_var.set(column_name)
+                sort_desc_var.set(False)
+            load_page(page_var.get())
+
         for key, label in headers.items():
-            tree.heading(key, text=label)
+            tree.heading(key, text=label, command=lambda column_name=key: toggle_sort(column_name))
             tree.column(key, width=120 if key != "event_type" else 180, anchor="w")
         tree.pack(fill=tk.BOTH, expand=True)
 
@@ -2894,27 +3006,22 @@ class MainWindow:
                 date_to=date_to_var.get(),
                 page=page_var.get(),
             )
+            sorted_logs = self._sort_audit_logs(
+                model["logs"],
+                sort_column_var.get(),
+                descending=sort_desc_var.get(),
+            )
             tree.delete(*tree.get_children())
-            for log in model["logs"]:
-                tree.insert(
-                    "",
-                    "end",
-                    iid=str(getattr(log, "sequence_number", getattr(log, "id", ""))),
-                    values=(
-                        log.timestamp.strftime("%Y-%m-%d %H:%M:%S") if log.timestamp else "",
-                        self._format_audit_action(log.action),
-                        getattr(log, "severity", "INFO"),
-                        getattr(log, "source", "unknown"),
-                        getattr(log, "user_id", "local-user"),
-                        getattr(log, "entry_id", "-"),
-                    ),
-                )
+            for item_id, values in self._build_audit_tree_rows(sorted_logs):
+                tree.insert("", "end", iid=item_id, values=values)
             page_var.set(model["page"])
             page_status_var.set(f"Страница {model['page']} из {model['total_pages']} | записей: {model['total_count']}")
             details_text.config(state=tk.NORMAL)
             details_text.delete("1.0", tk.END)
             details_text.config(state=tk.DISABLED)
-            dialog._audit_logs = {str(getattr(log, "sequence_number", getattr(log, "id", ""))): log for log in model["logs"]}
+            dialog._audit_logs = {
+                str(getattr(log, "sequence_number", getattr(log, "id", ""))): log for log in sorted_logs
+            }
 
         def on_select(_event=None):
             selected = tree.selection()
@@ -2927,6 +3034,8 @@ class MainWindow:
             details_text.delete("1.0", tk.END)
             details_text.insert("1.0", "\n".join(self._build_audit_log_detail_lines(log)))
             details_text.config(state=tk.DISABLED)
+            if getattr(log, "event_type", getattr(log, "action", "")).startswith("entry_"):
+                self._highlight_vault_entry_from_audit_log(log)
 
         def export_current_view(export_format: str):
             self.export_audit_logs(
@@ -2939,7 +3048,30 @@ class MainWindow:
                 date_to=date_to_var.get(),
             )
 
+        def show_context_menu(event):
+            item_id = tree.identify_row(event.y)
+            if not item_id:
+                return
+            tree.selection_set(item_id)
+            log = getattr(dialog, "_audit_logs", {}).get(item_id)
+            if log is None:
+                return
+            actions = self._get_audit_log_context_actions(log)
+            if not actions:
+                return
+            menu = tk.Menu(dialog, tearoff=0)
+            for action in actions:
+                menu.add_command(
+                    label=action["label"],
+                    command=lambda action_id=action["id"], selected_log=log: self._apply_audit_log_context_action(
+                        selected_log,
+                        action_id,
+                    ),
+                )
+            menu.tk_popup(event.x_root, event.y_root)
+
         tree.bind("<<TreeviewSelect>>", on_select)
+        tree.bind("<Button-3>", show_context_menu)
 
         ttk.Button(filter_frame, text="Применить", command=lambda: load_page(1)).grid(row=2, column=0, padx=4, pady=6, sticky="w")
         ttk.Button(filter_frame, text="Проверить целостность", command=lambda: self.run_audit_verification(manual=True)).grid(row=2, column=1, padx=4, pady=6, sticky="w")

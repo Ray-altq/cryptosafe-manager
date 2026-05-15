@@ -2,6 +2,7 @@ import os
 import sys
 import tempfile
 import tkinter as tk
+import tracemalloc
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -1293,6 +1294,160 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
         self.assertEqual(window.db.query_calls[-1]["offset"], 50)
         self.assertEqual(window.db.query_calls[-1]["search_text"], "settings")
         self.assertEqual(window.db.count_calls[-1]["severity"], "WARN")
+
+    def test_sort_audit_logs_orders_records_by_requested_column(self):
+        window = MainWindow.__new__(MainWindow)
+
+        class AuditLogRecord:
+            def __init__(self, sequence_number, severity, timestamp):
+                self.sequence_number = sequence_number
+                self.action = "settings_changed"
+                self.event_type = "settings_changed"
+                self.timestamp = timestamp
+                self.severity = severity
+                self.user_id = "local-user"
+                self.source = "configuration"
+                self.entry_id = None
+
+        logs = [
+            AuditLogRecord(1, "WARN", datetime(2026, 5, 12, 10, 0, 0)),
+            AuditLogRecord(2, "CRITICAL", datetime(2026, 5, 12, 9, 0, 0)),
+            AuditLogRecord(3, "INFO", datetime(2026, 5, 12, 11, 0, 0)),
+        ]
+
+        sorted_logs = window._sort_audit_logs(logs, "severity", descending=True)
+
+        self.assertEqual([log.sequence_number for log in sorted_logs], [2, 1, 3])
+
+    def test_build_audit_log_detail_lines_for_failed_login_include_ip_and_time(self):
+        window = MainWindow.__new__(MainWindow)
+        window.audit_logger = FakeAuditLogger()
+        window.audit_logger.signer = type(
+            "Signer",
+            (),
+            {"verify": staticmethod(lambda data, signature, public_key: True)},
+        )()
+
+        class AuditLogRecord:
+            sequence_number = 11
+            action = "user_login_failed"
+            event_type = "user_login_failed"
+            timestamp = datetime(2026, 5, 12, 22, 15, 0)
+            severity = "WARN"
+            user_id = "local-user"
+            source = "authentication"
+            entry_id = None
+            details = '{"ip":"127.0.0.1","reason":"invalid_password"}'
+            previous_hash = "a" * 64
+            entry_hash = "b" * 64
+            entry_data = '{"event_type":"user_login_failed","details":{"ip":"127.0.0.1"}}'
+            signature = "deadbeef"
+            public_key = "cafebabe"
+
+        lines = window._build_audit_log_detail_lines(AuditLogRecord())
+        joined = "\n".join(lines)
+
+        self.assertIn("IP: 127.0.0.1", joined)
+        self.assertIn("Время неуспешной попытки:", joined)
+
+    def test_highlight_vault_entry_from_audit_log_selects_row_in_main_table(self):
+        window = MainWindow.__new__(MainWindow)
+
+        class FakeTree:
+            def __init__(self):
+                self.selected = None
+                self.focused = None
+                self.seen = None
+
+            def selection_set(self, item_id):
+                self.selected = item_id
+
+            def focus(self, item_id):
+                self.focused = item_id
+
+            def see(self, item_id):
+                self.seen = item_id
+
+        class FakeMainTable:
+            def __init__(self):
+                self.data = [{"id": 7, "title": "GitHub"}, {"id": 9, "title": "Mail"}]
+                self.tree = FakeTree()
+
+        statuses = []
+        window.table = FakeMainTable()
+        window._set_status = lambda text: statuses.append(text)
+
+        class AuditLogRecord:
+            entry_id = 9
+
+        result = window._highlight_vault_entry_from_audit_log(AuditLogRecord())
+
+        self.assertTrue(result)
+        self.assertEqual(window.table.tree.selected, "1")
+        self.assertIn("#9", statuses[-1])
+
+    def test_get_audit_log_context_actions_returns_expected_actions(self):
+        window = MainWindow.__new__(MainWindow)
+
+        class VaultAuditLog:
+            event_type = "entry_updated"
+            action = "entry_updated"
+            entry_id = 7
+
+        class AuthAuditLog:
+            event_type = "user_login_failed"
+            action = "user_login_failed"
+            entry_id = None
+
+        vault_actions = window._get_audit_log_context_actions(VaultAuditLog())
+        auth_actions = window._get_audit_log_context_actions(AuthAuditLog())
+
+        self.assertEqual(vault_actions[0]["id"], "show_vault_entry")
+        self.assertEqual(auth_actions[0]["id"], "inspect_failed_login")
+
+    def test_audit_viewer_memory_for_10000_entries_stays_under_50mb(self):
+        window = MainWindow.__new__(MainWindow)
+
+        class FakeAuditDb:
+            def query_audit_logs(self, **kwargs):
+                records = []
+                for index in range(10000):
+                    record = type(
+                        "AuditLogRecord",
+                        (),
+                        {
+                            "sequence_number": index + 1,
+                            "action": "settings_changed",
+                            "event_type": "settings_changed",
+                            "timestamp": datetime(2026, 5, 12, 10, 0, 0),
+                            "severity": "INFO",
+                            "user_id": "local-user",
+                            "source": "configuration",
+                            "entry_id": None,
+                            "details": '{"scope":"security"}',
+                            "previous_hash": "a" * 64,
+                            "entry_hash": "b" * 64,
+                            "entry_data": '{"event_type":"settings_changed"}',
+                            "signature": "deadbeef",
+                            "public_key": "cafebabe",
+                        },
+                    )()
+                    records.append(record)
+                return records
+
+            def count_audit_logs(self, **kwargs):
+                return 10000
+
+        window.db = FakeAuditDb()
+
+        tracemalloc.start()
+        model = window._build_audit_log_view_model(page=1, page_size=10000)
+        rows = window._build_audit_tree_rows(model["logs"])
+        _current, peak_memory = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+
+        self.assertEqual(len(rows), 10000)
+        self.assertLess(peak_memory, 50 * 1024 * 1024)
 
     def test_build_audit_log_detail_lines_include_signature_status_and_hash_chain(self):
         window = MainWindow.__new__(MainWindow)
