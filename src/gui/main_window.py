@@ -21,7 +21,13 @@ from ..core.clipboard import (
     create_platform_adapter,
     get_platform_validation_report,
 )
-from ..core.audit import export_logs_to_csv, export_logs_to_json, export_logs_to_pdf
+from ..core.audit import (
+    decrypt_export_package,
+    encrypt_export_package,
+    export_logs_to_csv,
+    export_logs_to_json,
+    export_logs_to_pdf,
+)
 from ..core.config import Config
 from ..core.crypto.authentication import AuthenticationError, AuthenticationService
 from ..core.crypto.key_derivation import KeyDerivation
@@ -2612,6 +2618,39 @@ class MainWindow:
             return export_logs_to_pdf(logs)
         raise ValueError(f"Unsupported audit export format: {export_format}")
 
+    def _audit_export_contains_sensitive_data(self, logs) -> bool:
+        for log in logs:
+            event_type = str(getattr(log, "event_type", getattr(log, "action", "")) or "")
+            details_text = str(getattr(log, "details", "") or "")
+            if getattr(log, "entry_id", None) is not None:
+                return True
+            if event_type.startswith("entry_") or event_type.startswith("clipboard_"):
+                return True
+            if details_text and details_text != "{}":
+                return True
+        return False
+
+    def _encrypt_audit_export_payload(self, payload, export_format: str):
+        active_key = self.auth_service.get_active_key() if hasattr(self, "auth_service") else None
+        if not active_key:
+            raise AuthenticationError("Активный ключ недоступен для шифрования экспорта аудита")
+        return encrypt_export_package(
+            payload,
+            export_format=export_format,
+            encryption_service=self.vault_crypto,
+            key=active_key,
+        )
+
+    def _decrypt_audit_export_payload(self, package_payload):
+        active_key = self.auth_service.get_active_key() if hasattr(self, "auth_service") else None
+        if not active_key:
+            raise AuthenticationError("Активный ключ недоступен для расшифровки экспорта аудита")
+        return decrypt_export_package(
+            package_payload,
+            encryption_service=self.vault_crypto,
+            key=active_key,
+        )
+
     def export_audit_logs(
         self,
         export_format: str,
@@ -2662,12 +2701,14 @@ class MainWindow:
             os.makedirs(target_directory, exist_ok=True)
 
         payload = self._build_audit_export_payload(logs, normalized_format)
-        if isinstance(payload, bytes):
+        export_encrypted = self._audit_export_contains_sensitive_data(logs)
+        output_payload = self._encrypt_audit_export_payload(payload, normalized_format) if export_encrypted else payload
+        if isinstance(output_payload, bytes):
             with open(target_path, "wb") as handle:
-                handle.write(payload)
+                handle.write(output_payload)
         else:
             with open(target_path, "w", encoding="utf-8", newline="") as handle:
-                handle.write(payload)
+                handle.write(output_payload)
 
         event_bus.publish(
             Event(
@@ -2678,12 +2719,16 @@ class MainWindow:
                     "path": os.path.basename(target_path),
                     "date_from": date_from,
                     "date_to": date_to,
+                    "encrypted": export_encrypted,
                 },
             )
         )
         messagebox.showinfo(
             "Экспорт аудита",
-            f"Журнал аудита экспортирован в формате {normalized_format.upper()}.",
+            (
+                f"Журнал аудита экспортирован в формате {normalized_format.upper()} "
+                f"и {'зашифрован' if export_encrypted else 'сохранён без шифрования'}."
+            ),
             parent=self.root,
         )
         return True

@@ -1596,6 +1596,18 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
         self.assertIn('"event_type": "settings_changed"', payload)
         self.assertIn('"entries"', payload)
 
+    def test_encrypt_and_decrypt_audit_export_payload_roundtrip(self):
+        key_manager = FakeKeyManager()
+        window = MainWindow.__new__(MainWindow)
+        window.auth_service = FakeAuthService()
+        window.vault_crypto = AESGCMEncryptionService(key_manager)
+
+        encrypted_payload = window._encrypt_audit_export_payload('{"event_type":"settings_changed"}', "json")
+        decrypted = window._decrypt_audit_export_payload(encrypted_payload)
+
+        self.assertEqual(decrypted["content_format"], "json")
+        self.assertEqual(decrypted["payload"].decode("utf-8"), '{"event_type":"settings_changed"}')
+
     def test_export_audit_logs_requires_reauth_and_logs_export_operation(self):
         temp_dir = Path(self.make_db_path("audit-export-target")).parent
         export_path = temp_dir / "audit-log.json"
@@ -1606,6 +1618,8 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
         window.audit_logger = FakeAuditLogger()
         window.audit_logger.signer = type("Signer", (), {"public_key_hex": "cafebabe"})()
         window._reauthenticate_for_sensitive_action = lambda action_name: True
+        window.auth_service = FakeAuthService()
+        window.vault_crypto = AESGCMEncryptionService(FakeKeyManager())
 
         class FakeAuditDb:
             def count_audit_logs(self, **kwargs):
@@ -1639,11 +1653,16 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
 
         self.assertTrue(result)
         self.assertTrue(export_path.exists())
-        exported_text = export_path.read_text(encoding="utf-8")
-        self.assertIn('"event_type": "settings_changed"', exported_text)
+        exported_bytes = export_path.read_bytes()
+        exported_text = exported_bytes.decode("utf-8")
+        self.assertIn('"encrypted": true', exported_text)
+        self.assertNotIn('"event_type": "settings_changed"', exported_text)
+        decrypted = window._decrypt_audit_export_payload(exported_bytes)
+        self.assertIn('"event_type": "settings_changed"', decrypted["payload"].decode("utf-8"))
         self.assertEqual(published_events[-1].type.value, "audit_log_exported")
         self.assertEqual(published_events[-1].data["format"], "json")
         self.assertEqual(published_events[-1].data["record_count"], 1)
+        self.assertTrue(published_events[-1].data["encrypted"])
 
     def test_build_clipboard_diagnostics_lines_includes_platform_and_memory_sections(self):
         window = MainWindow.__new__(MainWindow)

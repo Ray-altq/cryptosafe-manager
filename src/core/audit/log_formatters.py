@@ -1,3 +1,4 @@
+from base64 import b64decode, b64encode
 import csv
 import io
 import json
@@ -107,3 +108,46 @@ def _build_sequence_range(entries: list[dict]) -> dict:
         return {"from": None, "to": None}
     sequences = [int(entry.get("sequence_number", 0) or 0) for entry in entries]
     return {"from": min(sequences), "to": max(sequences)}
+
+
+def encrypt_export_package(
+    payload,
+    *,
+    export_format: str,
+    encryption_service,
+    key: bytes,
+    exporter: str = "CryptoSafe Manager",
+) -> bytes:
+    payload_bytes = payload if isinstance(payload, bytes) else str(payload).encode("utf-8")
+    ciphertext = encryption_service.encrypt(payload_bytes, key)
+    package = {
+        "metadata": {
+            "encrypted": True,
+            "algorithm": "AES-256-GCM",
+            "content_format": str(export_format or "").strip().lower(),
+            "exported_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "exporter": exporter,
+        },
+        "ciphertext": b64encode(ciphertext).decode("ascii"),
+    }
+    return json.dumps(package, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8")
+
+
+def decrypt_export_package(
+    package_payload,
+    *,
+    encryption_service,
+    key: bytes,
+) -> dict:
+    raw_bytes = package_payload if isinstance(package_payload, bytes) else str(package_payload).encode("utf-8")
+    parsed = json.loads(raw_bytes.decode("utf-8"))
+    metadata = parsed.get("metadata", {})
+    ciphertext = parsed.get("ciphertext", "")
+    if not metadata.get("encrypted") or not ciphertext:
+        raise ValueError("Export package is not encrypted")
+    plaintext = encryption_service.decrypt(b64decode(ciphertext), key)
+    return {
+        "metadata": metadata,
+        "payload": plaintext,
+        "content_format": metadata.get("content_format", ""),
+    }
