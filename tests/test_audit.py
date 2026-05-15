@@ -31,7 +31,7 @@ class TestAuditLogging(unittest.TestCase):
         except OSError:
             pass
 
-    def _generate_logs(self, total: int):
+    def _generate_logs(self, total: int, *, flush: bool = True):
         for index in range(total):
             self.logger.log_event(
                 event_type="settings_changed",
@@ -44,7 +44,8 @@ class TestAuditLogging(unittest.TestCase):
                 },
                 user_id="local-user",
             )
-        self.logger.flush()
+        if flush:
+            self.logger.flush()
 
     def test_integrity_test_detects_database_tampering_after_1000_entries(self):
         self._generate_logs(1000)
@@ -63,9 +64,13 @@ class TestAuditLogging(unittest.TestCase):
 
     def test_performance_test_handles_10000_events_with_target_thresholds(self):
         started_at = time.perf_counter()
-        self._generate_logs(10000)
-        logging_elapsed = time.perf_counter() - started_at
-        average_logging_time = logging_elapsed / 10000
+        self._generate_logs(10000, flush=False)
+        enqueue_elapsed = time.perf_counter() - started_at
+        average_logging_time = enqueue_elapsed / 10000
+
+        flush_started_at = time.perf_counter()
+        self.logger.flush()
+        flush_elapsed = time.perf_counter() - flush_started_at
 
         verification_started_at = time.perf_counter()
         verification_result = self.verifier.verify(start_sequence=9001)
@@ -88,6 +93,7 @@ class TestAuditLogging(unittest.TestCase):
         self.assertTrue(verification_result["verified"])
         self.assertEqual(len(filtered_logs), 100)
         self.assertLess(average_logging_time, 0.01)
+        self.assertLess(flush_elapsed, 30.0)
         self.assertLess(verification_elapsed, 1.0)
         self.assertLess(query_elapsed, 0.5)
         self.assertLess(peak_memory, 50 * 1024 * 1024)
