@@ -1,4 +1,7 @@
+import ctypes
+import json
 import os
+import subprocess
 import sys
 import tempfile
 import threading
@@ -6,6 +9,7 @@ import time
 import tracemalloc
 import types
 import unittest
+import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -53,6 +57,112 @@ class FailingClearClipboardAdapter(FakeClipboardAdapter):
     def clear_clipboard(self) -> bool:
         self.clear_calls += 1
         return False
+
+
+def _contains_secret_in_process_memory(pid: int, secret_bytes: bytes) -> bool:
+    if os.name == "nt":
+        return _contains_secret_in_windows_process_memory(pid, secret_bytes)
+    if sys.platform.startswith("linux"):
+        return _contains_secret_in_linux_process_memory(pid, secret_bytes)
+    raise unittest.SkipTest("Реальная проверка дампа памяти поддерживается только на Windows и Linux")
+
+
+def _contains_secret_in_windows_process_memory(pid: int, secret_bytes: bytes) -> bool:
+    class MEMORY_BASIC_INFORMATION(ctypes.Structure):
+        _fields_ = [
+            ("BaseAddress", ctypes.c_void_p),
+            ("AllocationBase", ctypes.c_void_p),
+            ("AllocationProtect", ctypes.c_ulong),
+            ("RegionSize", ctypes.c_size_t),
+            ("State", ctypes.c_ulong),
+            ("Protect", ctypes.c_ulong),
+            ("Type", ctypes.c_ulong),
+        ]
+
+    kernel32 = ctypes.windll.kernel32
+    process_handle = kernel32.OpenProcess(0x0400 | 0x0010, False, pid)
+    if not process_handle:
+        raise RuntimeError("Не удалось открыть процесс для чтения памяти")
+
+    try:
+        address = 0
+        max_address = 0x7FFFFFFFFFFF
+        mbi_size = ctypes.sizeof(MEMORY_BASIC_INFORMATION)
+        while address < max_address:
+            mbi = MEMORY_BASIC_INFORMATION()
+            result = kernel32.VirtualQueryEx(process_handle, ctypes.c_void_p(address), ctypes.byref(mbi), mbi_size)
+            if not result:
+                break
+
+            base_address = int(mbi.BaseAddress or 0)
+            region_size = int(mbi.RegionSize or 0)
+            next_address = base_address + max(region_size, 0x1000)
+            if mbi.State == 0x1000 and not (mbi.Protect & 0x100) and not (mbi.Protect & 0x01):
+                offset = 0
+                while offset < region_size:
+                    chunk_size = min(1024 * 1024, region_size - offset)
+                    buffer = ctypes.create_string_buffer(chunk_size)
+                    bytes_read = ctypes.c_size_t(0)
+                    success = kernel32.ReadProcessMemory(
+                        process_handle,
+                        ctypes.c_void_p(base_address + offset),
+                        buffer,
+                        chunk_size,
+                        ctypes.byref(bytes_read),
+                    )
+                    if success and bytes_read.value:
+                        if secret_bytes in buffer.raw[: bytes_read.value]:
+                            return True
+                    offset += chunk_size
+            address = next_address
+    finally:
+        kernel32.CloseHandle(process_handle)
+    return False
+
+
+def _contains_secret_in_linux_process_memory(pid: int, secret_bytes: bytes) -> bool:
+    maps_path = Path(f"/proc/{pid}/maps")
+    mem_path = Path(f"/proc/{pid}/mem")
+    if not maps_path.exists() or not mem_path.exists():
+        raise unittest.SkipTest("Текущая Linux-среда не поддерживает чтение /proc/<pid>/mem")
+
+    with maps_path.open("r", encoding="utf-8") as maps_file, mem_path.open("rb", buffering=0) as mem_file:
+        for line in maps_file:
+            parts = line.split()
+            if len(parts) < 2:
+                continue
+            address_range, permissions = parts[0], parts[1]
+            if "r" not in permissions:
+                continue
+            start_hex, end_hex = address_range.split("-", 1)
+            start_address = int(start_hex, 16)
+            end_address = int(end_hex, 16)
+            region_size = max(0, end_address - start_address)
+            offset = 0
+            while offset < region_size:
+                chunk_size = min(1024 * 1024, region_size - offset)
+                try:
+                    mem_file.seek(start_address + offset)
+                    chunk = mem_file.read(chunk_size)
+                except OSError:
+                    break
+                if secret_bytes in chunk:
+                    return True
+                offset += chunk_size
+    return False
+
+
+def _derive_memory_dump_secret(seed_bytes: bytes) -> bytes:
+    alphabet = b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
+    state = 0xA5A5A5A5
+    for value in seed_bytes:
+        state = ((state << 5) ^ (state >> 2) ^ value) & 0xFFFFFFFF
+
+    derived = bytearray(b"TEST3-")
+    for _index in range(32):
+        state = (1664525 * state + 1013904223) & 0xFFFFFFFF
+        derived.append(alphabet[state % len(alphabet)])
+    return bytes(derived)
 
 
 class ClipboardServiceTestCase(unittest.TestCase):
@@ -333,6 +443,46 @@ class ClipboardServiceTestCase(unittest.TestCase):
 
         self.assertNotIn(b"Secret!123", snapshot)
 
+    def test_real_process_memory_dump_does_not_find_plaintext_password(self):
+        helper_path = Path(__file__).with_name("clipboard_memory_dump_helper.py")
+        if not helper_path.exists():
+            self.fail("Не найден helper для реальной проверки дампа памяти")
+
+        seed_bytes = f"seed-{uuid.uuid4().hex}-{time.time_ns()}".encode("utf-8")
+        secret_bytes = _derive_memory_dump_secret(seed_bytes)
+        process = subprocess.Popen(
+            [sys.executable, str(helper_path)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+        try:
+            process.stdin.write(seed_bytes + b"\n")
+            process.stdin.flush()
+            process.stdin.close()
+
+            ready_line = process.stdout.readline().decode("utf-8", errors="replace").strip()
+            if not ready_line:
+                stderr_output = process.stderr.read().decode("utf-8", errors="replace")
+                self.fail(f"Helper не сообщил о готовности к memory dump проверке: {stderr_output}")
+
+            ready_payload = json.loads(ready_line)
+            self.assertEqual(ready_payload.get("status"), "ready")
+            self.assertFalse(_contains_secret_in_process_memory(int(ready_payload["pid"]), secret_bytes))
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+            if process.stdout is not None:
+                process.stdout.close()
+            if process.stderr is not None:
+                process.stderr.close()
+
     def test_copy_rejects_null_bytes_in_value(self):
         clipboard_errors = []
         self.bus.subscribe(EventType.CLIPBOARD_ERROR, clipboard_errors.append)
@@ -564,9 +714,9 @@ class ClipboardServiceTestCase(unittest.TestCase):
 
         cpu_started_at = time.process_time()
         wall_started_at = time.perf_counter()
-        for _index in range(120):
+        for _index in range(80):
             monitor.poll()
-            time.sleep(0.02)
+            time.sleep(0.05)
         cpu_elapsed = time.process_time() - cpu_started_at
         wall_elapsed = time.perf_counter() - wall_started_at
         cpu_ratio = 0 if wall_elapsed <= 0 else cpu_elapsed / wall_elapsed

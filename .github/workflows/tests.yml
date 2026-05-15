@@ -12,13 +12,19 @@ on:
 
 jobs:
   test:
+    name: test (${{ matrix.label }})
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - windows-latest
-          - ubuntu-latest
-          - macos-latest
+        include:
+          - os: windows-latest
+            label: windows-latest
+          - os: ubuntu-22.04
+            label: ubuntu-22.04
+          - os: ubuntu-24.04
+            label: ubuntu-24.04
+          - os: macos-latest
+            label: macos-latest
     runs-on: ${{ matrix.os }}
 
     steps:

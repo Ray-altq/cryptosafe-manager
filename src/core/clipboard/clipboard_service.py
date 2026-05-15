@@ -37,7 +37,23 @@ class SecureClipboardItem:
         source_label: str = "",
         timeout_seconds: int = 30,
     ) -> "SecureClipboardItem":
-        plain_bytes = value.encode("utf-8")
+        return cls.create_from_bytes(
+            value.encode("utf-8"),
+            data_type=data_type,
+            source_entry_id=source_entry_id,
+            source_label=source_label,
+            timeout_seconds=timeout_seconds,
+        )
+
+    @classmethod
+    def create_from_bytes(
+        cls,
+        plain_bytes: bytes | bytearray,
+        data_type: str,
+        source_entry_id: Optional[int] = None,
+        source_label: str = "",
+        timeout_seconds: int = 30,
+    ) -> "SecureClipboardItem":
         mask = bytearray(secrets.token_bytes(max(len(plain_bytes), 1)))
         masked = bytearray(byte ^ mask[index] for index, byte in enumerate(plain_bytes))
         expires_at = None if timeout_seconds <= 0 else datetime.now() + timedelta(seconds=timeout_seconds)
@@ -348,6 +364,120 @@ class ClipboardService:
             )
             self._notify()
 
+    def copy_secret_bytes(
+        self,
+        value: bytes | bytearray,
+        *,
+        data_type: str = "password",
+        source_entry_id: Optional[int] = None,
+        source_label: str = "",
+        application_name: str = "",
+        entry_clipboard_policy: str = "allow",
+        plaintext_for_system_clipboard: Optional[str] = None,
+        wipe_input: bool = False,
+    ):
+        mutable_bytes = value if isinstance(value, bytearray) else bytearray(value)
+        if 0 in mutable_bytes:
+            self._publish_clipboard_error(operation="copy", error_code="invalid_content", data_type=data_type)
+            raise ClipboardAccessError("Буфер обмена не принимает данные с недопустимыми символами")
+        if not mutable_bytes:
+            self._publish_clipboard_error(operation="copy", error_code="empty_value", data_type=data_type)
+            raise ClipboardAccessError("Нельзя копировать пустое значение")
+
+        with self._lock:
+            max_payload_length = self._get_max_payload_length()
+            if len(mutable_bytes) > max_payload_length:
+                self._publish_clipboard_error(
+                    operation="copy",
+                    error_code="value_too_large",
+                    data_type=data_type,
+                    source_entry_id=source_entry_id,
+                    extra_details={"max_length": max_payload_length, "actual_length": len(mutable_bytes)},
+                )
+                raise ClipboardAccessError("Размер данных превышает безопасный лимит для текущего уровня защиты")
+            if self._blocked_future_copies:
+                self._publish_clipboard_error(
+                    operation="copy",
+                    error_code="blocked_on_suspicious",
+                    data_type=data_type,
+                    source_entry_id=source_entry_id,
+                )
+                raise ClipboardAccessError("Копирование временно заблокировано из-за подозрительной активности")
+            if self._normalize_entry_clipboard_policy(entry_clipboard_policy) == "never":
+                self._publish_clipboard_error(
+                    operation="copy",
+                    error_code="entry_copy_disabled",
+                    data_type=data_type,
+                    source_entry_id=source_entry_id,
+                )
+                raise ClipboardAccessError("Для этой записи копирование в буфер обмена запрещено")
+            if self.state_manager is not None and hasattr(self.state_manager, "is_locked") and self.state_manager.is_locked():
+                self._publish_clipboard_error(
+                    operation="copy",
+                    error_code="vault_locked",
+                    data_type=data_type,
+                    source_entry_id=source_entry_id,
+                )
+                raise ClipboardAccessError("Буфер обмена доступен только при разблокированном vault")
+            if not self.is_application_allowed(application_name):
+                self._publish_clipboard_error(
+                    operation="copy",
+                    error_code="application_not_allowed",
+                    data_type=data_type,
+                    source_entry_id=source_entry_id,
+                    extra_details={"application_name": self._normalize_application_name(application_name)},
+                )
+                raise ClipboardAccessError("Копирование в буфер обмена запрещено для этого приложения")
+
+            self.clear(reason="replacement", publish_event=False)
+            item = SecureClipboardItem.create_from_bytes(
+                mutable_bytes,
+                data_type=data_type,
+                source_entry_id=source_entry_id,
+                source_label=self._sanitize_metadata_value(source_label),
+                timeout_seconds=self._settings["timeout_seconds"],
+            )
+            clipboard_value = plaintext_for_system_clipboard
+            if self.uses_system_clipboard() and clipboard_value is None:
+                clipboard_value = bytes(mutable_bytes).decode("utf-8")
+            if self.uses_system_clipboard() and not self.adapter.copy_to_clipboard(clipboard_value):
+                item.secure_wipe()
+                self._publish_clipboard_error(
+                    operation="copy",
+                    error_code="adapter_write_failed",
+                    data_type=data_type,
+                    source_entry_id=source_entry_id,
+                )
+                raise ClipboardAccessError("Не удалось записать данные в буфер обмена")
+
+            self._current_item = item
+            self._warning_emitted = False
+            self._suspicious_activity = False
+            self._last_clear_reason = None
+            self._last_clear_failed = False
+
+            if self.state_manager is not None and hasattr(self.state_manager, "set_clipboard"):
+                self.state_manager.set_clipboard("", self._settings["timeout_seconds"], redact=True)
+
+            self.event_bus.publish(
+                Event(
+                    EventType.CLIPBOARD_COPIED,
+                    {
+                        "entry_id": source_entry_id,
+                        "data_type": data_type,
+                        "timeout_seconds": self._settings["timeout_seconds"],
+                        "source_label": self._sanitize_metadata_value(source_label),
+                        "application_name": self._normalize_application_name(application_name),
+                        "delivery_mode": self._settings.get("delivery_mode", "system"),
+                    },
+                )
+            )
+            self._notify()
+
+        if wipe_input:
+            for index in range(len(mutable_bytes)):
+                mutable_bytes[index] = 0
+
     def clear(self, reason: str = "manual", publish_event: bool = True) -> bool:
         with self._lock:
             had_content = self._current_item is not None
@@ -532,6 +662,8 @@ class ClipboardService:
         return normalized_name in allowed_applications
 
     def _notify(self):
+        if not self._observers:
+            return
         status = self.get_status()
         for callback in list(self._observers):
             callback(status)
