@@ -208,6 +208,7 @@ class FakeKeyManager:
 class FakeAuditLogger:
     def __init__(self):
         self.closed = False
+        self.verify_calls = []
         self.verification_result = {
             "verified": True,
             "total_entries": 2,
@@ -215,11 +216,17 @@ class FakeAuditLogger:
             "invalid_entries": [],
             "chain_breaks": [],
         }
+        self.verifier = type(
+            "Verifier",
+            (),
+            {"export_verification_report": staticmethod(lambda start_sequence=0, limit=None: '{"verified": true}')},
+        )()
 
     def close(self):
         self.closed = True
 
     def verify_integrity(self, start_sequence=0, limit=None):
+        self.verify_calls.append({"start_sequence": start_sequence, "limit": limit})
         return dict(self.verification_result)
 
 
@@ -1334,6 +1341,79 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
         self.assertTrue(result["verified"])
         self.assertEqual(published_events[-1].type.value, "audit_verification_passed")
         self.assertTrue(showinfo.called)
+
+    def test_run_periodic_audit_verification_uses_recent_limit_from_policy(self):
+        window = MainWindow.__new__(MainWindow)
+        window.root = FakeRoot()
+        window._last_audit_verification_at = datetime(2026, 5, 10, 10, 0, 0)
+        window.audit_logger = FakeAuditLogger()
+        window.auth_service = FakeAuthService()
+        window.auth_service.authenticated = True
+
+        class FakeAuditDb:
+            def get_audit_verification_policy(self):
+                return {"interval_seconds": 60, "recent_entry_limit": 1000, "lock_on_tampering": False}
+
+            def get_latest_audit_log(self):
+                return type("AuditLogRecord", (), {"sequence_number": 2500})()
+
+        window.db = FakeAuditDb()
+
+        with patch("src.gui.main_window.datetime") as fake_datetime:
+            fake_datetime.now.return_value = datetime(2026, 5, 10, 10, 5, 0)
+            window._run_periodic_audit_verification_if_due()
+
+        self.assertEqual(window.audit_logger.verify_calls[-1]["start_sequence"], 1501)
+        self.assertEqual(window.audit_logger.verify_calls[-1]["limit"], 1000)
+
+    def test_run_audit_verification_failure_writes_separate_security_event(self):
+        window = MainWindow.__new__(MainWindow)
+        window.root = FakeRoot()
+        window.audit_logger = FakeAuditLogger()
+        window.audit_logger.verification_result = {
+            "verified": False,
+            "total_entries": 4,
+            "valid_entries": 2,
+            "invalid_entries": [{"sequence_number": 7, "reason": "invalid_signature"}],
+            "chain_breaks": [],
+            "recovery_options": ["restore_from_backup"],
+        }
+
+        class FakeAuditDb:
+            def __init__(self):
+                self.security_events = []
+
+            def add_audit_security_event(self, event_type, **kwargs):
+                self.security_events.append({"event_type": event_type, **kwargs})
+                return 1
+
+        window.db = FakeAuditDb()
+
+        with patch("src.gui.main_window.event_bus.publish"), patch("src.gui.main_window.messagebox.showwarning"):
+            result = window.run_audit_verification(manual=False, trigger="startup")
+
+        self.assertFalse(result["verified"])
+        self.assertEqual(window.db.security_events[-1]["event_type"], "audit_verification_failed")
+        self.assertEqual(window.db.security_events[-1]["related_sequence_number"], 7)
+
+    def test_export_audit_verification_report_writes_json_file(self):
+        temp_dir = Path(self.make_db_path("audit-verification-report")).parent
+        report_path = temp_dir / "audit-verification-report.json"
+        self.addCleanup(lambda: report_path.unlink(missing_ok=True) if report_path.exists() else None)
+
+        window = MainWindow.__new__(MainWindow)
+        window.root = FakeRoot()
+        window.audit_logger = FakeAuditLogger()
+
+        with patch("src.gui.main_window.filedialog.asksaveasfilename", return_value=str(report_path)), patch(
+            "src.gui.main_window.event_bus.publish"
+        ) as publish, patch("src.gui.main_window.messagebox.showinfo"):
+            result = window.export_audit_verification_report()
+
+        self.assertTrue(result)
+        self.assertTrue(report_path.exists())
+        self.assertIn('"verified": true', report_path.read_text(encoding="utf-8"))
+        self.assertTrue(publish.called)
 
     def test_build_audit_export_payload_includes_signed_json_metadata(self):
         window = MainWindow.__new__(MainWindow)

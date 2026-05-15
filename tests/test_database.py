@@ -86,6 +86,10 @@ class TestDatabase(unittest.TestCase):  #класс для тестирован�
                 "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'audit_archives'"
             ).fetchone()
             self.assertIsNotNone(archive_table)
+            security_table = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'audit_security_log'"
+            ).fetchone()
+            self.assertIsNotNone(security_table)
 
             update_trigger = conn.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = 'trg_audit_log_no_update'"
@@ -222,6 +226,25 @@ class TestDatabase(unittest.TestCase):  #класс для тестирован�
             second_id = id(second_conn)
 
         self.assertEqual(first_id, second_id)
+
+    def test_audit_verification_policy_roundtrip(self):
+        self.db.set_audit_verification_policy(interval_seconds=7200, recent_entry_limit=250, lock_on_tampering=True)
+        policy = self.db.get_audit_verification_policy()
+        self.assertEqual(policy["interval_seconds"], 7200)
+        self.assertEqual(policy["recent_entry_limit"], 250)
+        self.assertTrue(policy["lock_on_tampering"])
+
+    def test_audit_security_event_roundtrip(self):
+        event_id = self.db.add_audit_security_event(
+            "audit_verification_failed",
+            details={"trigger": "startup", "invalid_entries": 2},
+            related_sequence_number=7,
+        )
+        self.assertGreater(event_id, 0)
+        events = self.db.get_audit_security_events(limit=5)
+        self.assertEqual(events[0]["event_type"], "audit_verification_failed")
+        self.assertEqual(events[0]["related_sequence_number"], 7)
+        self.assertIn('"trigger": "startup"', events[0]["details"])
 
 
 if __name__ == "__main__":

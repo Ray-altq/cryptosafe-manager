@@ -372,6 +372,7 @@ class Database:
     def _ensure_audit_hardening_schema(self, conn: sqlite3.Connection):
         self._create_audit_archive_schema(conn)
         self._create_audit_guards(conn)
+        self._create_audit_security_schema(conn)
 
     def _create_audit_archive_schema(self, conn: sqlite3.Connection):
         conn.execute(
@@ -392,6 +393,22 @@ class Database:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_audit_archives_sequence_range ON audit_archives(range_start_sequence, range_end_sequence)"
         )
+
+    def _create_audit_security_schema(self, conn: sqlite3.Connection):
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS audit_security_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TIMESTAMP NOT NULL,
+                event_type TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                related_sequence_number INTEGER,
+                details TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_security_log_timestamp ON audit_security_log(timestamp)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_security_log_event_type ON audit_security_log(event_type)")
 
     def _create_audit_guards(self, conn: sqlite3.Connection):
         conn.execute(
@@ -732,6 +749,44 @@ class Database:
             },
         )
 
+    def get_audit_verification_policy(self) -> Dict[str, Any]:
+        default_policy = {
+            "interval_seconds": 24 * 60 * 60,
+            "recent_entry_limit": 1000,
+            "lock_on_tampering": False,
+        }
+        stored_policy = self.get_setting("audit.verification_policy", default_policy)
+        if not isinstance(stored_policy, dict):
+            return dict(default_policy)
+        normalized_policy = dict(default_policy)
+        normalized_policy.update(stored_policy)
+        normalized_policy["interval_seconds"] = max(
+            60,
+            int(normalized_policy.get("interval_seconds", default_policy["interval_seconds"]) or default_policy["interval_seconds"]),
+        )
+        normalized_policy["recent_entry_limit"] = max(
+            1,
+            int(normalized_policy.get("recent_entry_limit", default_policy["recent_entry_limit"]) or default_policy["recent_entry_limit"]),
+        )
+        normalized_policy["lock_on_tampering"] = bool(normalized_policy.get("lock_on_tampering", False))
+        return normalized_policy
+
+    def set_audit_verification_policy(
+        self,
+        *,
+        interval_seconds: int = 24 * 60 * 60,
+        recent_entry_limit: int = 1000,
+        lock_on_tampering: bool = False,
+    ):
+        self.set_setting(
+            "audit.verification_policy",
+            {
+                "interval_seconds": max(60, int(interval_seconds)),
+                "recent_entry_limit": max(1, int(recent_entry_limit)),
+                "lock_on_tampering": bool(lock_on_tampering),
+            },
+        )
+
     def archive_audit_logs(
         self,
         *,
@@ -823,6 +878,53 @@ class Database:
                 LIMIT ?
                 """,
                 (limit,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def add_audit_security_event(
+        self,
+        event_type: str,
+        *,
+        severity: str = "CRITICAL",
+        details: Any = "",
+        related_sequence_number: Optional[int] = None,
+    ) -> int:
+        if isinstance(details, str):
+            normalized_details = details
+        else:
+            normalized_details = json.dumps(details, ensure_ascii=False, sort_keys=True)
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO audit_security_log (
+                    timestamp,
+                    event_type,
+                    severity,
+                    related_sequence_number,
+                    details
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                    str(event_type or ""),
+                    str(severity or "CRITICAL"),
+                    related_sequence_number,
+                    normalized_details,
+                ),
+            )
+            return int(cursor.lastrowid)
+
+    def get_audit_security_events(self, limit: int = 100) -> List[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, timestamp, event_type, severity, related_sequence_number, details
+                FROM audit_security_log
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (max(1, int(limit)),),
             ).fetchall()
             return [dict(row) for row in rows]
 

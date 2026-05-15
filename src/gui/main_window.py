@@ -93,6 +93,7 @@ class MainWindow:
         self._system_tray_icon = None
         self._system_tray_visible = False
         self._last_audit_verification_at = None
+        self._audit_tampering_notified = False
         self.audit_logger = AuditLogger(self.db, event_bus, key_provider=self.auth_service.get_active_key)
         self.clipboard_service = ClipboardService(
             create_platform_adapter(self.root),
@@ -224,15 +225,8 @@ class MainWindow:
     def _verify_audit_log_on_startup(self):
         if not hasattr(self, "audit_logger") or not hasattr(self.audit_logger, "verify_integrity"):
             return
-        verification_result = self.run_audit_verification(manual=False)
+        verification_result = self.run_audit_verification(manual=False, recent_only=False, trigger="startup")
         self._audit_integrity_status = verification_result
-        if verification_result.get("verified", True):
-            return
-        messagebox.showwarning(
-            "Проверка аудита",
-            "Обнаружены признаки нарушения целостности журнала аудита. Проверьте журнал безопасности.",
-            parent=self.root,
-        )
 
     def _create_menu(self):
         menubar = tk.Menu(self.root)
@@ -2593,7 +2587,161 @@ class MainWindow:
         )
         return True
 
-    def run_audit_verification(self, manual: bool = False) -> dict:
+    def _get_audit_verification_policy(self) -> dict:
+        default_policy = {
+            "interval_seconds": self.AUDIT_VERIFICATION_INTERVAL_SECONDS,
+            "recent_entry_limit": 1000,
+            "lock_on_tampering": False,
+        }
+        if not hasattr(self, "db") or not hasattr(self.db, "get_audit_verification_policy"):
+            return dict(default_policy)
+        try:
+            stored_policy = self.db.get_audit_verification_policy()
+        except Exception:
+            return dict(default_policy)
+        if not isinstance(stored_policy, dict):
+            return dict(default_policy)
+        normalized_policy = dict(default_policy)
+        normalized_policy.update(stored_policy)
+        normalized_policy["interval_seconds"] = max(
+            60,
+            int(
+                normalized_policy.get("interval_seconds", default_policy["interval_seconds"])
+                or default_policy["interval_seconds"]
+            ),
+        )
+        normalized_policy["recent_entry_limit"] = max(
+            1,
+            int(
+                normalized_policy.get("recent_entry_limit", default_policy["recent_entry_limit"])
+                or default_policy["recent_entry_limit"]
+            ),
+        )
+        normalized_policy["lock_on_tampering"] = bool(normalized_policy.get("lock_on_tampering", False))
+        return normalized_policy
+
+    def _get_recent_audit_verification_range(self) -> tuple[int, Optional[int]]:
+        policy = self._get_audit_verification_policy()
+        recent_entry_limit = int(policy.get("recent_entry_limit", 1000))
+        if not hasattr(self, "db") or not hasattr(self.db, "get_latest_audit_log"):
+            return 0, recent_entry_limit
+        latest_log = self.db.get_latest_audit_log()
+        if latest_log is None or getattr(latest_log, "sequence_number", None) is None:
+            return 0, recent_entry_limit
+        latest_sequence = int(getattr(latest_log, "sequence_number", 0) or 0)
+        start_sequence = max(1, latest_sequence - recent_entry_limit + 1)
+        return start_sequence, recent_entry_limit
+
+    def _record_audit_security_event(self, result: dict, *, trigger: str):
+        if not hasattr(self, "db") or not hasattr(self.db, "add_audit_security_event"):
+            return
+        invalid_entries = result.get("invalid_entries", [])
+        chain_breaks = result.get("chain_breaks", [])
+        related_sequence = None
+        if invalid_entries:
+            related_sequence = invalid_entries[0].get("sequence_number")
+        elif chain_breaks:
+            related_sequence = chain_breaks[0].get("sequence_number")
+        self.db.add_audit_security_event(
+            "audit_verification_failed",
+            severity="CRITICAL",
+            details={
+                "trigger": trigger,
+                "total_entries": result.get("total_entries", 0),
+                "valid_entries": result.get("valid_entries", 0),
+                "invalid_entries": invalid_entries,
+                "chain_breaks": chain_breaks,
+                "recovery_options": result.get("recovery_options", []),
+            },
+            related_sequence_number=related_sequence,
+        )
+
+    def _build_audit_verification_failure_message(self, result: dict, *, trigger: str) -> str:
+        invalid_count = len(result.get("invalid_entries", []))
+        chain_break_count = len(result.get("chain_breaks", []))
+        if trigger == "periodic":
+            prefix = "Периодическая проверка журнала аудита обнаружила нарушение целостности."
+        elif trigger == "startup":
+            prefix = "При запуске обнаружены признаки нарушения целостности журнала аудита."
+        else:
+            prefix = "Проверка журнала аудита обнаружила нарушение целостности."
+        return (
+            f"{prefix}\n"
+            f"Ошибок подписи/хэша: {invalid_count}\n"
+            f"Разрывов цепочки: {chain_break_count}\n"
+            "Подробности сохранены в отдельном журнале безопасности."
+        )
+
+    def _handle_audit_verification_failure(self, result: dict, *, manual: bool, trigger: str):
+        self._record_audit_security_event(result, trigger=trigger)
+        should_notify = manual or not getattr(self, "_audit_tampering_notified", False)
+        if should_notify:
+            messagebox.showwarning(
+                "Проверка аудита",
+                self._build_audit_verification_failure_message(result, trigger=trigger),
+                parent=getattr(self, "root", None),
+            )
+            self._audit_tampering_notified = True
+        policy = self._get_audit_verification_policy()
+        if policy.get("lock_on_tampering") and hasattr(self, "_lock_vault"):
+            self._lock_vault(show_dialog=False)
+
+    def export_audit_verification_report(self, recent_only: bool = False) -> bool:
+        if not hasattr(self, "audit_logger"):
+            return False
+        start_sequence = 0
+        limit = None
+        if recent_only:
+            start_sequence, limit = self._get_recent_audit_verification_range()
+        if hasattr(self.audit_logger, "verifier") and hasattr(self.audit_logger.verifier, "export_verification_report"):
+            report_text = self.audit_logger.verifier.export_verification_report(start_sequence=start_sequence, limit=limit)
+        else:
+            report_result = self.run_audit_verification(
+                manual=False,
+                recent_only=recent_only,
+                trigger="report_export",
+            )
+            report_text = json.dumps(report_result, ensure_ascii=False, indent=2, sort_keys=True)
+        target_path = filedialog.asksaveasfilename(
+            parent=self.root,
+            title="Экспорт отчёта проверки аудита",
+            defaultextension=".json",
+            filetypes=[
+                ("JSON", "*.json"),
+                ("Все файлы", "*.*"),
+            ],
+        )
+        if not target_path:
+            return False
+        target_directory = os.path.dirname(target_path)
+        if target_directory:
+            os.makedirs(target_directory, exist_ok=True)
+        with open(target_path, "w", encoding="utf-8", newline="") as handle:
+            handle.write(report_text)
+        event_bus.publish(
+            Event(
+                EventType.AUDIT_LOG_EXPORTED,
+                {
+                    "format": "verification_report_json",
+                    "record_count": 1,
+                    "path": os.path.basename(target_path),
+                    "scope": "recent" if recent_only else "full",
+                },
+            )
+        )
+        messagebox.showinfo(
+            "Отчёт проверки аудита",
+            "Отчёт проверки целостности экспортирован.",
+            parent=self.root,
+        )
+        return True
+
+    def run_audit_verification(
+        self,
+        manual: bool = False,
+        recent_only: bool = False,
+        trigger: Optional[str] = None,
+    ) -> dict:
         if not hasattr(self, "audit_logger") or not hasattr(self.audit_logger, "verify_integrity"):
             result = {
                 "verified": False,
@@ -2605,10 +2753,16 @@ class MainWindow:
             self._audit_integrity_status = result
             return result
 
-        result = self.audit_logger.verify_integrity()
+        trigger_name = trigger or ("manual" if manual else "automatic")
+        start_sequence = 0
+        limit = None
+        if recent_only:
+            start_sequence, limit = self._get_recent_audit_verification_range()
+        result = self.audit_logger.verify_integrity(start_sequence=start_sequence, limit=limit)
         self._audit_integrity_status = result
         self._last_audit_verification_at = datetime.now()
         if result.get("verified", False):
+            self._audit_tampering_notified = False
             event_bus.publish(
                 Event(
                     EventType.AUDIT_VERIFICATION_PASSED,
@@ -2616,6 +2770,8 @@ class MainWindow:
                         "total_entries": result.get("total_entries", 0),
                         "valid_entries": result.get("valid_entries", 0),
                         "manual": manual,
+                        "recent_only": recent_only,
+                        "trigger": trigger_name,
                     },
                 )
             )
@@ -2635,15 +2791,12 @@ class MainWindow:
                     "chain_breaks": len(result.get("chain_breaks", [])),
                     "total_entries": result.get("total_entries", 0),
                     "manual": manual,
+                    "recent_only": recent_only,
+                    "trigger": trigger_name,
                 },
             )
         )
-        if manual:
-            messagebox.showwarning(
-                "Проверка аудита",
-                "Обнаружены ошибки целостности журнала аудита. Подробности сохранены в журнале безопасности.",
-                parent=self.root,
-            )
+        self._handle_audit_verification_failure(result, manual=manual, trigger=trigger_name)
         return result
 
     def _run_periodic_audit_verification_if_due(self):
@@ -2651,10 +2804,11 @@ class MainWindow:
             return
         if getattr(self, "_last_audit_verification_at", None) is None:
             return
+        policy = self._get_audit_verification_policy()
         elapsed = (datetime.now() - self._last_audit_verification_at).total_seconds()
-        if elapsed < self.AUDIT_VERIFICATION_INTERVAL_SECONDS:
+        if elapsed < int(policy.get("interval_seconds", self.AUDIT_VERIFICATION_INTERVAL_SECONDS)):
             return
-        self.run_audit_verification(manual=False)
+        self.run_audit_verification(manual=False, recent_only=True, trigger="periodic")
 
     def show_logs(self):
         dialog = tk.Toplevel(self.root)
@@ -2789,9 +2943,10 @@ class MainWindow:
 
         ttk.Button(filter_frame, text="Применить", command=lambda: load_page(1)).grid(row=2, column=0, padx=4, pady=6, sticky="w")
         ttk.Button(filter_frame, text="Проверить целостность", command=lambda: self.run_audit_verification(manual=True)).grid(row=2, column=1, padx=4, pady=6, sticky="w")
-        ttk.Button(filter_frame, text="Экспорт JSON", command=lambda: export_current_view("json")).grid(row=2, column=2, padx=4, pady=6, sticky="w")
-        ttk.Button(filter_frame, text="Экспорт CSV", command=lambda: export_current_view("csv")).grid(row=2, column=3, padx=4, pady=6, sticky="w")
-        ttk.Button(filter_frame, text="Экспорт PDF", command=lambda: export_current_view("pdf")).grid(row=2, column=4, padx=4, pady=6, sticky="w")
+        ttk.Button(filter_frame, text="Отчёт проверки", command=lambda: self.export_audit_verification_report()).grid(row=2, column=2, padx=4, pady=6, sticky="w")
+        ttk.Button(filter_frame, text="Экспорт JSON", command=lambda: export_current_view("json")).grid(row=2, column=3, padx=4, pady=6, sticky="w")
+        ttk.Button(filter_frame, text="Экспорт CSV", command=lambda: export_current_view("csv")).grid(row=2, column=4, padx=4, pady=6, sticky="w")
+        ttk.Button(filter_frame, text="Экспорт PDF", command=lambda: export_current_view("pdf")).grid(row=2, column=5, padx=4, pady=6, sticky="w")
         ttk.Button(pager, text="Назад", command=lambda: load_page(page_var.get() - 1)).pack(side=tk.LEFT, padx=4)
         ttk.Label(pager, textvariable=page_status_var).pack(side=tk.LEFT, padx=8)
         ttk.Button(pager, text="Вперёд", command=lambda: load_page(page_var.get() + 1)).pack(side=tk.LEFT, padx=4)

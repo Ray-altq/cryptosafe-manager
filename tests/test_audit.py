@@ -151,6 +151,9 @@ class TestAuditLogging(unittest.TestCase):
         self.assertIn('"operation": "update"', logs[-2].details)
         self.assertEqual(logs[-1].event_type, "audit_log_protection_triggered")
         self.assertIn('"operation": "disable_protection"', logs[-1].details)
+        security_events = self.database.get_audit_security_events(limit=5)
+        self.assertEqual(security_events[0]["event_type"], "audit_log_protection_triggered")
+        self.assertEqual(security_events[1]["event_type"], "audit_log_protection_triggered")
 
     def test_rotation_policy_archives_ranges_without_breaking_active_chain(self):
         self.logger.close()

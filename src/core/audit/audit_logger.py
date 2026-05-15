@@ -291,6 +291,13 @@ class AuditLogger:
     def _record_protection_violation(self, operation: str, details: Dict[str, Any]):
         payload = dict(details)
         payload["operation"] = operation
+        if hasattr(self.database, "add_audit_security_event"):
+            self.database.add_audit_security_event(
+                "audit_log_protection_triggered",
+                severity="CRITICAL",
+                details=payload,
+                related_sequence_number=payload.get("sequence_number"),
+            )
         self._write_entry(
             event_type="audit_log_protection_triggered",
             severity="CRITICAL",
