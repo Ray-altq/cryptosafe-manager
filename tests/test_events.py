@@ -12,6 +12,7 @@ from src.core.events import AuditLogger, AuditLoggerStub, Event, EventBus, Event
 class FakeAuditDatabase:
     def __init__(self):
         self.records = []
+        self._audit_entry_data_decoder = None
 
     def get_audit_log_chain(self, start_sequence=0, limit=None):
         rows = list(self.records)
@@ -20,7 +21,7 @@ class FakeAuditDatabase:
             rows = [row for row in rows if row["sequence_number"] >= start_sequence]
         if limit is not None:
             rows = rows[-limit:]
-        return [type("AuditRow", (), row) for row in rows]
+        return [type("AuditRow", (), self._normalize_row(row)) for row in rows]
 
     def register_audit_public_key(self, algorithm, public_key):
         self.public_key = {"algorithm": algorithm, "public_key": public_key}
@@ -29,7 +30,10 @@ class FakeAuditDatabase:
         if not self.records:
             return None
         latest = max(self.records, key=lambda item: item["sequence_number"])
-        return type("AuditRow", (), latest)
+        return type("AuditRow", (), self._normalize_row(latest))
+
+    def set_audit_entry_data_decoder(self, decoder):
+        self._audit_entry_data_decoder = decoder
 
     def add_audit_log(self, action, timestamp, entry_id=None, details="", **kwargs):
         sequence_number = len(self.records) + 1
@@ -53,6 +57,12 @@ class FakeAuditDatabase:
             }
         )
         return sequence_number
+
+    def _normalize_row(self, row):
+        normalized = dict(row)
+        if self._audit_entry_data_decoder is not None:
+            normalized["entry_data"] = self._audit_entry_data_decoder(normalized.get("entry_data", ""))
+        return normalized
 
 
 class TestEvents(unittest.TestCase):
@@ -216,6 +226,21 @@ class TestEvents(unittest.TestCase):
         self.assertEqual(signer.algorithm, "ed25519")
         self.assertTrue(signer.verify(payload, signature, signer.public_key_hex))
         self.assertFalse(signer.verify(b"tampered", signature, signer.public_key_hex))
+
+    def test_audit_log_signer_uses_distinct_forward_secure_keys_per_sequence(self):
+        signer = AuditLogSigner(lambda: b"q" * 32)
+        payload = b'{"event":"settings_changed"}'
+
+        signature_one = signer.sign_for_sequence(payload, 1)
+        signature_two = signer.sign_for_sequence(payload, 2)
+        public_key_one = signer.public_key_for_sequence(1)
+        public_key_two = signer.public_key_for_sequence(2)
+
+        self.assertNotEqual(public_key_one, public_key_two)
+        self.assertNotEqual(signature_one, signature_two)
+        self.assertTrue(signer.verify(payload, signature_one, public_key_one))
+        self.assertTrue(signer.verify(payload, signature_two, public_key_two))
+        self.assertFalse(signer.verify(payload, signature_one, public_key_two))
 
     def test_audit_log_verifier_detects_hash_chain_tampering(self):
         class AuditRow:

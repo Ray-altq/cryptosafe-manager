@@ -11,6 +11,8 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 class AuditLogSigner:
     CONTEXT = b"audit-signing"
+    STORAGE_CONTEXT = b"audit-storage"
+    FORWARD_SECURITY_CONTEXT = b"audit-forward-security"
 
     def __init__(self, key_provider: Callable[[], Optional[bytes]]):
         self._key_provider = key_provider
@@ -37,6 +39,29 @@ class AuditLogSigner:
             return self._private_key.sign(data).hex()
         return hmac.new(self._hmac_key, data, hashlib.sha256).hexdigest()
 
+    def sign_for_sequence(self, data: bytes, sequence_number: int) -> str:
+        algorithm, signing_material = self._get_sequence_signing_material(sequence_number)
+        if algorithm == "ed25519":
+            return signing_material.sign(data).hex()
+        return hmac.new(signing_material, data, hashlib.sha256).hexdigest()
+
+    def public_key_for_sequence(self, sequence_number: int) -> str:
+        algorithm, signing_material = self._get_sequence_signing_material(sequence_number)
+        if algorithm == "ed25519":
+            return signing_material.public_key().public_bytes(
+                encoding=serialization.Encoding.Raw,
+                format=serialization.PublicFormat.Raw,
+            ).hex()
+        return bytes(signing_material).hex()
+
+    def algorithm_for_sequence(self, sequence_number: int) -> str:
+        algorithm, _ = self._get_sequence_signing_material(sequence_number)
+        return algorithm
+
+    def derive_storage_key(self) -> bytes:
+        self._ensure_initialized()
+        return self._derive_context_key(self.STORAGE_CONTEXT)
+
     def verify(self, data: bytes, signature_hex: str, public_key_hex: Optional[str] = None) -> bool:
         self._ensure_initialized()
         if self._algorithm == "ed25519":
@@ -47,7 +72,10 @@ class AuditLogSigner:
                 return True
             except (InvalidSignature, ValueError):
                 return False
-        expected = hmac.new(self._hmac_key, data, hashlib.sha256).hexdigest()
+        verification_key = self._hmac_key
+        if public_key_hex:
+            verification_key = bytes.fromhex(public_key_hex)
+        expected = hmac.new(verification_key, data, hashlib.sha256).hexdigest()
         return hmac.compare_digest(expected, signature_hex)
 
     def clear(self):
@@ -65,7 +93,7 @@ class AuditLogSigner:
             return
 
         self._clear_cached_material()
-        derived_seed = self._derive_signing_seed(active_key)
+        derived_seed = self._derive_context_key(self.CONTEXT, active_key=active_key)
         self._cached_seed = bytearray(derived_seed)
         self._cached_key_fingerprint = key_fingerprint
 
@@ -83,14 +111,28 @@ class AuditLogSigner:
             self._algorithm = "hmac-sha256"
             self._hmac_key = derived_seed
 
-    def _derive_signing_seed(self, active_key: bytes) -> bytes:
+    def _derive_context_key(self, context: bytes, *, active_key: Optional[bytes] = None) -> bytes:
+        source_key = active_key or self._key_provider()
+        if not source_key:
+            raise RuntimeError("Активный ключ шифрования недоступен для аудита")
         hkdf = HKDF(
             algorithm=hashes.SHA256(),
             length=32,
             salt=None,
-            info=self.CONTEXT,
+            info=context,
         )
-        return hkdf.derive(active_key)
+        return hkdf.derive(source_key)
+
+    def _get_sequence_signing_material(self, sequence_number: int):
+        self._ensure_initialized()
+        sequence_seed = hmac.new(
+            bytes(self._cached_seed),
+            self.FORWARD_SECURITY_CONTEXT + int(sequence_number).to_bytes(8, "big", signed=False),
+            hashlib.sha256,
+        ).digest()[:32]
+        if self._algorithm == "ed25519":
+            return "ed25519", ed25519.Ed25519PrivateKey.from_private_bytes(sequence_seed)
+        return "hmac-sha256", sequence_seed
 
     def _clear_cached_material(self):
         if self._cached_seed is not None:

@@ -1,9 +1,13 @@
+import base64
 import hashlib
 import json
+import os
 import queue
 import threading
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Optional
+
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from .log_signer import AuditLogSigner
 from .log_verifier import AuditLogVerifier
@@ -26,6 +30,8 @@ class AuditLogger:
         self._last_retention_check_sequence = 0
         if hasattr(self.database, "set_audit_protection_callback"):
             self.database.set_audit_protection_callback(self._record_protection_violation)
+        if hasattr(self.database, "set_audit_entry_data_decoder"):
+            self.database.set_audit_entry_data_decoder(self._decrypt_entry_payload)
         self._start_async_worker()
         self._ensure_genesis_entry()
         self._subscribe_all_events()
@@ -38,6 +44,8 @@ class AuditLogger:
         self._subscribed_types.clear()
         if hasattr(self.database, "set_audit_protection_callback"):
             self.database.set_audit_protection_callback(None)
+        if hasattr(self.database, "set_audit_entry_data_decoder"):
+            self.database.set_audit_entry_data_decoder(None)
         if hasattr(self.signer, "clear"):
             self.signer.clear()
 
@@ -137,8 +145,10 @@ class AuditLogger:
             }
             entry_data = json.dumps(payload, ensure_ascii=False, sort_keys=True)
             entry_hash = hashlib.sha256(entry_data.encode("utf-8")).hexdigest()
-            signature = self.signer.sign(entry_data.encode("utf-8"))
-            self.database.register_audit_public_key(self.signer.algorithm, self.signer.public_key_hex)
+            signature = self.signer.sign_for_sequence(entry_data.encode("utf-8"), sequence_number)
+            public_key = self.signer.public_key_for_sequence(sequence_number)
+            algorithm = self.signer.algorithm_for_sequence(sequence_number)
+            self.database.register_audit_public_key(algorithm, public_key)
             record_id = self.database.add_audit_log(
                 action=event_type,
                 event_type=event_type,
@@ -150,9 +160,9 @@ class AuditLogger:
                 details=json.dumps(payload["details"], ensure_ascii=False, sort_keys=True),
                 previous_hash=previous_hash,
                 entry_hash=entry_hash,
-                entry_data=entry_data,
+                entry_data=self._encrypt_entry_payload(entry_data),
                 signature=signature,
-                public_key=self.signer.public_key_hex,
+                public_key=public_key,
             )
             if apply_retention:
                 self._apply_retention_policy(sequence_number)
@@ -365,6 +375,43 @@ class AuditLogger:
 
     def _utc_now(self) -> str:
         return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    def _encrypt_entry_payload(self, entry_data: str) -> str:
+        storage_key = self.signer.derive_storage_key()
+        nonce = os.urandom(12)
+        ciphertext = nonce + AESGCM(storage_key).encrypt(nonce, entry_data.encode("utf-8"), None)
+        envelope = {
+            "encrypted": True,
+            "algorithm": "AES-256-GCM",
+            "key_context": "audit-storage-v1",
+            "ciphertext": base64.b64encode(ciphertext).decode("ascii"),
+        }
+        return json.dumps(envelope, ensure_ascii=False, sort_keys=True)
+
+    def _decrypt_entry_payload(self, raw_value: Any) -> str:
+        if raw_value is None:
+            return ""
+        if isinstance(raw_value, bytes):
+            raw_text = raw_value.decode("utf-8")
+        else:
+            raw_text = str(raw_value)
+        try:
+            parsed = json.loads(raw_text)
+        except (TypeError, json.JSONDecodeError):
+            return raw_text
+        if not isinstance(parsed, dict) or not parsed.get("encrypted"):
+            return raw_text
+        if parsed.get("key_context") != "audit-storage-v1":
+            return raw_text
+        ciphertext = parsed.get("ciphertext", "")
+        if not ciphertext:
+            return raw_text
+        storage_key = self.signer.derive_storage_key()
+        encrypted_payload = base64.b64decode(ciphertext)
+        nonce = encrypted_payload[:12]
+        payload = encrypted_payload[12:]
+        plaintext = AESGCM(storage_key).decrypt(nonce, payload, None)
+        return plaintext.decode("utf-8")
 
     def _get_latest_entry(self):
         if hasattr(self.database, "get_latest_audit_log"):

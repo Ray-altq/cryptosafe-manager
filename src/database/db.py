@@ -18,6 +18,7 @@ class Database:
         self.pool_size = max(1, int(pool_size))
         self._connection_pool: "queue.LifoQueue[sqlite3.Connection]" = queue.LifoQueue(maxsize=self.pool_size)
         self._audit_protection_callback: Optional[Callable[[str, Dict[str, Any]], None]] = None
+        self._audit_entry_data_decoder: Optional[Callable[[Any], str]] = None
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
@@ -555,21 +556,7 @@ class Database:
                 "SELECT rowid AS id, * FROM audit_log ORDER BY sequence_number DESC LIMIT ? OFFSET ?",
                 (limit, offset),
             ).fetchall()
-            logs = []
-            for row in rows:
-                data = dict(row)
-                if data.get("timestamp"):
-                    data["timestamp"] = datetime.fromisoformat(data["timestamp"])
-                if not data.get("action"):
-                    data["action"] = data.get("event_type", "")
-                if not data.get("details") and data.get("entry_data"):
-                    try:
-                        payload = json.loads(data["entry_data"])
-                        data["details"] = json.dumps(payload.get("details", {}), ensure_ascii=False, sort_keys=True)
-                    except (TypeError, json.JSONDecodeError):
-                        data["details"] = ""
-                logs.append(AuditLog(**data))
-            return logs
+            return self._rows_to_audit_logs(rows)
 
     def query_audit_logs(
         self,
@@ -726,6 +713,9 @@ class Database:
 
     def set_audit_protection_callback(self, callback: Optional[Callable[[str, Dict[str, Any]], None]]):
         self._audit_protection_callback = callback
+
+    def set_audit_entry_data_decoder(self, decoder: Optional[Callable[[Any], str]]):
+        self._audit_entry_data_decoder = decoder
 
     def get_audit_retention_policy(self) -> Dict[str, Any]:
         default_policy = {"enabled": True, "max_entries": 10000, "max_age_days": 365}
@@ -1143,6 +1133,7 @@ class Database:
                 data["timestamp"] = datetime.fromisoformat(data["timestamp"])
             if not data.get("action"):
                 data["action"] = data.get("event_type", "")
+            data["entry_data"] = self._decode_audit_entry_data(data.get("entry_data", ""))
             if not data.get("details") and data.get("entry_data"):
                 try:
                     payload = json.loads(data["entry_data"])
@@ -1151,6 +1142,17 @@ class Database:
                     data["details"] = ""
             result.append(AuditLog(**data))
         return result
+
+    def _decode_audit_entry_data(self, raw_value: Any) -> str:
+        if raw_value is None:
+            return ""
+        if self._audit_entry_data_decoder is None:
+            return raw_value.decode("utf-8") if isinstance(raw_value, bytes) else str(raw_value)
+        try:
+            decoded = self._audit_entry_data_decoder(raw_value)
+            return str(decoded or "")
+        except Exception:
+            return raw_value.decode("utf-8") if isinstance(raw_value, bytes) else str(raw_value)
 
     def _normalize_audit_datetime(self, raw_value: Any, *, is_end: bool) -> Optional[datetime]:
         if isinstance(raw_value, datetime):

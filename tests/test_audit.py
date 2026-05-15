@@ -5,6 +5,7 @@ import tempfile
 import time
 import tracemalloc
 import unittest
+import json
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -143,6 +144,21 @@ class TestAuditLogging(unittest.TestCase):
 
         self.assertEqual(results, [])
         self.assertEqual(remaining_count, 11)
+
+    def test_audit_log_entry_data_is_encrypted_at_rest_and_decrypted_on_read(self):
+        self._generate_logs(1)
+
+        with self.database._get_connection() as conn:
+            raw_row = conn.execute(
+                "SELECT entry_data FROM audit_log WHERE sequence_number = 2"
+            ).fetchone()
+
+        raw_entry_data = raw_row["entry_data"]
+        self.assertNotIn('"event_type": "settings_changed"', raw_entry_data)
+        self.assertTrue(json.loads(raw_entry_data)["encrypted"])
+
+        log = self.database.get_audit_log_by_sequence(2)
+        self.assertIn('"event_type": "settings_changed"', log.entry_data)
 
     def test_append_only_protection_blocks_update_attempt_and_logs_violation(self):
         self._generate_logs(3)
