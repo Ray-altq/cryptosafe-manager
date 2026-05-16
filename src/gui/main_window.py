@@ -432,6 +432,7 @@ class MainWindow:
     def _schedule_security_tasks(self):
         self._check_security_timers()
         self._run_periodic_audit_verification_if_due()
+        self._run_scheduled_audit_exports_if_due()
         self.root.after(1000, self._schedule_security_tasks)
 
     def _check_security_timers(self):
@@ -2733,6 +2734,156 @@ class MainWindow:
             key=active_key,
         )
 
+    def _get_audit_export_schedule_policy(self) -> dict:
+        default_directory = os.path.join(os.path.expanduser("~"), ".cryptosafe", "scheduled-audit-exports")
+        default_policy = {
+            "enabled": False,
+            "interval_seconds": 24 * 60 * 60,
+            "formats": ["json"],
+            "export_directory": default_directory,
+            "max_age_days": 30,
+            "max_files": 20,
+            "include_verification_report": True,
+            "last_run_at": "",
+        }
+        if not hasattr(self, "db") or not hasattr(self.db, "get_setting"):
+            return dict(default_policy)
+        stored_policy = self.db.get_setting("audit.export_schedule_policy", default_policy)
+        if not isinstance(stored_policy, dict):
+            return dict(default_policy)
+        normalized = dict(default_policy)
+        normalized.update(stored_policy)
+        normalized["enabled"] = bool(normalized.get("enabled", False))
+        normalized["interval_seconds"] = max(300, int(normalized.get("interval_seconds", default_policy["interval_seconds"]) or default_policy["interval_seconds"]))
+        raw_formats = normalized.get("formats", ["json"])
+        if not isinstance(raw_formats, list):
+            raw_formats = ["json"]
+        normalized_formats = [str(item).strip().lower() for item in raw_formats if str(item).strip().lower() in {"json", "csv", "pdf"}]
+        normalized["formats"] = normalized_formats or ["json"]
+        normalized["export_directory"] = str(normalized.get("export_directory", default_directory) or default_directory)
+        raw_max_age_days = normalized.get("max_age_days", default_policy["max_age_days"])
+        raw_max_files = normalized.get("max_files", default_policy["max_files"])
+        normalized["max_age_days"] = max(1, int(default_policy["max_age_days"] if raw_max_age_days is None else raw_max_age_days))
+        normalized["max_files"] = max(1, int(default_policy["max_files"] if raw_max_files is None else raw_max_files))
+        normalized["include_verification_report"] = bool(normalized.get("include_verification_report", True))
+        normalized["last_run_at"] = str(normalized.get("last_run_at", "") or "")
+        return normalized
+
+    def _save_audit_export_schedule_policy(self, policy: dict):
+        if not hasattr(self, "db") or not hasattr(self.db, "set_setting"):
+            return
+        self.db.set_setting("audit.export_schedule_policy", dict(policy))
+
+    def _build_scheduled_audit_export_path(self, export_directory: str, export_format: str, exported_at: datetime) -> str:
+        extension_map = {"json": ".json", "csv": ".csv", "pdf": ".pdf"}
+        timestamp = exported_at.strftime("%Y%m%d-%H%M%S")
+        filename = f"audit-log-{timestamp}{extension_map.get(export_format, '.txt')}"
+        return os.path.join(export_directory, filename)
+
+    def _write_audit_export_file(self, target_path: str, output_payload):
+        target_directory = os.path.dirname(target_path)
+        if target_directory:
+            os.makedirs(target_directory, exist_ok=True)
+        if isinstance(output_payload, bytes):
+            with open(target_path, "wb") as handle:
+                handle.write(output_payload)
+        else:
+            with open(target_path, "w", encoding="utf-8", newline="") as handle:
+                handle.write(output_payload)
+
+    def _cleanup_scheduled_audit_exports(self, export_directory: str, *, max_age_days: int, max_files: int):
+        if not os.path.isdir(export_directory):
+            return
+        now = datetime.now()
+        threshold = now.timestamp() - max(1, int(max_age_days)) * 24 * 60 * 60
+        export_files = []
+        for file_name in os.listdir(export_directory):
+            if not file_name.startswith("audit-") and not file_name.startswith("verification-report-"):
+                continue
+            full_path = os.path.join(export_directory, file_name)
+            if not os.path.isfile(full_path):
+                continue
+            try:
+                modified_at = os.path.getmtime(full_path)
+            except OSError:
+                continue
+            export_files.append((full_path, modified_at))
+
+        for full_path, modified_at in export_files:
+            if modified_at < threshold:
+                try:
+                    os.remove(full_path)
+                except OSError:
+                    pass
+
+        remaining_files = []
+        for full_path, modified_at in export_files:
+            if os.path.exists(full_path):
+                remaining_files.append((full_path, modified_at))
+        remaining_files.sort(key=lambda item: item[1], reverse=True)
+        for full_path, _modified_at in remaining_files[max(1, int(max_files)) :]:
+            try:
+                os.remove(full_path)
+            except OSError:
+                pass
+
+    def _export_audit_logs_to_path(
+        self,
+        target_path: str,
+        export_format: str,
+        *,
+        search_text: str = "",
+        event_type: str = "",
+        severity: str = "",
+        user_id: str = "",
+        date_from: str = "",
+        date_to: str = "",
+        scheduled: bool = False,
+    ) -> bool:
+        logs = self._get_audit_logs_for_export(
+            search_text=search_text,
+            event_type=event_type,
+            severity=severity,
+            user_id=user_id,
+            date_from=date_from,
+            date_to=date_to,
+        )
+        if not logs:
+            if not scheduled:
+                messagebox.showinfo("Экспорт аудита", "Для выбранных фильтров журнал аудита пуст.", parent=self.root)
+            return False
+
+        normalized_format = str(export_format or "").strip().lower()
+        payload = self._build_audit_export_payload(logs, normalized_format)
+        export_encrypted = self._audit_export_contains_sensitive_data(logs)
+        output_payload = self._encrypt_audit_export_payload(payload, normalized_format) if export_encrypted else payload
+        self._write_audit_export_file(target_path, output_payload)
+
+        event_bus.publish(
+            Event(
+                EventType.AUDIT_LOG_EXPORTED,
+                {
+                    "format": normalized_format,
+                    "record_count": len(logs),
+                    "path": os.path.basename(target_path),
+                    "date_from": date_from,
+                    "date_to": date_to,
+                    "encrypted": export_encrypted,
+                    "scheduled": scheduled,
+                },
+            )
+        )
+        if not scheduled:
+            messagebox.showinfo(
+                "Экспорт аудита",
+                (
+                    f"Журнал аудита экспортирован в формате {normalized_format.upper()} "
+                    f"и {'зашифрован' if export_encrypted else 'сохранён без шифрования'}."
+                ),
+                parent=self.root,
+            )
+        return True
+
     def export_audit_logs(
         self,
         export_format: str,
@@ -2744,17 +2895,6 @@ class MainWindow:
         date_from: str = "",
         date_to: str = "",
     ) -> bool:
-        logs = self._get_audit_logs_for_export(
-            search_text=search_text,
-            event_type=event_type,
-            severity=severity,
-            user_id=user_id,
-            date_from=date_from,
-            date_to=date_to,
-        )
-        if not logs:
-            messagebox.showinfo("Экспорт аудита", "Для выбранных фильтров журнал аудита пуст.", parent=self.root)
-            return False
         if not self._reauthenticate_for_sensitive_action("Экспорт журнала аудита"):
             return False
 
@@ -2777,43 +2917,17 @@ class MainWindow:
         )
         if not target_path:
             return False
-
-        target_directory = os.path.dirname(target_path)
-        if target_directory:
-            os.makedirs(target_directory, exist_ok=True)
-
-        payload = self._build_audit_export_payload(logs, normalized_format)
-        export_encrypted = self._audit_export_contains_sensitive_data(logs)
-        output_payload = self._encrypt_audit_export_payload(payload, normalized_format) if export_encrypted else payload
-        if isinstance(output_payload, bytes):
-            with open(target_path, "wb") as handle:
-                handle.write(output_payload)
-        else:
-            with open(target_path, "w", encoding="utf-8", newline="") as handle:
-                handle.write(output_payload)
-
-        event_bus.publish(
-            Event(
-                EventType.AUDIT_LOG_EXPORTED,
-                {
-                    "format": normalized_format,
-                    "record_count": len(logs),
-                    "path": os.path.basename(target_path),
-                    "date_from": date_from,
-                    "date_to": date_to,
-                    "encrypted": export_encrypted,
-                },
-            )
+        return self._export_audit_logs_to_path(
+            target_path,
+            normalized_format,
+            search_text=search_text,
+            event_type=event_type,
+            severity=severity,
+            user_id=user_id,
+            date_from=date_from,
+            date_to=date_to,
+            scheduled=False,
         )
-        messagebox.showinfo(
-            "Экспорт аудита",
-            (
-                f"Журнал аудита экспортирован в формате {normalized_format.upper()} "
-                f"и {'зашифрован' if export_encrypted else 'сохранён без шифрования'}."
-            ),
-            parent=self.root,
-        )
-        return True
 
     def _get_audit_verification_policy(self) -> dict:
         default_policy = {
@@ -3037,6 +3151,62 @@ class MainWindow:
         if elapsed < int(policy.get("interval_seconds", self.AUDIT_VERIFICATION_INTERVAL_SECONDS)):
             return
         self.run_audit_verification(manual=False, recent_only=True, trigger="periodic")
+
+    def _run_scheduled_audit_exports_if_due(self):
+        if not hasattr(self, "auth_service") or not self.auth_service.is_authenticated():
+            return
+        policy = self._get_audit_export_schedule_policy()
+        if not policy.get("enabled"):
+            return
+        last_run_at = str(policy.get("last_run_at", "") or "").strip()
+        if last_run_at:
+            try:
+                previous_run = datetime.fromisoformat(last_run_at)
+                if (datetime.now() - previous_run).total_seconds() < int(policy.get("interval_seconds", 24 * 60 * 60)):
+                    return
+            except ValueError:
+                pass
+        self._perform_scheduled_audit_exports(policy)
+
+    def _perform_scheduled_audit_exports(self, policy: dict) -> bool:
+        export_directory = str(policy.get("export_directory", "") or "")
+        if not export_directory:
+            return False
+        exported_at = datetime.now()
+        export_success = False
+        for export_format in policy.get("formats", ["json"]):
+            target_path = self._build_scheduled_audit_export_path(export_directory, export_format, exported_at)
+            if self._export_audit_logs_to_path(target_path, export_format, scheduled=True):
+                export_success = True
+
+        if policy.get("include_verification_report"):
+            report_path = os.path.join(
+                export_directory,
+                f"verification-report-{exported_at.strftime('%Y%m%d-%H%M%S')}.json",
+            )
+            start_sequence, limit = self._get_recent_audit_verification_range()
+            if hasattr(self.audit_logger, "verifier") and hasattr(self.audit_logger.verifier, "export_verification_report"):
+                report_text = self.audit_logger.verifier.export_verification_report(start_sequence=start_sequence, limit=limit)
+            else:
+                report_text = json.dumps(
+                    self.run_audit_verification(manual=False, recent_only=True, trigger="scheduled_export_report"),
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                )
+            self._write_audit_export_file(report_path, report_text)
+            export_success = True
+
+        if export_success:
+            updated_policy = dict(policy)
+            updated_policy["last_run_at"] = exported_at.isoformat()
+            self._save_audit_export_schedule_policy(updated_policy)
+            self._cleanup_scheduled_audit_exports(
+                export_directory,
+                max_age_days=int(policy.get("max_age_days", 30)),
+                max_files=int(policy.get("max_files", 20)),
+            )
+        return export_success
 
     def show_logs(self):
         dialog = tk.Toplevel(self.root)

@@ -1,4 +1,5 @@
 import os
+import shutil
 import sys
 import tempfile
 import tkinter as tk
@@ -1725,6 +1726,124 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
         self.assertEqual(published_events[-1].data["format"], "json")
         self.assertEqual(published_events[-1].data["record_count"], 1)
         self.assertTrue(published_events[-1].data["encrypted"])
+
+    def test_get_audit_export_schedule_policy_normalizes_defaults_and_values(self):
+        window = MainWindow.__new__(MainWindow)
+
+        class FakeAuditDb:
+            def get_setting(self, key, default=None):
+                self.requested_key = key
+                return {
+                    "enabled": True,
+                    "interval_seconds": 60,
+                    "formats": ["json", "pdf", "invalid"],
+                    "export_directory": "C:/exports",
+                    "max_age_days": 0,
+                    "max_files": 0,
+                    "include_verification_report": False,
+                    "last_run_at": "2026-05-16T10:00:00",
+                }
+
+        window.db = FakeAuditDb()
+
+        policy = window._get_audit_export_schedule_policy()
+
+        self.assertEqual(window.db.requested_key, "audit.export_schedule_policy")
+        self.assertTrue(policy["enabled"])
+        self.assertEqual(policy["interval_seconds"], 300)
+        self.assertEqual(policy["formats"], ["json", "pdf"])
+        self.assertEqual(policy["max_age_days"], 1)
+        self.assertEqual(policy["max_files"], 1)
+        self.assertFalse(policy["include_verification_report"])
+
+    def test_perform_scheduled_audit_exports_creates_export_and_report_and_updates_policy(self):
+        temp_dir = Path(self.make_db_path("scheduled-audit-exports")).parent / "scheduled-exports"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        self.addCleanup(lambda: shutil.rmtree(temp_dir, ignore_errors=True))
+
+        window = MainWindow.__new__(MainWindow)
+        window.root = FakeRoot()
+        window.auth_service = FakeAuthService()
+        window.vault_crypto = AESGCMEncryptionService(FakeKeyManager())
+        window.audit_logger = FakeAuditLogger()
+        window.audit_logger.signer = type("Signer", (), {"public_key_hex": "cafebabe"})()
+
+        class FakeAuditDb:
+            def __init__(self):
+                self.saved_policy = None
+
+            def count_audit_logs(self, **kwargs):
+                return 1
+
+            def query_audit_logs(self, **kwargs):
+                class AuditLogRecord:
+                    sequence_number = 3
+                    timestamp = datetime(2026, 5, 12, 10, 0, 0)
+                    action = "settings_changed"
+                    event_type = "settings_changed"
+                    severity = "WARN"
+                    user_id = "local-user"
+                    source = "configuration"
+                    entry_id = None
+                    details = '{"scope":"security"}'
+                    previous_hash = "a" * 64
+                    entry_hash = "b" * 64
+                    signature = "deadbeef"
+                    public_key = "cafebabe"
+
+                return [AuditLogRecord()]
+
+            def set_setting(self, key, value, encrypted=False):
+                self.saved_policy = {"key": key, "value": value, "encrypted": encrypted}
+
+        window.db = FakeAuditDb()
+        published_events = []
+        policy = {
+            "enabled": True,
+            "interval_seconds": 300,
+            "formats": ["json"],
+            "export_directory": str(temp_dir),
+            "max_age_days": 30,
+            "max_files": 20,
+            "include_verification_report": True,
+            "last_run_at": "",
+        }
+
+        with patch("src.gui.main_window.event_bus.publish", side_effect=lambda event: published_events.append(event)):
+            result = window._perform_scheduled_audit_exports(policy)
+
+        self.assertTrue(result)
+        self.assertIsNotNone(window.db.saved_policy)
+        self.assertEqual(window.db.saved_policy["key"], "audit.export_schedule_policy")
+        exported_files = sorted(path.name for path in temp_dir.iterdir())
+        self.assertEqual(len(exported_files), 2)
+        self.assertTrue(any(name.startswith("audit-log-") for name in exported_files))
+        self.assertTrue(any(name.startswith("verification-report-") for name in exported_files))
+        self.assertTrue(published_events)
+        self.assertTrue(published_events[-1].data["scheduled"])
+
+    def test_cleanup_scheduled_audit_exports_removes_old_and_excess_files(self):
+        temp_dir = Path(self.make_db_path("scheduled-audit-cleanup")).parent / "scheduled-cleanup"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        self.addCleanup(lambda: shutil.rmtree(temp_dir, ignore_errors=True))
+
+        window = MainWindow.__new__(MainWindow)
+        stale_file = temp_dir / "audit-log-old.json"
+        keep_one = temp_dir / "audit-log-newer.json"
+        keep_two = temp_dir / "verification-report-newest.json"
+        for file_path in (stale_file, keep_one, keep_two):
+            file_path.write_text("{}", encoding="utf-8")
+
+        now_ts = datetime.now().timestamp()
+        old_ts = now_ts - (3 * 24 * 60 * 60)
+        os.utime(stale_file, (old_ts, old_ts))
+        os.utime(keep_one, (now_ts - 60, now_ts - 60))
+        os.utime(keep_two, (now_ts, now_ts))
+
+        window._cleanup_scheduled_audit_exports(str(temp_dir), max_age_days=1, max_files=1)
+
+        remaining_files = sorted(path.name for path in temp_dir.iterdir())
+        self.assertEqual(remaining_files, ["verification-report-newest.json"])
 
     def test_build_clipboard_diagnostics_lines_includes_platform_and_memory_sections(self):
         window = MainWindow.__new__(MainWindow)
