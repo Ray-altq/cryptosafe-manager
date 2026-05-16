@@ -205,6 +205,49 @@ class TestEvents(unittest.TestCase):
         self.assertIn('"failed_attempts": 3', database.records[-1]["details"])
         self.assertNotIn("user@example.com", database.records[-1]["details"])
 
+    def test_audit_logger_records_future_integration_events(self):
+        database = FakeAuditDatabase()
+        logger = AuditLogger(database, self.event_bus, key_provider=lambda: b"a" * 32)
+        self.addCleanup(logger.close)
+
+        self.event_bus.publish(
+            Event(
+                EventType.IMPORT_OPERATION_COMPLETED,
+                {
+                    "format": "json",
+                    "record_count": 12,
+                    "source_file": "backup.json",
+                },
+            )
+        )
+        self.event_bus.publish(
+            Event(
+                EventType.PANIC_MODE_ACTIVATED,
+                {
+                    "reason": "manual",
+                    "secret": "Sensitive",
+                },
+            )
+        )
+        self.event_bus.publish(
+            Event(
+                EventType.TOTP_VERIFICATION_PERFORMED,
+                {
+                    "account": "mail",
+                    "result": "failed",
+                },
+            )
+        )
+        logger.flush()
+
+        actions = [record["action"] for record in database.records]
+        self.assertIn("import_operation_completed", actions)
+        self.assertIn("panic_mode_activated", actions)
+        self.assertIn("totp_verification_performed", actions)
+        panic_record = next(record for record in database.records if record["action"] == "panic_mode_activated")
+        self.assertEqual(panic_record["severity"], "CRITICAL")
+        self.assertNotIn("Sensitive", panic_record["details"])
+
     def test_audit_logger_verifies_integrity_for_valid_chain(self):
         database = FakeAuditDatabase()
         logger = AuditLogger(database, self.event_bus, key_provider=lambda: b"a" * 32)

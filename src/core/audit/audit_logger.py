@@ -28,6 +28,7 @@ class AuditLogger:
         self._async_worker = None
         self._async_worker_error: Optional[Exception] = None
         self._last_retention_check_sequence = 0
+        self._integration_hooks: Dict[str, Dict[str, Any]] = {}
         if hasattr(self.database, "set_audit_protection_callback"):
             self.database.set_audit_protection_callback(self._record_protection_violation)
         if hasattr(self.database, "set_audit_entry_data_decoder"):
@@ -65,6 +66,29 @@ class AuditLogger:
 
     def verify_integrity(self, start_sequence: int = 0, limit: Optional[int] = None) -> Dict[str, Any]:
         return self.verifier.verify(start_sequence=start_sequence, limit=limit)
+
+    def register_integration_hook(
+        self,
+        name: str,
+        callback: Callable[[Dict[str, Any]], None],
+        *,
+        event_types: Optional[list[str]] = None,
+    ):
+        hook_name = str(name or "").strip()
+        if not hook_name:
+            raise ValueError("Integration hook name cannot be empty")
+        if not callable(callback):
+            raise TypeError("Integration hook callback must be callable")
+        normalized_event_types = None
+        if event_types is not None:
+            normalized_event_types = {str(event_type) for event_type in event_types}
+        self._integration_hooks[hook_name] = {
+            "callback": callback,
+            "event_types": normalized_event_types,
+        }
+
+    def unregister_integration_hook(self, name: str):
+        self._integration_hooks.pop(str(name or "").strip(), None)
 
     def _ensure_genesis_entry(self):
         if self._get_latest_entry() is not None:
@@ -166,6 +190,22 @@ class AuditLogger:
             )
             if apply_retention:
                 self._apply_retention_policy(sequence_number)
+            self._notify_integration_hooks(
+                {
+                    "sequence_number": sequence_number,
+                    "timestamp": timestamp,
+                    "event_type": event_type,
+                    "severity": severity,
+                    "user_id": user_id,
+                    "source": source,
+                    "entry_id": entry_id,
+                    "details": payload["details"],
+                    "previous_hash": previous_hash,
+                    "entry_hash": entry_hash,
+                    "signature": signature,
+                    "public_key": public_key,
+                }
+            )
             return record_id
 
     def _log_event(self, event):
@@ -319,9 +359,11 @@ class AuditLogger:
         )
 
     def _map_severity(self, event_type: str) -> str:
-        if event_type in {"clipboard_error", "audit_verification_failed"}:
+        if event_type in {"clipboard_error", "audit_verification_failed", "import_operation_failed"}:
             return "ERROR"
-        if event_type in {"user_login_failed", "settings_changed"}:
+        if event_type in {"panic_mode_activated"}:
+            return "CRITICAL"
+        if event_type in {"user_login_failed", "settings_changed", "totp_verification_performed"}:
             return "WARN"
         if "failed" in event_type or "suspicious" in event_type:
             return "WARN"
@@ -344,6 +386,12 @@ class AuditLogger:
             return "application"
         if event_type.startswith("vault_"):
             return "system"
+        if event_type.startswith("import_operation"):
+            return "data_import"
+        if event_type.startswith("panic_mode"):
+            return "panic_mode"
+        if event_type.startswith("totp_"):
+            return "totp"
         return "application"
 
     def _sanitize_details(self, details: Dict[str, Any]) -> Dict[str, Any]:
@@ -375,6 +423,29 @@ class AuditLogger:
 
     def _utc_now(self) -> str:
         return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    def _notify_integration_hooks(self, payload: Dict[str, Any]):
+        if not self._integration_hooks:
+            return
+        event_type = str(payload.get("event_type", ""))
+        for hook_name, hook in list(self._integration_hooks.items()):
+            event_types = hook.get("event_types")
+            if event_types is not None and event_type not in event_types:
+                continue
+            try:
+                hook["callback"](dict(payload))
+            except Exception as error:
+                if hasattr(self.database, "add_audit_security_event"):
+                    self.database.add_audit_security_event(
+                        "audit_integration_hook_failed",
+                        severity="WARN",
+                        details={
+                            "hook": hook_name,
+                            "event_type": event_type,
+                            "message": str(error),
+                        },
+                        related_sequence_number=payload.get("sequence_number"),
+                    )
 
     def _encrypt_entry_payload(self, entry_data: str) -> str:
         storage_key = self.signer.derive_storage_key()

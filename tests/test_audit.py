@@ -232,6 +232,48 @@ class TestAuditLogging(unittest.TestCase):
         )
         self.assertGreater(critical_record_id, 0)
 
+    def test_integration_hook_receives_signed_audit_payload_without_breaking_logging(self):
+        received_payloads = []
+        self.logger.register_integration_hook(
+            "siem",
+            lambda payload: received_payloads.append(payload),
+            event_types=["panic_mode_activated"],
+        )
+
+        record_id = self.logger.log_event(
+            event_type="panic_mode_activated",
+            severity="CRITICAL",
+            source="panic_mode",
+            details={"reason": "user_request", "secret": "Sensitive"},
+            user_id="local-user",
+            force_sync=True,
+        )
+
+        self.assertGreater(record_id, 0)
+        self.assertEqual(len(received_payloads), 1)
+        self.assertEqual(received_payloads[0]["event_type"], "panic_mode_activated")
+        self.assertEqual(received_payloads[0]["details"]["secret"], "[REDACTED]")
+        self.assertIn("entry_hash", received_payloads[0])
+
+    def test_integration_hook_failure_is_recorded_in_secure_log(self):
+        def failing_hook(_payload):
+            raise RuntimeError("hook unavailable")
+
+        self.logger.register_integration_hook("broken-hook", failing_hook)
+
+        self.logger.log_event(
+            event_type="totp_code_generated",
+            severity="INFO",
+            source="totp",
+            details={"account": "example"},
+            user_id="local-user",
+            force_sync=True,
+        )
+
+        security_events = self.database.get_audit_security_events(limit=1)
+        self.assertEqual(security_events[0]["event_type"], "audit_integration_hook_failed")
+        self.assertIn("broken-hook", security_events[0]["details"])
+
 
 if __name__ == "__main__":
     unittest.main()

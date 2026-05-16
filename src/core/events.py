@@ -26,6 +26,13 @@ class EventType(Enum):
     AUDIT_LOG_EXPORTED = "audit_log_exported"
     AUDIT_VERIFICATION_PASSED = "audit_verification_passed"
     AUDIT_VERIFICATION_FAILED = "audit_verification_failed"
+    IMPORT_OPERATION_STARTED = "import_operation_started"
+    IMPORT_OPERATION_COMPLETED = "import_operation_completed"
+    IMPORT_OPERATION_FAILED = "import_operation_failed"
+    PANIC_MODE_ACTIVATED = "panic_mode_activated"
+    PANIC_MODE_DEACTIVATED = "panic_mode_deactivated"
+    TOTP_CODE_GENERATED = "totp_code_generated"
+    TOTP_VERIFICATION_PERFORMED = "totp_verification_performed"
 
 
 class Event:
