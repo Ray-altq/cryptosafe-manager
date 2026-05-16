@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from src.core.import_export import ExportOptions, ImportValidationError, KeyExchangeService, SharePermissions
+from src.core.import_export import ExportOptions, ImportOptions, ImportValidationError, KeyExchangeService, SharePermissions
 from src.core.import_export.crypto import EXPORT_KEY_CONTEXT, SHARE_KEY_CONTEXT, derive_separated_key
 from src.core.import_export.exporter import VaultExporter
 from src.core.import_export.importer import VaultImporter
@@ -44,6 +44,21 @@ class FakeEntryManager:
 
     def get_entry(self, entry_id):
         return next(entry for entry in self.entries if entry["id"] == entry_id)
+
+    def create_entry(self, entry):
+        created = dict(entry)
+        created["id"] = max((item["id"] for item in self.entries), default=0) + 1
+        self.entries.append(created)
+        return created
+
+    def update_entry(self, entry_id, entry):
+        for index, existing in enumerate(self.entries):
+            if existing["id"] == entry_id:
+                updated = dict(existing)
+                updated.update(entry)
+                self.entries[index] = updated
+                return updated
+        raise KeyError(entry_id)
 
 
 class TestImportExportFoundation(unittest.TestCase):
@@ -140,6 +155,65 @@ class TestImportExportFoundation(unittest.TestCase):
 
         with self.assertRaises(ImportValidationError):
             service.parse_qr_payload(json.dumps(tampered))
+
+    def test_native_encrypted_json_export_import_roundtrip(self):
+        source_manager = FakeEntryManager()
+        target_manager = FakeEntryManager()
+        target_manager.entries = []
+        exporter = VaultExporter(source_manager, database=self.db)
+        importer = VaultImporter(target_manager, database=self.db)
+
+        exported = exporter.export_encrypted_json("ExportPassword!123", ExportOptions(compression=True))
+        preview = importer.preview_encrypted_json(exported, "ExportPassword!123")
+        result = importer.import_encrypted_json(
+            exported,
+            "ExportPassword!123",
+            ImportOptions(format="encrypted_json", mode="merge", duplicate_strategy="skip"),
+        )
+        history = self.db.get_import_export_history(limit=5)
+
+        self.assertEqual(len(preview), 2)
+        self.assertEqual(result["created"], 2)
+        self.assertEqual(target_manager.entries[0]["title"], "GitHub")
+        self.assertEqual(target_manager.entries[0]["password"], "Secret!123")
+        self.assertEqual(history[0]["operation_type"], "import")
+        self.assertEqual(history[1]["operation_type"], "export")
+
+    def test_native_encrypted_json_rejects_tampered_ciphertext_before_import(self):
+        exporter = VaultExporter(FakeEntryManager(), database=self.db)
+        importer = VaultImporter(FakeEntryManager(), database=self.db)
+        exported = json.loads(exporter.export_encrypted_json("ExportPassword!123"))
+        exported["data"]["ciphertext"] = exported["data"]["ciphertext"][:-4] + "AAAA"
+
+        with self.assertRaises(ImportValidationError):
+            importer.preview_encrypted_json(json.dumps(exported), "ExportPassword!123")
+
+    def test_native_encrypted_json_dry_run_does_not_create_entries(self):
+        target_manager = FakeEntryManager()
+        target_manager.entries = []
+        exported = VaultExporter(FakeEntryManager(), database=self.db).export_encrypted_json("ExportPassword!123")
+
+        result = VaultImporter(target_manager, database=self.db).import_encrypted_json(
+            exported,
+            "ExportPassword!123",
+            ImportOptions(format="encrypted_json", mode="dry-run"),
+        )
+
+        self.assertEqual(result["validated"], 2)
+        self.assertEqual(target_manager.entries, [])
+
+    def test_native_encrypted_json_duplicate_skip_avoids_second_copy(self):
+        manager = FakeEntryManager()
+        exported = VaultExporter(manager, database=self.db).export_encrypted_json("ExportPassword!123")
+
+        result = VaultImporter(manager, database=self.db).import_encrypted_json(
+            exported,
+            "ExportPassword!123",
+            ImportOptions(format="encrypted_json", mode="merge", duplicate_strategy="skip"),
+        )
+
+        self.assertEqual(result["skipped"], 2)
+        self.assertEqual(len(manager.entries), 2)
 
 
 if __name__ == "__main__":

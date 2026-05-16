@@ -1,6 +1,13 @@
+import base64
+import gzip
+import json
+from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, Optional
 
+from ..events import Event, EventType
+from .crypto import checksum, derive_password_key, encrypt_aes_gcm, new_salt_and_nonce
 from .models import ExportOptions
+from .formats import NativeJSONFormat
 
 
 class VaultExporter:
@@ -23,3 +30,97 @@ class VaultExporter:
             {key: value for key, value in dict(entry).items() if key in allowed}
             for entry in entries
         ]
+
+    def export_encrypted_json(self, password: str, options: Optional[ExportOptions] = None) -> str:
+        selected_options = options or ExportOptions()
+        entries = self.filter_entry_fields(
+            self.get_entries_for_export(selected_options),
+            selected_options.include_fields,
+        )
+        payload = {
+            "entries": [self._serialize_entry(entry) for entry in entries],
+            "entry_count": len(entries),
+        }
+        payload_bytes = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        compressed = bool(selected_options.compression)
+        if compressed:
+            payload_bytes = gzip.compress(payload_bytes)
+
+        salt, _ = new_salt_and_nonce()
+        key = derive_password_key(password, salt, bits=selected_options.encryption_strength)
+        nonce, ciphertext = encrypt_aes_gcm(payload_bytes, key)
+        package = {
+            "cryptosafe_export": True,
+            "format": NativeJSONFormat.name,
+            "version": NativeJSONFormat.version,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "metadata": {
+                "mode": "selected" if selected_options.entry_ids else "full",
+                "entry_count": len(entries),
+                "fields": selected_options.include_fields or "all",
+                "compressed": compressed,
+            },
+            "encryption": {
+                "algorithm": "AES-256-GCM" if selected_options.encryption_strength == 256 else "AES-128-GCM",
+                "kdf": "PBKDF2-HMAC-SHA256",
+                "iterations": 100000,
+                "salt": base64.b64encode(salt).decode("ascii"),
+                "nonce": base64.b64encode(nonce).decode("ascii"),
+            },
+            "data": {
+                "ciphertext": base64.b64encode(ciphertext).decode("ascii"),
+            },
+            "integrity": {
+                "checksum": checksum(ciphertext),
+                "payload_checksum": checksum(payload_bytes),
+            },
+        }
+        output = NativeJSONFormat().serialize_header(package)
+        self._record_history(
+            operation_type="export",
+            format="encrypted_json",
+            encryption_used=package["encryption"]["algorithm"],
+            entry_count=len(entries),
+            file_size=len(output.encode("utf-8")),
+            package_checksum=package["integrity"]["checksum"],
+            verification_status="created",
+            details=package["metadata"],
+        )
+        self._publish(EventType.EXPORT_OPERATION_COMPLETED, {"format": "encrypted_json", "entry_count": len(entries)})
+        return output
+
+    def _serialize_entry(self, entry: Dict[str, Any]) -> Dict[str, Any]:
+        safe_entry = dict(entry)
+        for key, value in list(safe_entry.items()):
+            if isinstance(value, datetime):
+                safe_entry[key] = value.isoformat()
+        return safe_entry
+
+    def _record_history(
+        self,
+        *,
+        operation_type: str,
+        format: str,
+        encryption_used: str,
+        entry_count: int,
+        file_size: int,
+        package_checksum: str,
+        verification_status: str,
+        details: Dict[str, Any],
+    ):
+        if self.database is None:
+            return
+        self.database.add_import_export_history(
+            operation_type=operation_type,
+            format=format,
+            encryption_used=encryption_used,
+            entry_count=entry_count,
+            file_size=file_size,
+            checksum=package_checksum,
+            verification_status=verification_status,
+            details=details,
+        )
+
+    def _publish(self, event_type: EventType, data: Dict[str, Any]):
+        if self.event_bus is not None:
+            self.event_bus.publish(Event(event_type, data))

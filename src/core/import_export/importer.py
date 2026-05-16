@@ -1,7 +1,14 @@
 import re
+import base64
+import gzip
+import json
+import time
 from typing import Any, Dict, Iterable, List
 
+from ..events import Event, EventType
+from .crypto import checksum, decrypt_aes_gcm, derive_password_key
 from .exceptions import ImportValidationError
+from .formats import NativeJSONFormat
 from .models import ImportOptions
 
 
@@ -29,6 +36,44 @@ class VaultImporter:
             validated.append(normalized)
         return validated
 
+    def preview_encrypted_json(self, package_payload: str | bytes, password: str, options: ImportOptions | None = None) -> List[Dict[str, Any]]:
+        import_options = options or ImportOptions(format="encrypted_json")
+        package = self._load_native_package(package_payload, import_options)
+        plaintext = self._decrypt_native_payload(package, password)
+        entries = self.validate_entries(plaintext.get("entries", []), import_options)
+        return entries
+
+    def import_encrypted_json(self, package_payload: str | bytes, password: str, options: ImportOptions | None = None) -> Dict[str, Any]:
+        started = time.monotonic()
+        import_options = options or ImportOptions(format="encrypted_json", mode="dry-run")
+        entries = self.preview_encrypted_json(package_payload, password, import_options)
+        result = {"validated": len(entries), "created": 0, "updated": 0, "skipped": 0, "mode": import_options.mode}
+        if import_options.mode == "dry-run":
+            self._record_history("import", "encrypted_json", "AES-GCM", len(entries), len(self._as_bytes(package_payload)), "dry-run", "validated", result)
+            self._publish(EventType.IMPORT_OPERATION_COMPLETED, result)
+            return result
+
+        existing = self._existing_entries_by_identity()
+        deadline = started + max(1, int(import_options.timeout_seconds))
+        for entry in entries:
+            if time.monotonic() > deadline:
+                raise ImportValidationError("Import timed out")
+            identity = self._identity(entry)
+            existing_entry = existing.get(identity)
+            if existing_entry and import_options.duplicate_strategy == "skip":
+                result["skipped"] += 1
+                continue
+            if existing_entry and import_options.duplicate_strategy == "replace":
+                self.entry_manager.update_entry(existing_entry["id"], entry)
+                result["updated"] += 1
+                continue
+            self.entry_manager.create_entry(entry)
+            result["created"] += 1
+
+        self._record_history("import", "encrypted_json", "AES-GCM", len(entries), len(self._as_bytes(package_payload)), "applied", "verified", result)
+        self._publish(EventType.IMPORT_OPERATION_COMPLETED, result)
+        return result
+
     def _sanitize_entry(self, entry: Dict[str, Any]) -> Dict[str, str]:
         normalized = {
             "title": self._sanitize_text(entry.get("title", "")),
@@ -47,3 +92,85 @@ class VaultImporter:
             if pattern.search(text):
                 raise ImportValidationError("Imported data contains blocked active content")
         return text
+
+    def _load_native_package(self, package_payload: str | bytes, options: ImportOptions) -> Dict[str, Any]:
+        payload_bytes = self._as_bytes(package_payload)
+        if len(payload_bytes) > max(1, int(options.max_file_size)):
+            raise ImportValidationError("Import file exceeds the maximum allowed size")
+        try:
+            package = NativeJSONFormat().deserialize_header(payload_bytes.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            raise ImportValidationError("Native export package is invalid JSON") from exc
+        NativeJSONFormat().validate_package(package)
+        ciphertext = self._decode_b64(package["data"].get("ciphertext", ""))
+        expected_checksum = str(package["integrity"].get("checksum", ""))
+        if checksum(ciphertext) != expected_checksum:
+            raise ImportValidationError("Native export checksum does not match")
+        return package
+
+    def _decrypt_native_payload(self, package: Dict[str, Any], password: str) -> Dict[str, Any]:
+        encryption = package["encryption"]
+        salt = self._decode_b64(encryption.get("salt", ""))
+        nonce = self._decode_b64(encryption.get("nonce", ""))
+        ciphertext = self._decode_b64(package["data"].get("ciphertext", ""))
+        bits = 128 if "128" in str(encryption.get("algorithm", "")) else 256
+        key = derive_password_key(password, salt, bits=bits, iterations=int(encryption.get("iterations", 100000)))
+        plaintext = decrypt_aes_gcm(ciphertext, key, nonce)
+        if checksum(plaintext) != str(package["integrity"].get("payload_checksum", "")):
+            raise ImportValidationError("Native export plaintext checksum does not match")
+        if package.get("metadata", {}).get("compressed"):
+            plaintext = gzip.decompress(plaintext)
+        try:
+            decoded = json.loads(plaintext.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ImportValidationError("Native export decrypted payload is invalid") from exc
+        if not isinstance(decoded, dict) or not isinstance(decoded.get("entries"), list):
+            raise ImportValidationError("Native export payload does not contain entries")
+        return decoded
+
+    def _decode_b64(self, value: str) -> bytes:
+        try:
+            return base64.b64decode(str(value).encode("ascii"), validate=True)
+        except Exception as exc:
+            raise ImportValidationError("Native export contains invalid base64 data") from exc
+
+    def _as_bytes(self, value: str | bytes) -> bytes:
+        if isinstance(value, bytes):
+            return value
+        return str(value).encode("utf-8")
+
+    def _existing_entries_by_identity(self) -> Dict[tuple[str, str], Dict[str, Any]]:
+        if not hasattr(self.entry_manager, "get_all_entries"):
+            return {}
+        return {self._identity(entry): entry for entry in self.entry_manager.get_all_entries()}
+
+    def _identity(self, entry: Dict[str, Any]) -> tuple[str, str]:
+        return (str(entry.get("title", "")).strip().lower(), str(entry.get("username", "")).strip().lower())
+
+    def _record_history(
+        self,
+        operation_type: str,
+        format: str,
+        encryption_used: str,
+        entry_count: int,
+        file_size: int,
+        checksum_value: str,
+        verification_status: str,
+        details: Dict[str, Any],
+    ):
+        if self.database is None:
+            return
+        self.database.add_import_export_history(
+            operation_type=operation_type,
+            format=format,
+            encryption_used=encryption_used,
+            entry_count=entry_count,
+            file_size=file_size,
+            checksum=checksum_value,
+            verification_status=verification_status,
+            details=details,
+        )
+
+    def _publish(self, event_type: EventType, data: Dict[str, Any]):
+        if self.event_bus is not None:
+            self.event_bus.publish(Event(event_type, data))

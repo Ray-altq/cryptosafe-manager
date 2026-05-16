@@ -3,8 +3,12 @@ import hmac
 import os
 from typing import Tuple
 
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+
+from .exceptions import ImportValidationError
 
 
 EXPORT_KEY_CONTEXT = b"cryptosafe-export-v1"
@@ -40,3 +44,16 @@ def checksum(data: bytes) -> str:
 
 def new_salt_and_nonce() -> Tuple[bytes, bytes]:
     return random_bytes(16), random_bytes(12)
+
+
+def encrypt_aes_gcm(plaintext: bytes, key: bytes, *, associated_data: bytes = b"") -> Tuple[bytes, bytes]:
+    nonce = random_bytes(12)
+    ciphertext = AESGCM(bytes(key)).encrypt(nonce, bytes(plaintext), bytes(associated_data))
+    return nonce, ciphertext
+
+
+def decrypt_aes_gcm(ciphertext: bytes, key: bytes, nonce: bytes, *, associated_data: bytes = b"") -> bytes:
+    try:
+        return AESGCM(bytes(key)).decrypt(bytes(nonce), bytes(ciphertext), bytes(associated_data))
+    except InvalidTag as exc:
+        raise ImportValidationError("Encrypted export failed authentication") from exc
