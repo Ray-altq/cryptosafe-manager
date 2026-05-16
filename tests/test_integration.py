@@ -5,7 +5,7 @@ import tempfile
 import tkinter as tk
 import tracemalloc
 import unittest
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -18,6 +18,7 @@ from src.core.crypto.key_derivation import KeyDerivation
 from src.core.crypto.key_storage import KeyStorage
 from src.core.crypto.placeholder import AES256Placeholder
 from src.core.crypto.password_validator import PasswordValidator
+from src.core.audit import AuditLogger as RealAuditLogger
 from src.core.key_manager import KeyManager
 from src.core.vault import AESGCMEncryptionService, EntryManager
 from src.database.db import Database
@@ -461,6 +462,12 @@ class TestMainWindowIntegration(IntegrationTestCase):
         self.assertEqual(window.db.get_setting("security.auto_lock_timeout_minutes"), 9)
         self.assertEqual(window.db.get_setting("security.key_cache_timeout_minutes"), 13)
         self.assertEqual(window.db.get_setting("crypto.key_derivation")["pbkdf2_iterations"], 180000)
+        self.assertIsInstance(window.audit_logger, RealAuditLogger)
+
+        window.audit_logger.flush()
+        audit_events = [log.event_type for log in window.db.get_audit_log_chain()]
+        self.assertIn("user_logged_in", audit_events)
+        self.assertIn("app_started", audit_events)
 
     def test_main_window_triggers_setup_for_uninitialized_vault(self):
         db_path = self.make_db_path("fresh.db")
@@ -488,6 +495,44 @@ class TestMainWindowIntegration(IntegrationTestCase):
         self.assertTrue(window.auth_service.is_initialized())
         self.assertTrue(window.auth_service.is_authenticated())
         self.assertEqual(window.db.db_path, db_path)
+
+    def test_audit_log_keeps_entry_events_when_vault_is_locked_immediately(self):
+        db_path = self.make_db_path("audit-lock.db")
+        config = Config()
+        config.set("database.path", db_path)
+
+        auth_service = self.make_auth_service(db_path)
+        password = "ValidMasterPass!9X"
+        auth_service.register_master_password(password)
+        auth_service.logout()
+
+        patchers = self._patch_window_chrome()
+        for patcher in patchers:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+        with patch("src.gui.main_window.simpledialog.askstring", return_value=password), patch(
+            "src.gui.main_window.messagebox.showerror"
+        ), patch("src.gui.main_window.messagebox.showwarning"):
+            window = MainWindow()
+            self.addCleanup(window._on_close)
+
+        window.entry_manager.create_entry(
+            {
+                "title": "Audit visible entry",
+                "username": "demo",
+                "password": "Secret!123",
+                "url": "https://example.com",
+                "notes": "",
+                "category": "",
+                "tags": "",
+            }
+        )
+        window._lock_vault(show_dialog=False)
+
+        audit_events = [log.event_type for log in window.db.get_audit_log_chain()]
+        self.assertIn("entry_added", audit_events)
+        self.assertIn("user_logged_out", audit_events)
 
 
 class TestMainWindowSearchAndFilter(IntegrationTestCase):
@@ -624,6 +669,47 @@ class TestMainWindowSearchAndFilter(IntegrationTestCase):
 
 
 class TestMainWindowDialogHelpers(IntegrationTestCase):
+    def test_collect_entry_form_reads_category_tags_and_clipboard_policy_from_dialog(self):
+        window = MainWindow.__new__(MainWindow)
+        window.password_generator = type("PasswordGenerator", (), {"is_strong_enough": lambda _self, _password: True})()
+
+        class Field:
+            def __init__(self, value):
+                self.value = value
+
+            def get(self):
+                return self.value
+
+        class TextField:
+            def get(self, _start, _end):
+                return "notes"
+
+        class BoolVar:
+            def get(self):
+                return True
+
+        dialog = type(
+            "Dialog",
+            (),
+            {
+                "category_entry": Field("Games"),
+                "tags_entry": Field("steam, launcher"),
+                "clipboard_policy_var": BoolVar(),
+                "password_was_generated": False,
+            },
+        )()
+
+        collected = window._collect_entry_form(
+            dialog,
+            Field("Steam"),
+            Field("ray"),
+            Field("StrongSecret!123"),
+            Field(""),
+            TextField(),
+        )
+
+        self.assertEqual(collected, ("Steam", "ray", "StrongSecret!123", "", "notes", "Games", "steam, launcher", "never"))
+
     def test_build_favicon_request_normalizes_host_and_builds_service_url(self):
         window = MainWindow.__new__(MainWindow)
 
@@ -1319,6 +1405,34 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
         sorted_logs = window._sort_audit_logs(logs, "severity", descending=True)
 
         self.assertEqual([log.sequence_number for log in sorted_logs], [2, 1, 3])
+
+    def test_sort_audit_logs_orders_by_sequence_number_for_latest_audit_events(self):
+        window = MainWindow.__new__(MainWindow)
+
+        class AuditLogRecord:
+            def __init__(self, sequence_number):
+                self.sequence_number = sequence_number
+                self.action = "entry_added"
+                self.event_type = "entry_added"
+                self.timestamp = datetime(2026, 5, 16, 20, 0, 0)
+                self.severity = "INFO"
+                self.user_id = "local-user"
+                self.source = "vault"
+                self.entry_id = sequence_number
+
+        logs = [AuditLogRecord(515), AuditLogRecord(526), AuditLogRecord(502)]
+
+        sorted_logs = window._sort_audit_logs(logs, "sequence_number", descending=True)
+
+        self.assertEqual([log.sequence_number for log in sorted_logs], [526, 515, 502])
+
+    def test_format_audit_timestamp_displays_aware_utc_as_local_time(self):
+        window = MainWindow.__new__(MainWindow)
+        timestamp = datetime(2026, 5, 16, 21, 2, 50, tzinfo=timezone.utc)
+
+        formatted = window._format_audit_timestamp(timestamp)
+
+        self.assertEqual(formatted, timestamp.astimezone().strftime("%Y-%m-%d %H:%M:%S"))
 
     def test_build_audit_event_frequency_orders_by_count_and_formats_labels(self):
         window = MainWindow.__new__(MainWindow)

@@ -209,6 +209,7 @@ class AuditLogger:
                 entry_data=self._encrypt_entry_payload(entry_data),
                 signature=signature,
                 public_key=public_key,
+                sequence_number=sequence_number,
             )
             if apply_retention:
                 self._apply_retention_policy(sequence_number)
@@ -248,7 +249,19 @@ class AuditLogger:
             source=self._map_source(event.type.value),
             details=details,
             entry_id=entry_id,
+            force_sync=self._requires_immediate_persistence(event.type.value),
         )
+
+    def _requires_immediate_persistence(self, event_type: str) -> bool:
+        return event_type in {
+            "user_logged_in",
+            "user_logged_out",
+            "entry_added",
+            "entry_updated",
+            "entry_deleted",
+            "vault_locked",
+            "vault_unlocked",
+        }
 
     def _build_config(self, config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         base_rotation_policy = {"enabled": True, "max_entries": 10000, "max_age_days": 365}

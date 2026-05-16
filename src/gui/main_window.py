@@ -24,6 +24,7 @@ from ..core.clipboard import (
     get_platform_validation_report,
 )
 from ..core.audit import (
+    AuditLogger,
     decrypt_export_package,
     encrypt_export_package,
     export_logs_to_cef,
@@ -37,7 +38,7 @@ from ..core.crypto.key_derivation import KeyDerivation
 from ..core.crypto.key_storage import KeyStorage
 from ..core.crypto.password_validator import PasswordValidator
 from ..core.crypto.placeholder import AES256Placeholder
-from ..core.events import AuditLogger, Event, EventType, event_bus
+from ..core.events import Event, EventType, event_bus
 from ..core.key_manager import KeyManager
 from ..core.state_manager import StateManager
 from ..core.vault import (
@@ -197,6 +198,22 @@ class MainWindow:
         self._startup_clipboard_recovery_performed = False
         self._startup_clipboard_recovery_failed = False
         self.db.set_setting(self.CLIPBOARD_RECOVERY_PENDING_KEY, True)
+
+    def _flush_audit_logger(self, *, warn: bool = False) -> bool:
+        if not hasattr(self, "audit_logger") or self.audit_logger is None:
+            return True
+        if not hasattr(self.audit_logger, "flush"):
+            return True
+        try:
+            self.audit_logger.flush()
+            return True
+        except Exception as error:
+            if warn:
+                self._show_warning(
+                    "Журнал аудита",
+                    f"Не удалось сразу записать последние события аудита: {error}",
+                )
+            return False
 
     def _run_startup_clipboard_recovery(self):
         if not getattr(self, "_startup_clipboard_recovery_pending", False):
@@ -725,6 +742,38 @@ class MainWindow:
         except tk.TclError:
             pass
         return widget
+
+    def _create_scrollable_dialog_body(self, dialog) -> ttk.Frame:
+        container = ttk.Frame(dialog, style="App.TFrame")
+        container.pack(fill=tk.BOTH, expand=True)
+
+        canvas = tk.Canvas(
+            container,
+            bg=self.UI_COLORS["bg"],
+            highlightthickness=0,
+            bd=0,
+        )
+        scrollbar = ttk.Scrollbar(container, orient=tk.VERTICAL, command=canvas.yview)
+        body = ttk.Frame(canvas, style="App.TFrame")
+        body_window = canvas.create_window((0, 0), window=body, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        def sync_scroll_region(_event=None):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def sync_body_width(event):
+            canvas.itemconfigure(body_window, width=event.width)
+
+        body.bind("<Configure>", sync_scroll_region)
+        canvas.bind("<Configure>", sync_body_width)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        return body
+
+    def _create_dialog_button_bar(self, dialog) -> ttk.Frame:
+        bar = ttk.Frame(dialog, style="App.TFrame")
+        bar.pack(fill=tk.X, padx=12, pady=(8, 12))
+        return bar
 
     def _on_focus_in(self, _event=None):
         self.state.set_application_active(True)
@@ -1531,55 +1580,57 @@ class MainWindow:
         dialog.transient(self.root)
         dialog.grab_set()
 
-        ttk.Label(dialog, text="Название").pack(anchor=tk.W, padx=8, pady=(8, 2))
-        title_entry = ttk.Entry(dialog, width=60)
+        body = self._create_scrollable_dialog_body(dialog)
+
+        ttk.Label(body, text="Название").pack(anchor=tk.W, padx=12, pady=(10, 2))
+        title_entry = ttk.Entry(body, width=60)
         title_entry.pack(fill=tk.X, padx=8, pady=2)
 
-        ttk.Label(dialog, text="Имя пользователя").pack(anchor=tk.W, padx=8, pady=(8, 2))
-        username_entry = ttk.Entry(dialog, width=60)
+        ttk.Label(body, text="Имя пользователя").pack(anchor=tk.W, padx=12, pady=(8, 2))
+        username_entry = ttk.Entry(body, width=60)
         username_entry.pack(fill=tk.X, padx=8, pady=2)
-        ttk.Label(dialog, text="Подсказка логина").pack(anchor=tk.W, padx=8, pady=(4, 2))
-        username_suggestion = ttk.Combobox(dialog, state="readonly", width=57, values=[])
+        ttk.Label(body, text="Подсказка логина").pack(anchor=tk.W, padx=12, pady=(4, 2))
+        username_suggestion = ttk.Combobox(body, state="readonly", width=57, values=[])
         username_suggestion.pack(fill=tk.X, padx=8, pady=(0, 2))
         username_suggestion.bind(
             "<<ComboboxSelected>>",
             lambda _event: self._apply_username_suggestion(username_entry, username_suggestion.get()),
         )
 
-        ttk.Label(dialog, text="Пароль").pack(anchor=tk.W, padx=8, pady=(8, 2))
-        password_entry = PasswordEntry(dialog, width=50)
+        ttk.Label(body, text="Пароль").pack(anchor=tk.W, padx=12, pady=(8, 2))
+        password_entry = PasswordEntry(body, width=50)
         password_entry.pack(fill=tk.X, padx=8, pady=2)
         ttk.Button(
-            dialog,
+            body,
             text="Сгенерировать пароль",
             command=lambda: self._open_password_generator_dialog(dialog, password_entry),
         ).pack(anchor=tk.E, padx=8, pady=(0, 4))
         strength_var = tk.StringVar(value="Сложность пароля: не задан")
-        ttk.Label(dialog, textvariable=strength_var).pack(anchor=tk.W, padx=8, pady=(0, 4))
+        ttk.Label(body, textvariable=strength_var).pack(anchor=tk.W, padx=12, pady=(0, 4))
 
-        ttk.Label(dialog, text="URL").pack(anchor=tk.W, padx=8, pady=(8, 2))
-        url_entry = ttk.Entry(dialog, width=60)
+        ttk.Label(body, text="URL").pack(anchor=tk.W, padx=12, pady=(8, 2))
+        url_entry = ttk.Entry(body, width=60)
         url_entry.pack(fill=tk.X, padx=8, pady=2)
         favicon_status = tk.StringVar(value="Иконка сайта: не выбрана")
-        favicon_label = ttk.Label(dialog, textvariable=favicon_status, compound=tk.LEFT)
-        favicon_label.pack(anchor=tk.W, padx=8, pady=(0, 4))
+        favicon_label = ttk.Label(body, textvariable=favicon_status, compound=tk.LEFT)
+        favicon_label.pack(anchor=tk.W, padx=12, pady=(0, 4))
 
-        ttk.Label(dialog, text="Категория").pack(anchor=tk.W, padx=8, pady=(8, 2))
-        category_entry = ttk.Entry(dialog, width=60)
+        ttk.Label(body, text="Категория").pack(anchor=tk.W, padx=12, pady=(8, 2))
+        category_entry = ttk.Entry(body, width=60)
         category_entry.pack(fill=tk.X, padx=8, pady=2)
-        ttk.Label(dialog, text="Теги").pack(anchor=tk.W, padx=8, pady=(8, 2))
-        tags_entry = ttk.Entry(dialog, width=60)
+        ttk.Label(body, text="Теги").pack(anchor=tk.W, padx=12, pady=(8, 2))
+        tags_entry = ttk.Entry(body, width=60)
         tags_entry.pack(fill=tk.X, padx=8, pady=2)
         clipboard_policy_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
-            dialog,
+            body,
             text="Запретить копирование этой записи в буфер обмена",
             variable=clipboard_policy_var,
-        ).pack(anchor=tk.W, padx=8, pady=(6, 2))
+        ).pack(anchor=tk.W, padx=12, pady=(6, 2))
 
-        ttk.Label(dialog, text="Заметки").pack(anchor=tk.W, padx=8, pady=(8, 2))
-        notes_text = self._style_text_widget(tk.Text(dialog, height=7, width=60))
-        notes_text.pack(fill=tk.BOTH, expand=True, padx=8, pady=2)
+        ttk.Label(body, text="Заметки").pack(anchor=tk.W, padx=12, pady=(8, 2))
+        notes_text = self._style_text_widget(tk.Text(body, height=7, width=60))
+        notes_text.pack(fill=tk.BOTH, expand=True, padx=8, pady=(2, 12))
 
         if entry:
             title_entry.insert(0, entry["title"])
@@ -1620,22 +1671,22 @@ class MainWindow:
         dialog.favicon_request_token = None
         dialog.username_suggestion = username_suggestion
         dialog.username_suggestion_after_id = None
+        dialog.button_bar = self._create_dialog_button_bar(dialog)
         self._schedule_favicon_preview(dialog, url_entry, delay_ms=0)
         self._schedule_username_suggestions(dialog, url_entry, username_entry, delay_ms=0)
         return dialog, title_entry, username_entry, password_entry, url_entry, notes_text
 
-    def _collect_entry_form(self, title_entry, username_entry, password_entry, url_entry, notes_text):
-        dialog = title_entry.master
+    def _collect_entry_form(self, dialog, title_entry, username_entry, password_entry, url_entry, notes_text):
         title = title_entry.get().strip()
         username = username_entry.get().strip()
         password = password_entry.get().strip()
         url = url_entry.get().strip()
-        category_entry = getattr(title_entry.master, "category_entry", None)
+        category_entry = getattr(dialog, "category_entry", None)
         category = category_entry.get().strip() if category_entry is not None else ""
-        tags_entry = getattr(title_entry.master, "tags_entry", None)
+        tags_entry = getattr(dialog, "tags_entry", None)
         tags = tags_entry.get().strip() if tags_entry is not None else ""
         notes = notes_text.get("1.0", tk.END).strip()
-        clipboard_policy_var = getattr(title_entry.master, "clipboard_policy_var", None)
+        clipboard_policy_var = getattr(dialog, "clipboard_policy_var", None)
         clipboard_policy = "never" if clipboard_policy_var is not None and clipboard_policy_var.get() else "allow"
 
         if not title or not password:
@@ -2197,7 +2248,7 @@ class MainWindow:
         def save():
             try:
                 title, username, password, url, notes, category, tags, clipboard_policy = self._collect_entry_form(
-                    title_entry, username_entry, password_entry, url_entry, notes_text
+                    dialog, title_entry, username_entry, password_entry, url_entry, notes_text
                 )
             except ValueError as error:
                 self._show_error("Ошибка", str(error), parent=dialog)
@@ -2217,7 +2268,7 @@ class MainWindow:
             )
             dialog.destroy()
 
-        ttk.Button(dialog, text="Сохранить", command=save).pack(pady=10)
+        ttk.Button(dialog.button_bar, text="Сохранить", style="Ghost.TButton", command=save).pack(side=tk.RIGHT)
 
     def edit_entry(self):
         entry = self._get_single_selected_entry("Изменить")
@@ -2233,7 +2284,7 @@ class MainWindow:
         def save():
             try:
                 title, username, password, url, notes, category, tags, clipboard_policy = self._collect_entry_form(
-                    title_entry, username_entry, password_entry, url_entry, notes_text
+                    dialog, title_entry, username_entry, password_entry, url_entry, notes_text
                 )
             except ValueError as error:
                 self._show_error("Ошибка", str(error), parent=dialog)
@@ -2254,7 +2305,7 @@ class MainWindow:
             )
             dialog.destroy()
 
-        ttk.Button(dialog, text="Сохранить изменения", command=save).pack(pady=10)
+        ttk.Button(dialog.button_bar, text="Сохранить изменения", style="Ghost.TButton", command=save).pack(side=tk.RIGHT)
 
     def delete_entry(self):
         selected_items = self.table.get_selected_items()
@@ -2547,13 +2598,25 @@ class MainWindow:
         return str(details or "")
 
     def _format_audit_log_line(self, log) -> str:
-        timestamp = log.timestamp.strftime("%Y-%m-%d %H:%M:%S") if log.timestamp else ""
+        timestamp = self._format_audit_timestamp(getattr(log, "timestamp", None))
         action_text = self._format_audit_action(log.action)
         details_text = self._format_audit_details(log.action, log.details)
         entry_text = f"entry={log.entry_id}" if log.entry_id is not None else "entry=-"
         if details_text:
             return f"{timestamp} | {action_text} | {entry_text} | {details_text}"
         return f"{timestamp} | {action_text} | {entry_text}"
+
+    def _format_audit_timestamp(self, timestamp) -> str:
+        if timestamp is None:
+            return ""
+        if isinstance(timestamp, str):
+            try:
+                timestamp = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            except ValueError:
+                return timestamp
+        if getattr(timestamp, "tzinfo", None) is not None:
+            timestamp = timestamp.astimezone()
+        return timestamp.strftime("%Y-%m-%d %H:%M:%S")
 
     def _build_audit_log_view_model(
         self,
@@ -2610,6 +2673,8 @@ class MainWindow:
         }
 
     def _get_audit_log_sort_value(self, log, sort_column: str):
+        if sort_column == "sequence_number":
+            return int(getattr(log, "sequence_number", 0) or 0)
         if sort_column == "timestamp":
             return getattr(log, "timestamp", datetime.min)
         if sort_column == "entry_id":
@@ -2639,7 +2704,8 @@ class MainWindow:
                 (
                     str(getattr(log, "sequence_number", getattr(log, "id", ""))),
                     (
-                        log.timestamp.strftime("%Y-%m-%d %H:%M:%S") if getattr(log, "timestamp", None) else "",
+                        getattr(log, "sequence_number", getattr(log, "id", "")),
+                        self._format_audit_timestamp(getattr(log, "timestamp", None)),
                         self._format_audit_action(log.action),
                         getattr(log, "severity", "INFO"),
                         getattr(log, "source", "unknown"),
@@ -2774,7 +2840,7 @@ class MainWindow:
 
         lines = [
             f"Последовательность: {getattr(log, 'sequence_number', '-')}",
-            f"Время: {getattr(log, 'timestamp', '')}",
+            f"Время: {self._format_audit_timestamp(getattr(log, 'timestamp', None))}",
             f"Событие: {getattr(log, 'event_type', getattr(log, 'action', ''))}",
             f"Серьёзность: {getattr(log, 'severity', 'INFO')}",
             f"Пользователь: {getattr(log, 'user_id', 'local-user')}",
@@ -2788,7 +2854,7 @@ class MainWindow:
         ]
         if getattr(log, "event_type", getattr(log, "action", "")) == "user_login_failed":
             lines.insert(10, f"IP: {parsed_details.get('ip', 'не указано')}")
-            lines.insert(11, f"Время неуспешной попытки: {getattr(log, 'timestamp', '')}")
+            lines.insert(11, f"Время неуспешной попытки: {self._format_audit_timestamp(getattr(log, 'timestamp', None))}")
         if parsed_details:
             for key, value in parsed_details.items():
                 lines.append(f"- {key}: {value}")
@@ -2826,7 +2892,7 @@ class MainWindow:
 
     def _build_failed_login_investigation_text(self, log) -> str:
         parsed_details = self._parse_audit_details(getattr(log, "details", ""))
-        timestamp = getattr(log, "timestamp", "")
+        timestamp = self._format_audit_timestamp(getattr(log, "timestamp", None))
         return (
             "Неуспешный вход\n"
             f"Время: {timestamp}\n"
@@ -3409,6 +3475,7 @@ class MainWindow:
         return export_success
 
     def show_logs(self):
+        self._flush_audit_logger(warn=True)
         dialog = tk.Toplevel(self.root)
         self._prepare_dialog(dialog)
         dialog.title("Журнал аудита")
@@ -3425,7 +3492,8 @@ class MainWindow:
         date_to_var = tk.StringVar()
         page_var = tk.IntVar(value=1)
         page_status_var = tk.StringVar(value="Страница 1 из 1")
-        sort_column_var = tk.StringVar(value="timestamp")
+        refresh_status_var = tk.StringVar(value="")
+        sort_column_var = tk.StringVar(value="sequence_number")
         sort_desc_var = tk.BooleanVar(value=True)
 
         ttk.Label(filter_frame, text="Поиск").grid(row=0, column=0, padx=4, pady=4, sticky="w")
@@ -3462,9 +3530,19 @@ class MainWindow:
         content.add(upper, weight=3)
         content.add(lower, weight=2)
 
-        columns = ("timestamp", "event_type", "severity", "source", "user_id", "entry_id")
+        ttk.Label(filter_frame, textvariable=refresh_status_var).grid(
+            row=3,
+            column=0,
+            columnspan=9,
+            padx=4,
+            pady=(0, 4),
+            sticky="w",
+        )
+
+        columns = ("sequence_number", "timestamp", "event_type", "severity", "source", "user_id", "entry_id")
         tree = ttk.Treeview(upper, columns=columns, show="headings", height=14, style="Vault.Treeview")
         headers = {
+            "sequence_number": "#",
             "timestamp": "Время",
             "event_type": "Событие",
             "severity": "Серьёзность",
@@ -3483,7 +3561,10 @@ class MainWindow:
 
         for key, label in headers.items():
             tree.heading(key, text=label, command=lambda column_name=key: toggle_sort(column_name))
-            tree.column(key, width=120 if key != "event_type" else 180, anchor="w")
+            if key == "sequence_number":
+                tree.column(key, width=72, anchor="e")
+            else:
+                tree.column(key, width=120 if key != "event_type" else 180, anchor="w")
         tree.pack(fill=tk.BOTH, expand=True)
 
         summary_frame = ttk.LabelFrame(lower, text="Статистика и целостность")
@@ -3509,6 +3590,7 @@ class MainWindow:
         pager.pack(fill=tk.X, padx=8, pady=(0, 8))
 
         def load_page(page: Optional[int] = None):
+            self._flush_audit_logger(warn=True)
             if page is not None:
                 page_var.set(max(1, int(page)))
             model = self._build_audit_log_view_model(
@@ -3529,7 +3611,18 @@ class MainWindow:
             for item_id, values in self._build_audit_tree_rows(sorted_logs):
                 tree.insert("", "end", iid=item_id, values=values)
             page_var.set(model["page"])
-            page_status_var.set(f"Страница {model['page']} из {model['total_pages']} | записей: {model['total_count']}")
+            latest_sequence = max(
+                (int(getattr(log, "sequence_number", 0) or 0) for log in sorted_logs),
+                default=0,
+            )
+            page_status_var.set(
+                f"Страница {model['page']} из {model['total_pages']} | "
+                f"записей: {model['total_count']} | последняя: {latest_sequence or '-'}"
+            )
+            refresh_status_var.set(
+                f"Обновлено: {datetime.now().strftime('%H:%M:%S')} | "
+                f"показана последняя запись #{latest_sequence or '-'}"
+            )
             details_text.config(state=tk.NORMAL)
             details_text.delete("1.0", tk.END)
             details_text.config(state=tk.DISABLED)
@@ -3541,6 +3634,20 @@ class MainWindow:
             dialog._audit_logs = {
                 str(getattr(log, "sequence_number", getattr(log, "id", ""))): log for log in sorted_logs
             }
+
+        def refresh_latest():
+            sort_column_var.set("sequence_number")
+            sort_desc_var.set(True)
+            load_page(1)
+
+        def reset_filters_and_refresh():
+            search_var.set("")
+            event_type_var.set("all")
+            severity_var.set("ALL")
+            user_var.set("")
+            date_from_var.set("")
+            date_to_var.set("")
+            refresh_latest()
 
         def on_select(_event=None):
             selected = tree.selection()
@@ -3593,14 +3700,17 @@ class MainWindow:
         tree.bind("<Button-3>", show_context_menu)
 
         ttk.Button(filter_frame, text="Применить", command=lambda: load_page(1)).grid(row=2, column=0, padx=4, pady=6, sticky="w")
-        ttk.Button(filter_frame, text="Проверить целостность", command=lambda: self.run_audit_verification(manual=True)).grid(row=2, column=1, padx=4, pady=6, sticky="w")
-        ttk.Button(filter_frame, text="Отчёт проверки", command=lambda: self.export_audit_verification_report()).grid(row=2, column=2, padx=4, pady=6, sticky="w")
-        ttk.Button(filter_frame, text="Экспорт JSON", command=lambda: export_current_view("json")).grid(row=2, column=3, padx=4, pady=6, sticky="w")
-        ttk.Button(filter_frame, text="Экспорт CSV", command=lambda: export_current_view("csv")).grid(row=2, column=4, padx=4, pady=6, sticky="w")
-        ttk.Button(filter_frame, text="Экспорт CEF", command=lambda: export_current_view("cef")).grid(row=2, column=5, padx=4, pady=6, sticky="w")
-        ttk.Button(filter_frame, text="Экспорт PDF", command=lambda: export_current_view("pdf")).grid(row=2, column=6, padx=4, pady=6, sticky="w")
+        ttk.Button(filter_frame, text="Обновить", command=refresh_latest).grid(row=2, column=1, padx=4, pady=6, sticky="w")
+        ttk.Button(filter_frame, text="Сбросить фильтры", command=reset_filters_and_refresh).grid(row=2, column=2, padx=4, pady=6, sticky="w")
+        ttk.Button(filter_frame, text="Проверить целостность", command=lambda: self.run_audit_verification(manual=True)).grid(row=2, column=3, padx=4, pady=6, sticky="w")
+        ttk.Button(filter_frame, text="Отчёт проверки", command=lambda: self.export_audit_verification_report()).grid(row=2, column=4, padx=4, pady=6, sticky="w")
+        ttk.Button(filter_frame, text="Экспорт JSON", command=lambda: export_current_view("json")).grid(row=2, column=5, padx=4, pady=6, sticky="w")
+        ttk.Button(filter_frame, text="Экспорт CSV", command=lambda: export_current_view("csv")).grid(row=2, column=6, padx=4, pady=6, sticky="w")
+        ttk.Button(filter_frame, text="Экспорт CEF", command=lambda: export_current_view("cef")).grid(row=2, column=7, padx=4, pady=6, sticky="w")
+        ttk.Button(filter_frame, text="Экспорт PDF", command=lambda: export_current_view("pdf")).grid(row=2, column=8, padx=4, pady=6, sticky="w")
         ttk.Button(pager, text="Назад", command=lambda: load_page(page_var.get() - 1)).pack(side=tk.LEFT, padx=4)
         ttk.Label(pager, textvariable=page_status_var).pack(side=tk.LEFT, padx=8)
+        ttk.Label(pager, textvariable=refresh_status_var).pack(side=tk.LEFT, padx=8)
         ttk.Button(pager, text="Вперёд", command=lambda: load_page(page_var.get() + 1)).pack(side=tk.LEFT, padx=4)
 
         load_page(1)
@@ -3943,12 +4053,14 @@ class MainWindow:
             self._show_error("Ошибка", str(error))
 
     def _lock_vault(self, show_dialog: bool = True):
+        self._flush_audit_logger()
+        event_bus.publish(Event(EventType.VAULT_LOCKED, {}))
+        self._flush_audit_logger()
         self.auth_service.logout()
         self.key_manager.clear_key()
         self.state.clear_clipboard()
         self._clear_system_clipboard()
         self._handle_clipboard_clear_failure()
-        event_bus.publish(Event(EventType.VAULT_LOCKED, {}))
         self._clear_sensitive_view_state()
         self._set_status("Заблокировано")
         if show_dialog:
@@ -3958,7 +4070,9 @@ class MainWindow:
                 self._load_entries()
 
     def _on_close(self):
+        self._flush_audit_logger()
         event_bus.publish(Event(EventType.APP_SHUTDOWN, {"component": "main_window"}))
+        self._flush_audit_logger()
         try:
             self.auth_service.logout()
         except Exception:

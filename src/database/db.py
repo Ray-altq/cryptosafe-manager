@@ -378,8 +378,112 @@ class Database:
 
     def _ensure_audit_hardening_schema(self, conn: sqlite3.Connection):
         self._create_audit_archive_schema(conn)
+        self._repair_missing_audit_sequence_numbers(conn)
+        self._repair_repeated_previous_hash_audit_rows(conn)
         self._create_audit_guards(conn)
         self._create_audit_security_schema(conn)
+
+    def _repair_missing_audit_sequence_numbers(self, conn: sqlite3.Connection):
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(audit_log)").fetchall()}
+        if "sequence_number" not in columns:
+            return
+
+        rows = conn.execute(
+            """
+            SELECT rowid AS audit_rowid
+            FROM audit_log
+            WHERE sequence_number IS NULL
+            ORDER BY COALESCE(timestamp, ''), rowid
+            """
+        ).fetchall()
+        if not rows:
+            return
+
+        self._drop_audit_guards(conn)
+        max_sequence = conn.execute(
+            "SELECT COALESCE(MAX(sequence_number), 0) AS max_sequence FROM audit_log"
+        ).fetchone()["max_sequence"]
+        next_sequence = int(max_sequence or 0) + 1
+        for row in rows:
+            conn.execute(
+                "UPDATE audit_log SET sequence_number = ? WHERE rowid = ?",
+                (next_sequence, row["audit_rowid"]),
+            )
+            next_sequence += 1
+
+    def _repair_repeated_previous_hash_audit_rows(self, conn: sqlite3.Connection):
+        rows = conn.execute(
+            """
+            SELECT rowid AS audit_rowid, *
+            FROM audit_log
+            WHERE sequence_number IS NOT NULL
+            ORDER BY sequence_number ASC
+            """
+        ).fetchall()
+        if len(rows) < 2:
+            return
+
+        repair_start_index = None
+        for index in range(1, len(rows)):
+            previous_row = rows[index - 1]
+            current_row = rows[index]
+            if current_row["previous_hash"] == previous_row["entry_hash"]:
+                continue
+            is_repeated_previous_hash = current_row["previous_hash"] == previous_row["previous_hash"]
+            is_signed_audit_row = current_row["signature"] != "legacy" and current_row["public_key"] != "legacy"
+            if is_repeated_previous_hash and is_signed_audit_row:
+                repair_start_index = index
+                break
+
+        if repair_start_index is None:
+            return
+
+        self._drop_audit_guards(conn)
+        previous_hash = rows[repair_start_index - 1]["entry_hash"]
+        for row in rows[repair_start_index:]:
+            details = self._parse_audit_details(row["details"])
+            payload = {
+                "timestamp": str(row["timestamp"] or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")),
+                "event_type": str(row["event_type"] or row["action"] or "legacy_event"),
+                "severity": str(row["severity"] or "INFO"),
+                "user_id": str(row["user_id"] or "local-user"),
+                "source": str(row["source"] or "sequence_repair"),
+                "entry_id": row["entry_id"],
+                "details": details,
+                "sequence_number": int(row["sequence_number"]),
+                "previous_hash": previous_hash,
+            }
+            entry_data = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+            entry_hash = self._compute_hash(entry_data)
+            conn.execute(
+                """
+                UPDATE audit_log
+                SET previous_hash = ?,
+                    entry_hash = ?,
+                    entry_data = ?,
+                    signature = ?,
+                    public_key = ?
+                WHERE rowid = ?
+                """,
+                (
+                    previous_hash,
+                    entry_hash,
+                    entry_data,
+                    "legacy",
+                    "legacy",
+                    row["audit_rowid"],
+                ),
+            )
+            previous_hash = entry_hash
+
+    def _parse_audit_details(self, raw_details: Any) -> Dict[str, Any]:
+        if isinstance(raw_details, dict):
+            return dict(raw_details)
+        try:
+            parsed = json.loads(str(raw_details or "{}"))
+            return parsed if isinstance(parsed, dict) else {"message": parsed}
+        except (TypeError, json.JSONDecodeError):
+            return {"legacy_details": str(raw_details or "")}
 
     def _create_audit_archive_schema(self, conn: sqlite3.Connection):
         conn.execute(
@@ -436,6 +540,10 @@ class Database:
             END
             """
         )
+
+    def _drop_audit_guards(self, conn: sqlite3.Connection):
+        conn.execute("DROP TRIGGER IF EXISTS trg_audit_log_no_update")
+        conn.execute("DROP TRIGGER IF EXISTS trg_audit_log_no_delete")
 
     def add_entry(self, entry: VaultEntry) -> int:
         with self._get_connection() as conn:
@@ -517,11 +625,20 @@ class Database:
         entry_data: str = "",
         signature: str = "",
         public_key: str = "",
+        sequence_number: Optional[int] = None,
     ) -> int:
+        if sequence_number is None:
+            with self._get_connection() as conn:
+                row = conn.execute(
+                    "SELECT COALESCE(MAX(sequence_number), 0) AS max_sequence FROM audit_log"
+                ).fetchone()
+                sequence_number = int(row["max_sequence"] or 0) + 1
+
         with self._get_connection() as conn:
             cursor = conn.execute(
                 """
                 INSERT INTO audit_log (
+                    sequence_number,
                     timestamp,
                     event_type,
                     severity,
@@ -536,9 +653,10 @@ class Database:
                     signature,
                     public_key
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
+                    sequence_number,
                     timestamp.isoformat(),
                     event_type or action,
                     severity,

@@ -273,6 +273,155 @@ class TestDatabase(unittest.TestCase):  #класс для тестирован�
             except OSError:
                 pass
 
+    def test_existing_v5_audit_rows_with_missing_sequence_are_repaired(self):
+        legacy_temp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        legacy_temp.close()
+
+        import sqlite3
+
+        legacy_conn = sqlite3.connect(legacy_temp.name)
+        try:
+            conn = legacy_conn
+            conn.execute("PRAGMA user_version = 5")
+            conn.execute(
+                """
+                CREATE TABLE audit_log (
+                    sequence_number INTEGER,
+                    timestamp TIMESTAMP NOT NULL,
+                    event_type TEXT NOT NULL,
+                    severity TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    entry_id INTEGER,
+                    details TEXT,
+                    action TEXT NOT NULL,
+                    previous_hash TEXT NOT NULL,
+                    entry_hash TEXT NOT NULL,
+                    entry_data BLOB NOT NULL,
+                    signature TEXT NOT NULL,
+                    public_key TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO audit_log (
+                    sequence_number, timestamp, event_type, severity, user_id, source,
+                    entry_id, details, action, previous_hash, entry_hash, entry_data,
+                    signature, public_key
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    7,
+                    "2026-04-07T10:00:00",
+                    "legacy_event",
+                    "INFO",
+                    "local-user",
+                    "legacy_migration",
+                    None,
+                    "{}",
+                    "legacy_event",
+                    "0" * 64,
+                    "a" * 64,
+                    "{}",
+                    "legacy",
+                    "legacy",
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO audit_log (
+                    timestamp, event_type, severity, user_id, source,
+                    entry_id, details, action, previous_hash, entry_hash, entry_data,
+                    signature, public_key
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "2026-05-16T20:15:19+00:00",
+                    "entry_added",
+                    "INFO",
+                    "local-user",
+                    "vault",
+                    12,
+                    "{}",
+                    "entry_added",
+                    "a" * 64,
+                    "b" * 64,
+                    "{}",
+                    "signature",
+                    "public",
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO audit_log (
+                    timestamp, event_type, severity, user_id, source,
+                    entry_id, details, action, previous_hash, entry_hash, entry_data,
+                    signature, public_key
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "2026-05-16T20:15:30+00:00",
+                    "user_logged_out",
+                    "INFO",
+                    "local-user",
+                    "authentication",
+                    None,
+                    "{}",
+                    "user_logged_out",
+                    "a" * 64,
+                    "c" * 64,
+                    "{}",
+                    "signature",
+                    "public",
+                ),
+            )
+            conn.commit()
+        finally:
+            legacy_conn.close()
+
+        migrated = Database(legacy_temp.name)
+        try:
+            migrated.add_audit_log(
+                "user_logged_out",
+                datetime.now(),
+                details="{}",
+                event_type="user_logged_out",
+                severity="INFO",
+                user_id="local-user",
+                source="authentication",
+                previous_hash="b" * 64,
+                entry_hash="c" * 64,
+                entry_data="{}",
+                signature="signature",
+                public_key="public",
+            )
+            with migrated._get_connection() as conn:
+                null_count = conn.execute(
+                    "SELECT COUNT(*) AS total FROM audit_log WHERE sequence_number IS NULL"
+                ).fetchone()["total"]
+                rows = conn.execute(
+                    "SELECT sequence_number, event_type, previous_hash, entry_hash, signature FROM audit_log ORDER BY sequence_number DESC"
+                ).fetchall()
+
+            self.assertEqual(null_count, 0)
+            self.assertEqual(
+                [row["event_type"] for row in rows[:4]],
+                ["user_logged_out", "user_logged_out", "entry_added", "legacy_event"],
+            )
+            self.assertEqual([row["sequence_number"] for row in rows[:4]], [10, 9, 8, 7])
+            self.assertEqual(rows[1]["signature"], "legacy")
+            self.assertEqual(rows[1]["previous_hash"], rows[2]["entry_hash"])
+        finally:
+            migrated.close()
+            try:
+                os.unlink(legacy_temp.name)
+            except OSError:
+                pass
+
     def test_connection_pool_reuses_connections_between_requests(self):
         with self.db._get_connection() as first_conn:
             first_id = id(first_conn)
