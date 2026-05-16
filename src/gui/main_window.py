@@ -25,6 +25,7 @@ from ..core.clipboard import (
 from ..core.audit import (
     decrypt_export_package,
     encrypt_export_package,
+    export_logs_to_cef,
     export_logs_to_csv,
     export_logs_to_json,
     export_logs_to_pdf,
@@ -2697,6 +2698,8 @@ class MainWindow:
             return export_logs_to_json(logs, public_key=public_key)
         if normalized_format == "csv":
             return export_logs_to_csv(logs)
+        if normalized_format == "cef":
+            return export_logs_to_cef(logs)
         if normalized_format == "pdf":
             return export_logs_to_pdf(logs)
         raise ValueError(f"Unsupported audit export format: {export_format}")
@@ -2758,7 +2761,7 @@ class MainWindow:
         raw_formats = normalized.get("formats", ["json"])
         if not isinstance(raw_formats, list):
             raw_formats = ["json"]
-        normalized_formats = [str(item).strip().lower() for item in raw_formats if str(item).strip().lower() in {"json", "csv", "pdf"}]
+        normalized_formats = [str(item).strip().lower() for item in raw_formats if str(item).strip().lower() in {"json", "csv", "cef", "pdf"}]
         normalized["formats"] = normalized_formats or ["json"]
         normalized["export_directory"] = str(normalized.get("export_directory", default_directory) or default_directory)
         raw_max_age_days = normalized.get("max_age_days", default_policy["max_age_days"])
@@ -2775,7 +2778,7 @@ class MainWindow:
         self.db.set_setting("audit.export_schedule_policy", dict(policy))
 
     def _build_scheduled_audit_export_path(self, export_directory: str, export_format: str, exported_at: datetime) -> str:
-        extension_map = {"json": ".json", "csv": ".csv", "pdf": ".pdf"}
+        extension_map = {"json": ".json", "csv": ".csv", "cef": ".cef", "pdf": ".pdf"}
         timestamp = exported_at.strftime("%Y%m%d-%H%M%S")
         filename = f"audit-log-{timestamp}{extension_map.get(export_format, '.txt')}"
         return os.path.join(export_directory, filename)
@@ -2902,6 +2905,7 @@ class MainWindow:
         extension_map = {
             "json": ".json",
             "csv": ".csv",
+            "cef": ".cef",
             "pdf": ".pdf",
         }
         target_path = filedialog.asksaveasfilename(
@@ -2911,6 +2915,7 @@ class MainWindow:
             filetypes=[
                 ("JSON", "*.json"),
                 ("CSV", "*.csv"),
+                ("CEF", "*.cef"),
                 ("PDF", "*.pdf"),
                 ("Все файлы", "*.*"),
             ],
@@ -3396,7 +3401,8 @@ class MainWindow:
         ttk.Button(filter_frame, text="Отчёт проверки", command=lambda: self.export_audit_verification_report()).grid(row=2, column=2, padx=4, pady=6, sticky="w")
         ttk.Button(filter_frame, text="Экспорт JSON", command=lambda: export_current_view("json")).grid(row=2, column=3, padx=4, pady=6, sticky="w")
         ttk.Button(filter_frame, text="Экспорт CSV", command=lambda: export_current_view("csv")).grid(row=2, column=4, padx=4, pady=6, sticky="w")
-        ttk.Button(filter_frame, text="Экспорт PDF", command=lambda: export_current_view("pdf")).grid(row=2, column=5, padx=4, pady=6, sticky="w")
+        ttk.Button(filter_frame, text="Экспорт CEF", command=lambda: export_current_view("cef")).grid(row=2, column=5, padx=4, pady=6, sticky="w")
+        ttk.Button(filter_frame, text="Экспорт PDF", command=lambda: export_current_view("pdf")).grid(row=2, column=6, padx=4, pady=6, sticky="w")
         ttk.Button(pager, text="Назад", command=lambda: load_page(page_var.get() - 1)).pack(side=tk.LEFT, padx=4)
         ttk.Label(pager, textvariable=page_status_var).pack(side=tk.LEFT, padx=8)
         ttk.Button(pager, text="Вперёд", command=lambda: load_page(page_var.get() + 1)).pack(side=tk.LEFT, padx=4)

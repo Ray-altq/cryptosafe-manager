@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from src.core.audit import AuditLogger, AuditLogVerifier, export_logs_to_json, import_logs_from_json
+from src.core.audit import AuditLogger, AuditLogVerifier, export_logs_to_cef, export_logs_to_json, import_logs_from_json
 from src.core.events import EventBus
 from src.database.db import Database
 
@@ -124,6 +124,18 @@ class TestAuditLogging(unittest.TestCase):
                 os.unlink(imported_temp.name)
             except OSError:
                 pass
+
+    def test_cef_export_contains_standard_header_and_extensions(self):
+        self._generate_logs(2)
+        logs = self.database.get_audit_log_chain()
+
+        cef_payload = export_logs_to_cef(logs)
+        first_line = cef_payload.splitlines()[0]
+
+        self.assertTrue(first_line.startswith("CEF:0|CryptoSafe|Manager|5|"))
+        self.assertIn("rt=", first_line)
+        self.assertIn("suser=", first_line)
+        self.assertIn("cn1Label=sequence_number", first_line)
 
     def test_failure_recovery_test_reports_database_corruption_gracefully(self):
         self._generate_logs(5)

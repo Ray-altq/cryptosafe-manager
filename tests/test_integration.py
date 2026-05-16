@@ -1659,6 +1659,32 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
         self.assertIn('"event_type": "settings_changed"', payload)
         self.assertIn('"entries"', payload)
 
+    def test_build_audit_export_payload_supports_cef_format(self):
+        window = MainWindow.__new__(MainWindow)
+        window.audit_logger = FakeAuditLogger()
+        window.audit_logger.signer = type("Signer", (), {"public_key_hex": "cafebabe"})()
+
+        class AuditLogRecord:
+            sequence_number = 3
+            timestamp = datetime(2026, 5, 12, 10, 0, 0)
+            action = "settings_changed"
+            event_type = "settings_changed"
+            severity = "WARN"
+            user_id = "local-user"
+            source = "configuration"
+            entry_id = None
+            details = '{"scope":"security"}'
+            previous_hash = "a" * 64
+            entry_hash = "b" * 64
+            signature = "deadbeef"
+            public_key = "cafebabe"
+
+        payload = window._build_audit_export_payload([AuditLogRecord()], "cef")
+
+        self.assertTrue(payload.startswith("CEF:0|CryptoSafe|Manager|5|"))
+        self.assertIn("cs1Label=source", payload)
+        self.assertIn("msg=", payload)
+
     def test_encrypt_and_decrypt_audit_export_payload_roundtrip(self):
         key_manager = FakeKeyManager()
         window = MainWindow.__new__(MainWindow)
@@ -1736,7 +1762,7 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
                 return {
                     "enabled": True,
                     "interval_seconds": 60,
-                    "formats": ["json", "pdf", "invalid"],
+                    "formats": ["json", "cef", "pdf", "invalid"],
                     "export_directory": "C:/exports",
                     "max_age_days": 0,
                     "max_files": 0,
@@ -1751,7 +1777,7 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
         self.assertEqual(window.db.requested_key, "audit.export_schedule_policy")
         self.assertTrue(policy["enabled"])
         self.assertEqual(policy["interval_seconds"], 300)
-        self.assertEqual(policy["formats"], ["json", "pdf"])
+        self.assertEqual(policy["formats"], ["json", "cef", "pdf"])
         self.assertEqual(policy["max_age_days"], 1)
         self.assertEqual(policy["max_files"], 1)
         self.assertFalse(policy["include_verification_report"])

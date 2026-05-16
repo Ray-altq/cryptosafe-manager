@@ -69,6 +69,37 @@ def export_logs_to_pdf(logs: Iterable, title: str = "CryptoSafe Audit Report") -
     return pdf.encode("utf-8")
 
 
+def export_logs_to_cef(logs: Iterable, device_vendor: str = "CryptoSafe", device_product: str = "Manager") -> str:
+    lines = []
+    for log in logs:
+        payload = serialize_log(log)
+        event_type = str(payload["event_type"] or "audit_event")
+        severity = _map_cef_severity(str(payload["severity"] or "INFO"))
+        details = _normalize_cef_details(payload.get("details", ""))
+        extensions = {
+            "rt": payload["timestamp"],
+            "suser": payload["user_id"],
+            "cs1Label": "source",
+            "cs1": payload["source"],
+            "cn1Label": "sequence_number",
+            "cn1": payload["sequence_number"],
+            "cs2Label": "previous_hash",
+            "cs2": payload["previous_hash"],
+            "cs3Label": "entry_hash",
+            "cs3": payload["entry_hash"],
+            "deviceCustomNumber1Label": "entry_id",
+            "deviceCustomNumber1": payload["entry_id"] if payload["entry_id"] is not None else "",
+            "msg": details,
+        }
+        line = (
+            f"CEF:0|{_escape_cef_header(device_vendor)}|{_escape_cef_header(device_product)}|5|"
+            f"{_escape_cef_header(event_type)}|{_escape_cef_header(event_type)}|{severity}|"
+            f"{_format_cef_extensions(extensions)}"
+        )
+        lines.append(line)
+    return "\n".join(lines)
+
+
 def serialize_log(log) -> dict:
     timestamp = getattr(log, "timestamp", "")
     if hasattr(timestamp, "isoformat"):
@@ -151,3 +182,31 @@ def decrypt_export_package(
         "payload": plaintext,
         "content_format": metadata.get("content_format", ""),
     }
+
+
+def _map_cef_severity(severity: str) -> int:
+    mapping = {"INFO": 3, "WARN": 5, "ERROR": 8, "CRITICAL": 10}
+    return mapping.get(str(severity or "").upper(), 3)
+
+
+def _normalize_cef_details(details) -> str:
+    if isinstance(details, dict):
+        return json.dumps(details, ensure_ascii=False, sort_keys=True)
+    return str(details or "")
+
+
+def _escape_cef_header(value: str) -> str:
+    return str(value or "").replace("\\", "\\\\").replace("|", "\\|")
+
+
+def _escape_cef_extension(value) -> str:
+    return str(value or "").replace("\\", "\\\\").replace("=", "\\=").replace("\n", "\\n").replace("\r", "")
+
+
+def _format_cef_extensions(extensions: dict) -> str:
+    parts = []
+    for key, value in extensions.items():
+        if value == "":
+            continue
+        parts.append(f"{key}={_escape_cef_extension(value)}")
+    return " ".join(parts)
