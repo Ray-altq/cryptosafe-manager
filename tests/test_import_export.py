@@ -3,7 +3,7 @@ import os
 import sys
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -293,6 +293,71 @@ class TestImportExportFoundation(unittest.TestCase):
 
         self.assertEqual(result["validated"], 1)
         self.assertEqual(manager.entries, [])
+
+    def test_password_share_package_roundtrips_and_records_metadata(self):
+        self.db.add_entry(self.entry)
+        source_manager = FakeEntryManager()
+        target_manager = FakeEntryManager()
+        target_manager.entries = []
+        service = SharingService(source_manager, database=self.db)
+
+        package = service.create_password_share_package(
+            entry_id=1,
+            recipient="student@example.test",
+            password="SharePassword!123",
+            permissions=SharePermissions(read=True, edit=False, expires_in_days=2),
+        )
+        preview = SharingService(target_manager, database=self.db).preview_password_share_package(
+            package,
+            "SharePassword!123",
+        )
+        result = SharingService(target_manager, database=self.db).import_password_share_package(
+            package,
+            "SharePassword!123",
+        )
+        shares = self.db.get_shared_entries(limit=5)
+
+        self.assertEqual(preview["entry"]["title"], "GitHub")
+        self.assertEqual(preview["entry"]["password"], "Secret!123")
+        self.assertNotIn("id", preview["entry"])
+        self.assertEqual(result["created"], 1)
+        self.assertEqual(target_manager.entries[0]["title"], "GitHub")
+        self.assertEqual(shares[0]["recipient_info"], "student@example.test")
+        self.assertEqual(shares[0]["package_checksum"], json.loads(package)["integrity"]["checksum"])
+
+    def test_password_share_package_rejects_tampering_before_decrypt(self):
+        self.db.add_entry(self.entry)
+        package = json.loads(
+            SharingService(FakeEntryManager(), database=self.db).create_password_share_package(
+                entry_id=1,
+                recipient="student@example.test",
+                password="SharePassword!123",
+            )
+        )
+        package["data"]["ciphertext"] = package["data"]["ciphertext"][:-4] + "AAAA"
+
+        with self.assertRaises(ImportValidationError):
+            SharingService(FakeEntryManager()).preview_password_share_package(
+                json.dumps(package),
+                "SharePassword!123",
+            )
+
+    def test_password_share_package_rejects_expired_package(self):
+        self.db.add_entry(self.entry)
+        package = json.loads(
+            SharingService(FakeEntryManager(), database=self.db).create_password_share_package(
+                entry_id=1,
+                recipient="student@example.test",
+                password="SharePassword!123",
+            )
+        )
+        package["metadata"]["expires_at"] = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+
+        with self.assertRaises(ImportValidationError):
+            SharingService(FakeEntryManager()).preview_password_share_package(
+                json.dumps(package),
+                "SharePassword!123",
+            )
 
 
 if __name__ == "__main__":
