@@ -11,7 +11,7 @@ from .models import AuditLog, KeyStore, VaultEntry
 
 
 class Database:
-    SCHEMA_VERSION = 5
+    SCHEMA_VERSION = 6
 
     def __init__(self, db_path: str = "cryptosafe.db", pool_size: int = 4):
         self.db_path = db_path
@@ -99,8 +99,12 @@ class Database:
                 if version == 4:
                     self._migrate_v4_to_v5(conn)
                     version = 5
+                if version == 5:
+                    self._migrate_v5_to_v6(conn)
+                    version = 6
                 conn.execute(f"PRAGMA user_version = {max(version, self.SCHEMA_VERSION)}")
             self._ensure_audit_hardening_schema(conn)
+            self._ensure_import_export_schema(conn)
 
     def _create_schema(self, conn: sqlite3.Connection):
         conn.execute(
@@ -205,6 +209,7 @@ class Database:
             """
         )
         conn.execute("CREATE UNIQUE INDEX idx_key_store_type ON key_store(key_type)")
+        self._create_import_export_schema(conn)
 
     def _migrate_v1_to_v2(self, conn: sqlite3.Connection):
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(key_store)").fetchall()}
@@ -376,12 +381,76 @@ class Database:
         self._create_audit_archive_schema(conn)
         self._create_audit_guards(conn)
 
+    def _migrate_v5_to_v6(self, conn: sqlite3.Connection):
+        self._create_import_export_schema(conn)
+
     def _ensure_audit_hardening_schema(self, conn: sqlite3.Connection):
         self._create_audit_archive_schema(conn)
         self._repair_missing_audit_sequence_numbers(conn)
         self._repair_repeated_previous_hash_audit_rows(conn)
         self._create_audit_guards(conn)
         self._create_audit_security_schema(conn)
+
+    def _ensure_import_export_schema(self, conn: sqlite3.Connection):
+        self._create_import_export_schema(conn)
+
+    def _create_import_export_schema(self, conn: sqlite3.Connection):
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS shared_entries (
+                share_id TEXT PRIMARY KEY,
+                original_entry_id INTEGER,
+                encryption_method TEXT NOT NULL,
+                recipient_info TEXT NOT NULL,
+                permissions TEXT NOT NULL,
+                shared_at TIMESTAMP NOT NULL,
+                expires_at TIMESTAMP NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                package_checksum TEXT,
+                FOREIGN KEY(original_entry_id) REFERENCES vault_entries(id) ON DELETE SET NULL
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_shared_entries_original_entry_id ON shared_entries(original_entry_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_shared_entries_expires_at ON shared_entries(expires_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_shared_entries_status ON shared_entries(status)")
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS import_export_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                operation_type TEXT NOT NULL,
+                format TEXT NOT NULL,
+                encryption_used TEXT NOT NULL,
+                entry_count INTEGER NOT NULL DEFAULT 0,
+                file_size INTEGER NOT NULL DEFAULT 0,
+                checksum TEXT NOT NULL,
+                verification_status TEXT NOT NULL,
+                created_at TIMESTAMP NOT NULL,
+                details TEXT NOT NULL DEFAULT '{}'
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_import_export_history_created_at ON import_export_history(created_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_import_export_history_operation ON import_export_history(operation_type)")
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS contacts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                identifier TEXT NOT NULL UNIQUE,
+                public_key TEXT NOT NULL,
+                key_fingerprint TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at TIMESTAMP NOT NULL,
+                last_used_at TIMESTAMP,
+                revoked_at TIMESTAMP
+            )
+            """
+        )
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_contacts_identifier ON contacts(identifier)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_contacts_fingerprint ON contacts(key_fingerprint)")
 
     def _repair_missing_audit_sequence_numbers(self, conn: sqlite3.Connection):
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(audit_log)").fetchall()}
@@ -1114,6 +1183,187 @@ class Database:
                         str(entry.get("public_key", "") or ""),
                     ),
                 )
+
+    def add_shared_entry(
+        self,
+        *,
+        share_id: str,
+        original_entry_id: Optional[int],
+        encryption_method: str,
+        recipient_info: str,
+        permissions: Dict[str, Any],
+        shared_at: datetime,
+        expires_at: datetime,
+        status: str = "active",
+        package_checksum: str = "",
+    ):
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO shared_entries (
+                    share_id,
+                    original_entry_id,
+                    encryption_method,
+                    recipient_info,
+                    permissions,
+                    shared_at,
+                    expires_at,
+                    status,
+                    package_checksum
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(share_id),
+                    original_entry_id,
+                    str(encryption_method),
+                    str(recipient_info),
+                    json.dumps(permissions or {}, ensure_ascii=False, sort_keys=True),
+                    shared_at.isoformat(),
+                    expires_at.isoformat(),
+                    str(status or "active"),
+                    str(package_checksum or ""),
+                ),
+            )
+
+    def get_shared_entries(self, *, limit: int = 100, status: str = "") -> List[Dict[str, Any]]:
+        query = "SELECT * FROM shared_entries"
+        params: List[Any] = []
+        normalized_status = str(status or "").strip()
+        if normalized_status:
+            query += " WHERE status = ?"
+            params.append(normalized_status)
+        query += " ORDER BY shared_at DESC LIMIT ?"
+        params.append(max(1, int(limit)))
+        with self._get_connection() as conn:
+            return [dict(row) for row in conn.execute(query, tuple(params)).fetchall()]
+
+    def add_import_export_history(
+        self,
+        *,
+        operation_type: str,
+        format: str,
+        encryption_used: str,
+        entry_count: int,
+        file_size: int,
+        checksum: str,
+        verification_status: str,
+        details: Optional[Dict[str, Any]] = None,
+        created_at: Optional[datetime] = None,
+    ) -> int:
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO import_export_history (
+                    operation_type,
+                    format,
+                    encryption_used,
+                    entry_count,
+                    file_size,
+                    checksum,
+                    verification_status,
+                    created_at,
+                    details
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(operation_type),
+                    str(format),
+                    str(encryption_used),
+                    max(0, int(entry_count)),
+                    max(0, int(file_size)),
+                    str(checksum),
+                    str(verification_status),
+                    (created_at or datetime.now(timezone.utc)).isoformat(),
+                    json.dumps(details or {}, ensure_ascii=False, sort_keys=True),
+                ),
+            )
+            return int(cursor.lastrowid)
+
+    def get_import_export_history(self, *, limit: int = 100, operation_type: str = "") -> List[Dict[str, Any]]:
+        query = "SELECT * FROM import_export_history"
+        params: List[Any] = []
+        normalized_operation = str(operation_type or "").strip()
+        if normalized_operation:
+            query += " WHERE operation_type = ?"
+            params.append(normalized_operation)
+        query += " ORDER BY created_at DESC, id DESC LIMIT ?"
+        params.append(max(1, int(limit)))
+        with self._get_connection() as conn:
+            return [dict(row) for row in conn.execute(query, tuple(params)).fetchall()]
+
+    def upsert_contact(
+        self,
+        *,
+        name: str,
+        identifier: str,
+        public_key: str,
+        key_fingerprint: str,
+        status: str = "active",
+        last_used_at: Optional[datetime] = None,
+    ) -> int:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO contacts (
+                    name,
+                    identifier,
+                    public_key,
+                    key_fingerprint,
+                    status,
+                    created_at,
+                    last_used_at,
+                    revoked_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+                ON CONFLICT(identifier) DO UPDATE SET
+                    name = excluded.name,
+                    public_key = excluded.public_key,
+                    key_fingerprint = excluded.key_fingerprint,
+                    status = excluded.status,
+                    last_used_at = COALESCE(excluded.last_used_at, contacts.last_used_at),
+                    revoked_at = CASE WHEN excluded.status = 'revoked' THEN COALESCE(contacts.revoked_at, ?) ELSE NULL END
+                """,
+                (
+                    str(name),
+                    str(identifier),
+                    str(public_key),
+                    str(key_fingerprint),
+                    str(status or "active"),
+                    now,
+                    last_used_at.isoformat() if last_used_at else None,
+                    now,
+                ),
+            )
+            row = conn.execute("SELECT id FROM contacts WHERE identifier = ?", (str(identifier),)).fetchone()
+            return int(row["id"])
+
+    def get_contacts(self, *, include_revoked: bool = False, limit: int = 100) -> List[Dict[str, Any]]:
+        query = "SELECT * FROM contacts"
+        params: List[Any] = []
+        if not include_revoked:
+            query += " WHERE status != ?"
+            params.append("revoked")
+        query += " ORDER BY name COLLATE NOCASE ASC LIMIT ?"
+        params.append(max(1, int(limit)))
+        with self._get_connection() as conn:
+            return [dict(row) for row in conn.execute(query, tuple(params)).fetchall()]
+
+    def revoke_contact(self, identifier: str) -> bool:
+        revoked_at = datetime.now(timezone.utc).isoformat()
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE contacts
+                SET status = 'revoked',
+                    revoked_at = ?
+                WHERE identifier = ?
+                """,
+                (revoked_at, str(identifier)),
+            )
+            return cursor.rowcount > 0
 
     def backup(self, backup_path: str):
         backup_file = Path(backup_path)

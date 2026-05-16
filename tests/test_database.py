@@ -80,7 +80,7 @@ class TestDatabase(unittest.TestCase):  #класс для тестирован�
         with self.db._get_connection() as conn:
             cursor = conn.execute("PRAGMA user_version")
             version = cursor.fetchone()[0]
-            self.assertEqual(version, 5)
+            self.assertEqual(version, 6)
 
             archive_table = conn.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'audit_archives'"
@@ -90,6 +90,18 @@ class TestDatabase(unittest.TestCase):  #класс для тестирован�
                 "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'audit_security_log'"
             ).fetchone()
             self.assertIsNotNone(security_table)
+            shared_table = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'shared_entries'"
+            ).fetchone()
+            self.assertIsNotNone(shared_table)
+            history_table = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'import_export_history'"
+            ).fetchone()
+            self.assertIsNotNone(history_table)
+            contacts_table = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'contacts'"
+            ).fetchone()
+            self.assertIsNotNone(contacts_table)
 
             update_trigger = conn.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = 'trg_audit_log_no_update'"
@@ -261,7 +273,7 @@ class TestDatabase(unittest.TestCase):  #класс для тестирован�
                     "SELECT sequence_number, event_type, source, entry_data FROM audit_log"
                 ).fetchone()
 
-            self.assertEqual(version, 5)
+            self.assertEqual(version, 6)
             self.assertEqual(row["sequence_number"], 1)
             self.assertEqual(row["event_type"], "entry_added")
             self.assertEqual(row["source"], "legacy_migration")
@@ -449,6 +461,75 @@ class TestDatabase(unittest.TestCase):  #класс для тестирован�
         self.assertEqual(events[0]["event_type"], "audit_verification_failed")
         self.assertEqual(events[0]["related_sequence_number"], 7)
         self.assertIn('"trigger": "startup"', events[0]["details"])
+
+    def test_import_export_history_roundtrip(self):
+        history_id = self.db.add_import_export_history(
+            operation_type="export",
+            format="encrypted_json",
+            encryption_used="AES-256-GCM",
+            entry_count=3,
+            file_size=2048,
+            checksum="abc123",
+            verification_status="verified",
+            details={"selected": True},
+        )
+
+        rows = self.db.get_import_export_history(limit=5, operation_type="export")
+
+        self.assertGreater(history_id, 0)
+        self.assertEqual(rows[0]["format"], "encrypted_json")
+        self.assertEqual(rows[0]["encryption_used"], "AES-256-GCM")
+        self.assertEqual(rows[0]["entry_count"], 3)
+        self.assertIn('"selected": true', rows[0]["details"])
+
+    def test_shared_entries_roundtrip(self):
+        entry_id = self.db.add_entry(self.test_entry)
+        shared_at = datetime.now()
+        expires_at = datetime.now()
+
+        self.db.add_shared_entry(
+            share_id="share-1",
+            original_entry_id=entry_id,
+            encryption_method="password",
+            recipient_info="student@example.test",
+            permissions={"read": True, "edit": False},
+            shared_at=shared_at,
+            expires_at=expires_at,
+            package_checksum="checksum",
+        )
+
+        rows = self.db.get_shared_entries(limit=5, status="active")
+
+        self.assertEqual(rows[0]["share_id"], "share-1")
+        self.assertEqual(rows[0]["original_entry_id"], entry_id)
+        self.assertEqual(rows[0]["encryption_method"], "password")
+        self.assertIn('"read": true', rows[0]["permissions"])
+
+    def test_contacts_roundtrip_and_revocation(self):
+        contact_id = self.db.upsert_contact(
+            name="Alice",
+            identifier="alice@example.test",
+            public_key="public-key",
+            key_fingerprint="AA:BB",
+        )
+        updated_id = self.db.upsert_contact(
+            name="Alice Cooper",
+            identifier="alice@example.test",
+            public_key="rotated-public-key",
+            key_fingerprint="CC:DD",
+        )
+
+        contacts = self.db.get_contacts(limit=5)
+        revoked = self.db.revoke_contact("alice@example.test")
+        active_after_revoke = self.db.get_contacts(limit=5)
+        all_contacts = self.db.get_contacts(include_revoked=True, limit=5)
+
+        self.assertEqual(contact_id, updated_id)
+        self.assertEqual(contacts[0]["name"], "Alice Cooper")
+        self.assertEqual(contacts[0]["public_key"], "rotated-public-key")
+        self.assertTrue(revoked)
+        self.assertEqual(active_after_revoke, [])
+        self.assertEqual(all_contacts[0]["status"], "revoked")
 
 
 if __name__ == "__main__":
