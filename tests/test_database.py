@@ -218,6 +218,61 @@ class TestDatabase(unittest.TestCase):  #класс для тестирован�
         self.assertEqual(entry.encrypted_data, b"legacy-secret")
         self.assertEqual(entry.category, "")
 
+    def test_migration_v4_to_v5_backfills_legacy_audit_rows(self):
+        legacy_temp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        legacy_temp.close()
+        initial_db = Database(legacy_temp.name)
+        initial_db.close()
+
+        import sqlite3
+
+        legacy_conn = sqlite3.connect(legacy_temp.name)
+        try:
+            conn = legacy_conn
+            conn.execute("PRAGMA user_version = 4")
+            conn.execute("DROP TABLE audit_log")
+            conn.execute(
+                """
+                CREATE TABLE audit_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    action TEXT NOT NULL,
+                    timestamp TIMESTAMP NOT NULL,
+                    entry_id INTEGER,
+                    details TEXT
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO audit_log (action, timestamp, entry_id, details)
+                VALUES (?, ?, ?, ?)
+                """,
+                ("entry_added", datetime.now().isoformat(), 7, "legacy details"),
+            )
+            conn.commit()
+        finally:
+            legacy_conn.close()
+
+        migrated = Database(legacy_temp.name)
+        try:
+            with migrated._get_connection() as conn:
+                version = conn.execute("PRAGMA user_version").fetchone()[0]
+                row = conn.execute(
+                    "SELECT sequence_number, event_type, source, entry_data FROM audit_log"
+                ).fetchone()
+
+            self.assertEqual(version, 5)
+            self.assertEqual(row["sequence_number"], 1)
+            self.assertEqual(row["event_type"], "entry_added")
+            self.assertEqual(row["source"], "legacy_migration")
+            self.assertIn("legacy details", row["entry_data"])
+        finally:
+            migrated.close()
+            try:
+                os.unlink(legacy_temp.name)
+            except OSError:
+                pass
+
     def test_connection_pool_reuses_connections_between_requests(self):
         with self.db._get_connection() as first_conn:
             first_id = id(first_conn)

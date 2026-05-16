@@ -2037,6 +2037,34 @@ class TestMainWindowSecurityState(IntegrationTestCase):
 
         self.assertFalse(hasattr(window, "_locked_with"))
 
+    def test_focus_loss_lock_is_suspended_while_internal_dialog_is_active(self):
+        window = MainWindow.__new__(MainWindow)
+        window.auth_service = FakeAuthService()
+        window.auth_service.authenticated = True
+        window.config = Config()
+        window.state = FakeStateManager()
+        window.state.application_active = False
+        window.root = FakeRoot()
+        window.root.focus_displayof = lambda: None
+        window._internal_modal_depth = 1
+        window._lock_vault = lambda show_dialog=True: setattr(window, "_locked_with", show_dialog)
+
+        window._lock_if_application_inactive()
+
+        self.assertTrue(window.state.application_active)
+        self.assertFalse(hasattr(window, "_locked_with"))
+
+    def test_internal_warning_does_not_schedule_focus_loss_lock(self):
+        window = MainWindow.__new__(MainWindow)
+        window.root = FakeRoot()
+        window.state = FakeStateManager()
+        window._internal_modal_depth = 1
+
+        window._on_focus_out()
+
+        self.assertTrue(window.state.application_active)
+        self.assertEqual(window.root.after_calls, [])
+
     def test_clipboard_expiration_locks_unfocused_window_when_focus_lock_is_enabled(self):
         window = MainWindow.__new__(MainWindow)
         window.auth_service = FakeAuthService()

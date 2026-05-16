@@ -6,6 +6,7 @@ import ctypes
 import json
 import sys
 from collections import Counter
+from contextlib import contextmanager
 from base64 import b64encode
 from datetime import datetime, timedelta
 from typing import Optional
@@ -64,13 +65,30 @@ class MainWindow:
     CLIPBOARD_RECOVERY_PENDING_KEY = "runtime.clipboard_recovery_pending"
     AUDIT_PAGE_SIZE = 50
     AUDIT_VERIFICATION_INTERVAL_SECONDS = 24 * 60 * 60
+    UI_COLORS = {
+        "bg": "#f5f5f7",
+        "surface": "#ffffff",
+        "surface_alt": "#f7f7f8",
+        "ink": "#1d1d1f",
+        "muted": "#6e6e73",
+        "accent": "#d8ecff",
+        "accent_hover": "#c8e2f8",
+        "button": "#eef0f2",
+        "button_hover": "#e2e5e9",
+        "danger": "#d70015",
+        "line": "#e5e5e7",
+        "selection": "#e8f3ff",
+    }
 
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("CryptoSafe Manager")
-        self.root.geometry("980x640")
+        self.root.geometry("1120x720")
+        if hasattr(self.root, "minsize"):
+            self.root.minsize(980, 640)
 
         self.config = Config()
+        self._configure_visual_theme()
         self.state = StateManager()
         self.state.set_inactivity_timeout(self.config.get("security.auto_lock_minutes", 5) * 60)
         self.state.set_key_cache_timeout(self.config.get("security.key_cache_timeout_minutes", 60) * 60)
@@ -102,6 +120,7 @@ class MainWindow:
         self._system_tray_visible = False
         self._last_audit_verification_at = None
         self._audit_tampering_notified = False
+        self._internal_modal_depth = 0
         self.audit_logger = AuditLogger(self.db, event_bus, key_provider=self.auth_service.get_active_key)
         self.clipboard_service = ClipboardService(
             create_platform_adapter(self.root),
@@ -236,6 +255,64 @@ class MainWindow:
         verification_result = self.run_audit_verification(manual=False, recent_only=False, trigger="startup")
         self._audit_integrity_status = verification_result
 
+    def _configure_visual_theme(self):
+        colors = self.UI_COLORS
+        try:
+            if hasattr(self.root, "configure"):
+                self.root.configure(bg=colors["bg"])
+            elif hasattr(self.root, "config"):
+                self.root.config(bg=colors["bg"])
+            style = ttk.Style(self.root)
+        except (AttributeError, tk.TclError):
+            return
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass
+
+        base_font = ("Segoe UI", 10)
+        title_font = ("Segoe UI Semibold", 16)
+        section_font = ("Segoe UI Semibold", 10)
+
+        style.configure(".", font=base_font)
+        style.configure("App.TFrame", background=colors["bg"])
+        style.configure("Surface.TFrame", background=colors["surface"], relief="flat")
+        style.configure("TopBar.TFrame", background=colors["surface"])
+        style.configure("Status.TFrame", background=colors["surface_alt"], relief="flat")
+        style.configure("AppTitle.TLabel", background=colors["surface"], foreground=colors["ink"], font=title_font)
+        style.configure("AppSubtitle.TLabel", background=colors["surface"], foreground=colors["muted"])
+        style.configure("Section.TLabel", background=colors["surface"], foreground=colors["ink"], font=section_font)
+        style.configure("Muted.TLabel", background=colors["surface"], foreground=colors["muted"])
+        style.configure("Status.TLabel", background=colors["surface_alt"], foreground=colors["muted"])
+        style.configure("TLabel", background=colors["bg"], foreground=colors["ink"])
+        style.configure("TButton", padding=(10, 5), borderwidth=0)
+        style.configure("Accent.TButton", background=colors["button"], foreground=colors["ink"], padding=(12, 6))
+        style.map("Accent.TButton", background=[("active", colors["accent_hover"]), ("pressed", colors["accent_hover"])])
+        style.configure("Ghost.TButton", background=colors["button"], foreground=colors["ink"], padding=(12, 6))
+        style.map("Ghost.TButton", background=[("active", colors["button_hover"]), ("pressed", colors["accent"])])
+        style.configure("Danger.TButton", background=colors["surface_alt"], foreground=colors["danger"], padding=(10, 5))
+        style.map("Danger.TButton", background=[("active", "#ffe5e8"), ("pressed", "#ffe5e8")])
+        style.configure("TEntry", fieldbackground="#ffffff", bordercolor=colors["line"], padding=5)
+        style.configure("TCombobox", fieldbackground="#ffffff", bordercolor=colors["line"], padding=4)
+        style.configure(
+            "Vault.Treeview",
+            background=colors["surface"],
+            fieldbackground=colors["surface"],
+            foreground=colors["ink"],
+            bordercolor=colors["line"],
+            rowheight=32,
+            borderwidth=0,
+        )
+        style.configure(
+            "Vault.Treeview.Heading",
+            background=colors["surface"],
+            foreground=colors["muted"],
+            font=("Segoe UI Semibold", 10),
+            padding=(10, 8),
+            borderwidth=0,
+        )
+        style.map("Vault.Treeview", background=[("selected", colors["selection"])], foreground=[("selected", colors["ink"])])
+
     def _create_menu(self):
         menubar = tk.Menu(self.root)
         self.root.config(menu=menubar)
@@ -275,44 +352,54 @@ class MainWindow:
         help_menu.add_command(label="О программе", command=self.show_about)
 
     def _create_toolbar(self):
-        toolbar = ttk.Frame(self.root)
-        toolbar.pack(side=tk.TOP, fill=tk.X, padx=6, pady=6)
+        toolbar = ttk.Frame(self.root, style="App.TFrame")
+        toolbar.pack(side=tk.TOP, fill=tk.X, padx=18, pady=(16, 10))
 
-        actions_row = ttk.Frame(toolbar)
-        actions_row.pack(fill=tk.X, pady=(0, 4))
-        search_row = ttk.Frame(toolbar)
-        search_row.pack(fill=tk.X, pady=(0, 4))
-        filters_row = ttk.Frame(toolbar)
+        top_bar = ttk.Frame(toolbar, style="TopBar.TFrame")
+        top_bar.pack(fill=tk.X, pady=(0, 10), ipady=8)
+        ttk.Label(top_bar, text="CryptoSafe", style="AppTitle.TLabel").pack(side=tk.LEFT, padx=(14, 14))
+        ttk.Button(top_bar, text="Lock", style="Danger.TButton", command=self._lock_vault).pack(
+            side=tk.RIGHT, padx=(4, 14)
+        )
+
+        actions_row = ttk.Frame(toolbar, style="App.TFrame")
+        actions_row.pack(fill=tk.X, pady=(0, 8))
+        search_row = ttk.Frame(toolbar, style="App.TFrame")
+        search_row.pack(fill=tk.X, pady=(0, 8))
+        filters_row = ttk.Frame(toolbar, style="App.TFrame")
         filters_row.pack(fill=tk.X)
 
-        ttk.Button(actions_row, text="Добавить", command=self.add_entry).pack(side=tk.LEFT, padx=2)
-        ttk.Button(actions_row, text="Изменить", command=self.edit_entry).pack(side=tk.LEFT, padx=2)
-        ttk.Button(actions_row, text="Удалить", command=self.delete_entry).pack(side=tk.LEFT, padx=2)
-        ttk.Button(actions_row, text="Показать пароль", command=self.show_selected_password).pack(side=tk.LEFT, padx=(10, 2))
-        ttk.Button(actions_row, text="Скопировать пароль", command=self.copy_selected_password).pack(side=tk.LEFT, padx=2)
-        self.password_toggle_text = tk.StringVar(value="Показать пароли")
-        ttk.Button(actions_row, text="Скопировать логин", command=self.copy_selected_username).pack(side=tk.LEFT, padx=2)
-        ttk.Button(actions_row, text="Скопировать запись", command=self.copy_selected_all).pack(side=tk.LEFT, padx=2)
-        ttk.Button(actions_row, text="Очистить буфер", command=self.clear_clipboard_from_ui).pack(side=tk.LEFT, padx=(8, 2))
-        ttk.Button(actions_row, textvariable=self.password_toggle_text, command=self._toggle_password_visibility).pack(
-            side=tk.LEFT, padx=(8, 2)
+        ttk.Label(actions_row, text="Записи", style="TLabel").pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(actions_row, text="Добавить", style="Ghost.TButton", command=self.add_entry).pack(side=tk.LEFT, padx=3)
+        ttk.Button(actions_row, text="Изменить", style="Ghost.TButton", command=self.edit_entry).pack(side=tk.LEFT, padx=3)
+        ttk.Button(actions_row, text="Удалить", style="Ghost.TButton", command=self.delete_entry).pack(side=tk.LEFT, padx=3)
+        ttk.Button(actions_row, text="Показать пароль", style="Ghost.TButton", command=self.show_selected_password).pack(
+            side=tk.LEFT, padx=(14, 3)
         )
-        ttk.Button(actions_row, text="Заблокировать", command=self._lock_vault).pack(side=tk.RIGHT, padx=2)
+        ttk.Button(actions_row, text="Скопировать пароль", style="Ghost.TButton", command=self.copy_selected_password).pack(side=tk.LEFT, padx=3)
+        self.password_toggle_text = tk.StringVar(value="Показать пароли")
+        ttk.Button(actions_row, text="Скопировать логин", style="Ghost.TButton", command=self.copy_selected_username).pack(side=tk.LEFT, padx=3)
+        ttk.Button(actions_row, text="Скопировать запись", style="Ghost.TButton", command=self.copy_selected_all).pack(side=tk.LEFT, padx=3)
+        ttk.Button(actions_row, text="Очистить буфер", style="Ghost.TButton", command=self.clear_clipboard_from_ui).pack(side=tk.LEFT, padx=(14, 3))
+        ttk.Button(actions_row, textvariable=self.password_toggle_text, style="Ghost.TButton", command=self._toggle_password_visibility).pack(
+            side=tk.LEFT, padx=3
+        )
 
-        ttk.Label(search_row, text="Поиск").pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Label(search_row, text="Поиск", style="TLabel").pack(side=tk.LEFT, padx=(0, 10))
         self.search_var = tk.StringVar()
         self.search_var.trace_add("write", lambda *_args: self._apply_entry_filter())
-        self.search_entry = ttk.Entry(search_row, textvariable=self.search_var, width=28)
-        self.search_entry.pack(side=tk.LEFT, padx=2)
+        self.search_entry = ttk.Entry(search_row, textvariable=self.search_var, width=38)
+        self.search_entry.pack(side=tk.LEFT, padx=3)
         self.search_entry.bind("<Escape>", lambda _event: self._clear_search())
         self.search_entry.bind("<Return>", self._commit_search_query)
         self.search_entry.bind("<FocusOut>", self._remember_current_search)
-        self.search_history_button = ttk.Button(search_row, text="История", command=self._show_search_history_menu)
-        self.search_history_button.pack(side=tk.LEFT, padx=(2, 4))
-        ttk.Button(search_row, text="Сбросить", command=self._clear_search).pack(side=tk.LEFT, padx=(2, 8))
+        self.search_history_button = ttk.Button(search_row, text="История", style="Ghost.TButton", command=self._show_search_history_menu)
+        self.search_history_button.pack(side=tk.LEFT, padx=(6, 3))
+        ttk.Button(search_row, text="Сбросить", style="Ghost.TButton", command=self._clear_search).pack(side=tk.LEFT, padx=(3, 10))
         self.search_status_var = tk.StringVar(value="Найдено: 0")
-        ttk.Label(search_row, textvariable=self.search_status_var).pack(side=tk.LEFT, padx=(4, 0))
-        ttk.Label(filters_row, text="Категория").pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Label(search_row, textvariable=self.search_status_var, style="Muted.TLabel").pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Label(filters_row, text="Фильтры", style="TLabel").pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Label(filters_row, text="Категория", style="TLabel").pack(side=tk.LEFT, padx=(0, 4))
         self.category_filter_var = tk.StringVar(value="Все")
         self.category_filter = ttk.Combobox(
             filters_row,
@@ -321,24 +408,24 @@ class MainWindow:
             width=12,
             values=["Все"],
         )
-        self.category_filter.pack(side=tk.LEFT, padx=2)
+        self.category_filter.pack(side=tk.LEFT, padx=3)
         self.category_filter.bind("<<ComboboxSelected>>", lambda _event: self._apply_entry_filter())
-        ttk.Label(filters_row, text="Тег").pack(side=tk.LEFT, padx=(8, 4))
+        ttk.Label(filters_row, text="Тег", style="TLabel").pack(side=tk.LEFT, padx=(12, 4))
         self.tag_filter_var = tk.StringVar()
         self.tag_filter_var.trace_add("write", lambda *_args: self._apply_entry_filter())
         self.tag_filter_entry = ttk.Entry(filters_row, textvariable=self.tag_filter_var, width=12)
-        self.tag_filter_entry.pack(side=tk.LEFT, padx=2)
-        ttk.Label(filters_row, text="Дата с").pack(side=tk.LEFT, padx=(8, 4))
+        self.tag_filter_entry.pack(side=tk.LEFT, padx=3)
+        ttk.Label(filters_row, text="Дата с", style="TLabel").pack(side=tk.LEFT, padx=(12, 4))
         self.updated_from_var = tk.StringVar()
         self.updated_from_var.trace_add("write", lambda *_args: self._apply_entry_filter())
         self.updated_from_entry = ttk.Entry(filters_row, textvariable=self.updated_from_var, width=10)
-        self.updated_from_entry.pack(side=tk.LEFT, padx=2)
-        ttk.Label(filters_row, text="по").pack(side=tk.LEFT, padx=(4, 4))
+        self.updated_from_entry.pack(side=tk.LEFT, padx=3)
+        ttk.Label(filters_row, text="по", style="TLabel").pack(side=tk.LEFT, padx=(4, 4))
         self.updated_to_var = tk.StringVar()
         self.updated_to_var.trace_add("write", lambda *_args: self._apply_entry_filter())
         self.updated_to_entry = ttk.Entry(filters_row, textvariable=self.updated_to_var, width=10)
-        self.updated_to_entry.pack(side=tk.LEFT, padx=2)
-        ttk.Label(filters_row, text="Сила").pack(side=tk.LEFT, padx=(8, 4))
+        self.updated_to_entry.pack(side=tk.LEFT, padx=3)
+        ttk.Label(filters_row, text="Сила", style="TLabel").pack(side=tk.LEFT, padx=(12, 4))
         self.password_strength_filter_var = tk.StringVar(value="Все")
         self.password_strength_filter = ttk.Combobox(
             filters_row,
@@ -347,13 +434,17 @@ class MainWindow:
             width=10,
             values=["Все", "Слабый", "Средний", "Сильный"],
         )
-        self.password_strength_filter.pack(side=tk.LEFT, padx=2)
+        self.password_strength_filter.pack(side=tk.LEFT, padx=3)
         self.password_strength_filter.bind("<<ComboboxSelected>>", lambda _event: self._apply_entry_filter())
         self._update_search_history_button()
 
     def _create_main_area(self):
-        main_frame = ttk.Frame(self.root)
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+        main_frame = ttk.Frame(self.root, style="Surface.TFrame")
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=18, pady=(0, 12))
+
+        table_header = ttk.Frame(main_frame, style="Surface.TFrame")
+        table_header.pack(fill=tk.X, padx=12, pady=(10, 6))
+        ttk.Label(table_header, text="Записи vault", style="Section.TLabel").pack(side=tk.LEFT)
 
         columns = [
             {"id": "title", "label": "Название", "width": 180},
@@ -364,7 +455,7 @@ class MainWindow:
             {"id": "updated_at", "label": "Обновлено", "width": 160},
         ]
         self.table = SecureTable(main_frame, columns)
-        self.table.pack(fill=tk.BOTH, expand=True)
+        self.table.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 12))
         self.table.bind_primary_click(self._handle_table_click)
         self._create_table_context_menu()
 
@@ -390,20 +481,25 @@ class MainWindow:
             self.table_menu.grab_release()
 
     def _create_statusbar(self):
-        statusbar = ttk.Frame(self.root)
+        statusbar = ttk.Frame(self.root, style="Status.TFrame")
         statusbar.pack(side=tk.BOTTOM, fill=tk.X)
 
-        self.status_label = ttk.Label(statusbar, text="Заблокировано")
-        self.status_label.pack(side=tk.LEFT, padx=5)
+        self.status_label = ttk.Label(statusbar, text="Заблокировано", style="Status.TLabel")
+        self.status_label.pack(side=tk.LEFT, padx=(14, 8), pady=7)
 
-        self.clipboard_label = ttk.Label(statusbar, text="Буфер обмена: пуст")
-        self.clipboard_label.pack(side=tk.LEFT, padx=20)
-        self.clipboard_details_label = ttk.Label(statusbar, text="")
-        self.clipboard_details_label.pack(side=tk.LEFT, padx=5)
-        self.clipboard_notice_label = ttk.Label(statusbar, text="")
-        self.clipboard_notice_label.pack(side=tk.LEFT, padx=10)
-        self.clipboard_preview_button = ttk.Button(statusbar, text="Просмотр", command=self.show_clipboard_preview_dialog)
-        self.clipboard_preview_button.pack(side=tk.LEFT, padx=5)
+        self.clipboard_label = ttk.Label(statusbar, text="Буфер обмена: пуст", style="Status.TLabel")
+        self.clipboard_label.pack(side=tk.LEFT, padx=(18, 8), pady=7)
+        self.clipboard_details_label = ttk.Label(statusbar, text="", style="Status.TLabel")
+        self.clipboard_details_label.pack(side=tk.LEFT, padx=5, pady=7)
+        self.clipboard_notice_label = ttk.Label(statusbar, text="", style="Status.TLabel")
+        self.clipboard_notice_label.pack(side=tk.LEFT, padx=10, pady=7)
+        self.clipboard_preview_button = ttk.Button(
+            statusbar,
+            text="Просмотр",
+            style="Ghost.TButton",
+            command=self.show_clipboard_preview_dialog,
+        )
+        self.clipboard_preview_button.pack(side=tk.RIGHT, padx=(5, 14), pady=5)
         self.clipboard_preview_button.state(["disabled"])
 
         ttk.Label(statusbar, text="v2.0").pack(side=tk.RIGHT, padx=5)
@@ -457,10 +553,9 @@ class MainWindow:
                             },
                         )
                     )
-                    messagebox.showwarning(
+                    self._show_warning(
                         "Мониторинг буфера обмена",
                         "Не удалось проверить состояние буфера обмена. Защита продолжит работу в ограниченном режиме.",
-                        parent=self.root,
                     )
         elif self.state.clipboard_timer and self.state.get_clipboard() is None:
             self._clear_system_clipboard()
@@ -553,10 +648,91 @@ class MainWindow:
         self._system_tray_icon = None
         self._system_tray_visible = False
 
+    @contextmanager
+    def _suspend_focus_lock_for_internal_dialog(self):
+        self._internal_modal_depth = getattr(self, "_internal_modal_depth", 0) + 1
+        try:
+            yield
+        finally:
+            self._internal_modal_depth = max(0, getattr(self, "_internal_modal_depth", 0) - 1)
+            if getattr(self, "_internal_modal_depth", 0) == 0 and hasattr(self, "state"):
+                self.state.set_application_active(True)
+
+    def _is_internal_modal_active(self) -> bool:
+        if getattr(self, "_internal_modal_depth", 0) > 0:
+            return True
+        try:
+            grab_current = self.root.grab_current()
+        except (AttributeError, tk.TclError):
+            return False
+        return grab_current is not None
+
+    def _show_messagebox(self, kind: str, title: str, message: str, **kwargs):
+        kwargs.setdefault("parent", self.root)
+        with self._suspend_focus_lock_for_internal_dialog():
+            return getattr(messagebox, kind)(title, message, **kwargs)
+
+    def _show_warning(self, title: str, message: str, **kwargs):
+        return self._show_messagebox("showwarning", title, message, **kwargs)
+
+    def _show_error(self, title: str, message: str, **kwargs):
+        return self._show_messagebox("showerror", title, message, **kwargs)
+
+    def _show_info(self, title: str, message: str, **kwargs):
+        return self._show_messagebox("showinfo", title, message, **kwargs)
+
+    def _ask_yes_no(self, title: str, message: str, **kwargs) -> bool:
+        return bool(self._show_messagebox("askyesno", title, message, **kwargs))
+
+    def _ask_string(self, title: str, prompt: str, **kwargs):
+        kwargs.setdefault("parent", self.root)
+        with self._suspend_focus_lock_for_internal_dialog():
+            return simpledialog.askstring(title, prompt, **kwargs)
+
+    def _ask_saveas_filename(self, **kwargs):
+        kwargs.setdefault("parent", self.root)
+        with self._suspend_focus_lock_for_internal_dialog():
+            return filedialog.asksaveasfilename(**kwargs)
+
+    def _ask_open_filename(self, **kwargs):
+        kwargs.setdefault("parent", self.root)
+        with self._suspend_focus_lock_for_internal_dialog():
+            return filedialog.askopenfilename(**kwargs)
+
+    def _prepare_dialog(self, dialog):
+        colors = self.UI_COLORS
+        try:
+            dialog.configure(bg=colors["bg"])
+        except tk.TclError:
+            pass
+        return dialog
+
+    def _style_text_widget(self, widget):
+        colors = self.UI_COLORS
+        try:
+            widget.configure(
+                bg=colors["surface"],
+                fg=colors["ink"],
+                insertbackground=colors["ink"],
+                relief=tk.FLAT,
+                bd=0,
+                highlightthickness=1,
+                highlightbackground=colors["line"],
+                highlightcolor=colors["accent"],
+                padx=8,
+                pady=8,
+            )
+        except tk.TclError:
+            pass
+        return widget
+
     def _on_focus_in(self, _event=None):
         self.state.set_application_active(True)
 
     def _on_focus_out(self, _event=None):
+        if self._is_internal_modal_active():
+            self.state.set_application_active(True)
+            return
         self.state.set_application_active(False)
         self.root.after(150, self._lock_if_application_inactive)
 
@@ -572,6 +748,9 @@ class MainWindow:
             self.root.after(100, self._prompt_unlock_if_needed)
 
     def _lock_if_application_inactive(self):
+        if self._is_internal_modal_active():
+            self.state.set_application_active(True)
+            return
         try:
             app_has_focus = self.root.focus_displayof() is not None
             is_iconic = self.root.state() == "iconic"
@@ -751,6 +930,7 @@ class MainWindow:
                 pass
         try:
             toast = tk.Toplevel(self.root)
+            self._prepare_dialog(toast)
             toast.overrideredirect(True)
             toast.attributes("-topmost", True)
             ttk.Label(toast, text=message, justify=tk.LEFT).pack(ipadx=10, ipady=6)
@@ -927,10 +1107,9 @@ class MainWindow:
             return
         if not status.suspicious_activity or previous_status.suspicious_activity:
             return
-        messagebox.showwarning(
+        self._show_warning(
             "Безопасность буфера обмена",
             self._build_clipboard_security_alert_text(status),
-            parent=self.root if hasattr(self, "root") else None,
         )
 
     def _handle_clipboard_clear_failure(self):
@@ -942,10 +1121,9 @@ class MainWindow:
         warning_text = self._build_clipboard_clear_failure_text(clear_reason)
         if hasattr(self, "clipboard_notice_label") and self._clipboard_notifications_enabled():
             self.clipboard_notice_label.config(text=warning_text)
-        messagebox.showwarning(
+        self._show_warning(
             "Очистка буфера обмена",
             warning_text,
-            parent=self.root if hasattr(self, "root") else None,
         )
 
     def _sync_clipboard_row_marker(self, previous_status: ClipboardStatus, status: ClipboardStatus):
@@ -1008,7 +1186,7 @@ class MainWindow:
     def clear_clipboard_from_ui(self):
         status = self._get_clipboard_status()
         if not status.active and not getattr(self.state, "get_clipboard", lambda: None)():
-            messagebox.showinfo("Буфер обмена", "Буфер обмена уже пуст.", parent=self.root)
+            self._show_info("Буфер обмена", "Буфер обмена уже пуст.")
             return
 
         if self._clear_system_clipboard(sync_service=False):
@@ -1018,21 +1196,19 @@ class MainWindow:
             else:
                 self._update_clipboard_notice(ClipboardStatus(active=True), ClipboardStatus(active=False))
             self._refresh_clipboard_status()
-            messagebox.showinfo("Буфер обмена", "Буфер обмена очищен вручную.", parent=self.root)
+            self._show_info("Буфер обмена", "Буфер обмена очищен вручную.")
             return
 
-        messagebox.showwarning(
+        self._show_warning(
             "Буфер обмена",
             "Не удалось очистить буфер обмена автоматически. Очистите его вручную в системе.",
-            parent=self.root,
         )
 
     def _reauthenticate_for_sensitive_action(self, action_name: str) -> bool:
-        password = simpledialog.askstring(
+        password = self._ask_string(
             "Подтверждение",
             f"Введите мастер-пароль для действия «{action_name}»:",
             show="*",
-            parent=self.root,
         )
         if password is None:
             return False
@@ -1040,7 +1216,7 @@ class MainWindow:
             if hasattr(self, "key_manager"):
                 self.key_manager.store_key("active", self.auth_service.get_active_key())
             return True
-        messagebox.showerror("Ошибка аутентификации", "Неверный мастер-пароль.", parent=self.root)
+        self._show_error("Ошибка аутентификации", "Неверный мастер-пароль.")
         return False
 
     def _get_full_clipboard_value_for_preview(self) -> str:
@@ -1053,10 +1229,11 @@ class MainWindow:
     def show_clipboard_preview_dialog(self):
         status = self._get_clipboard_status()
         if not status.active:
-            messagebox.showinfo("Буфер обмена", "Буфер обмена пуст.", parent=self.root)
+            self._show_info("Буфер обмена", "Буфер обмена пуст.")
             return
 
         dialog = tk.Toplevel(self.root)
+        self._prepare_dialog(dialog)
         dialog.title("Просмотр буфера обмена")
         dialog.geometry("460x260")
 
@@ -1084,7 +1261,7 @@ class MainWindow:
         def reveal_full_value():
             full_value = self._get_full_clipboard_value_for_preview()
             if not full_value:
-                messagebox.showwarning("Буфер обмена", "Содержимое буфера обмена уже очищено.", parent=dialog)
+                self._show_warning("Буфер обмена", "Содержимое буфера обмена уже очищено.", parent=dialog)
                 dialog.destroy()
                 return
             revealed_value_var.set(f"Полное значение: {full_value}")
@@ -1095,11 +1272,10 @@ class MainWindow:
     def _require_login(self, initial: bool = False):
         self._login_prompt_active = True
         while not self.auth_service.is_authenticated():
-            password = simpledialog.askstring(
+            password = self._ask_string(
                 "Мастер-пароль",
                 "Введите мастер-пароль, чтобы разблокировать vault:",
                 show="*",
-                parent=self.root,
             )
             if password is None:
                 if initial:
@@ -1113,16 +1289,15 @@ class MainWindow:
                     event_bus.publish(Event(EventType.VAULT_UNLOCKED, {}))
                     break
             except AuthenticationError as error:
-                messagebox.showerror("Ошибка аутентификации", str(error), parent=self.root)
+                self._show_error("Ошибка аутентификации", str(error))
                 continue
 
             remaining = self.auth_service.get_lockout_remaining_seconds()
-            messagebox.showwarning(
+            self._show_warning(
                 "Доступ запрещён",
                 f"Неверный мастер-пароль. Повторите попытку примерно через {remaining} сек."
                 if remaining
                 else "Неверный мастер-пароль.",
-                parent=self.root,
             )
 
         self._set_status("Разблокировано")
@@ -1350,6 +1525,7 @@ class MainWindow:
 
     def _build_entry_dialog(self, title: str, entry=None):
         dialog = tk.Toplevel(self.root)
+        self._prepare_dialog(dialog)
         dialog.title(title)
         dialog.geometry("520x560")
         dialog.transient(self.root)
@@ -1402,7 +1578,7 @@ class MainWindow:
         ).pack(anchor=tk.W, padx=8, pady=(6, 2))
 
         ttk.Label(dialog, text="Заметки").pack(anchor=tk.W, padx=8, pady=(8, 2))
-        notes_text = tk.Text(dialog, height=7, width=60)
+        notes_text = self._style_text_widget(tk.Text(dialog, height=7, width=60))
         notes_text.pack(fill=tk.BOTH, expand=True, padx=8, pady=2)
 
         if entry:
@@ -1707,10 +1883,10 @@ class MainWindow:
     def _get_single_selected_entry(self, action_name: str):
         selected_entries = self._get_selected_entries()
         if not selected_entries:
-            messagebox.showwarning("Предупреждение", f"Выберите запись для действия «{action_name}».")
+            self._show_warning("Предупреждение", f"Выберите запись для действия «{action_name}».")
             return None
         if len(selected_entries) > 1:
-            messagebox.showwarning("Предупреждение", f"Для действия «{action_name}» нужно выбрать только одну запись.")
+            self._show_warning("Предупреждение", f"Для действия «{action_name}» нужно выбрать только одну запись.")
             return None
         return selected_entries[0]
 
@@ -1733,6 +1909,7 @@ class MainWindow:
 
     def _open_password_generator_dialog(self, parent_dialog, password_entry: PasswordEntry):
         dialog = tk.Toplevel(self.root)
+        self._prepare_dialog(dialog)
         dialog.title("Параметры генерации пароля")
         dialog.geometry("360x320")
         dialog.transient(parent_dialog)
@@ -1773,7 +1950,7 @@ class MainWindow:
             try:
                 self._generate_entry_password(parent_dialog, password_entry, options)
             except (ValueError, RuntimeError) as error:
-                messagebox.showerror("Ошибка", str(error), parent=dialog)
+                self._show_error("Ошибка", str(error), parent=dialog)
                 return
             dialog.destroy()
 
@@ -1818,6 +1995,7 @@ class MainWindow:
         old_vault_crypto = AESGCMEncryptionService()
         new_vault_crypto = AESGCMEncryptionService()
         progress_dialog = tk.Toplevel(self.root)
+        self._prepare_dialog(progress_dialog)
         progress_dialog.title("Смена мастер-пароля")
         progress_dialog.geometry("420x180")
         progress_dialog.transient(self.root)
@@ -1931,10 +2109,10 @@ class MainWindow:
             raise RuntimeError(state["error"])
 
     def new_database(self):
-        if not messagebox.askyesno("Подтверждение", "Создать новую базу vault? Данные в выбранном файле будут потеряны."):
+        if not self._ask_yes_no("Подтверждение", "Создать новую базу vault? Данные в выбранном файле будут потеряны."):
             return
 
-        new_path = filedialog.asksaveasfilename(
+        new_path = self._ask_saveas_filename(
             title="Создать новый vault",
             defaultextension=".db",
             filetypes=[("SQLite database", "*.db"), ("All files", "*.*")],
@@ -1967,7 +2145,7 @@ class MainWindow:
         self._load_entries()
 
     def open_database(self):
-        path = filedialog.askopenfilename(
+        path = self._ask_open_filename(
             title="Открыть базу vault",
             filetypes=[("SQLite database", "*.db"), ("All files", "*.*")],
         )
@@ -2001,7 +2179,7 @@ class MainWindow:
             self._load_entries()
 
     def backup(self):
-        backup_path = filedialog.asksaveasfilename(
+        backup_path = self._ask_saveas_filename(
             title="Создать резервную копию vault",
             defaultextension=".db",
             filetypes=[("SQLite database", "*.db"), ("All files", "*.*")],
@@ -2009,7 +2187,7 @@ class MainWindow:
         if not backup_path:
             return
         self.db.backup(backup_path)
-        messagebox.showinfo("Резервная копия", "Резервная копия успешно создана.")
+        self._show_info("Резервная копия", "Резервная копия успешно создана.")
 
     def add_entry(self):
         if not self.auth_service.is_authenticated():
@@ -2022,7 +2200,7 @@ class MainWindow:
                     title_entry, username_entry, password_entry, url_entry, notes_text
                 )
             except ValueError as error:
-                messagebox.showerror("Ошибка", str(error), parent=dialog)
+                self._show_error("Ошибка", str(error), parent=dialog)
                 return
 
             self.entry_manager.create_entry(
@@ -2044,7 +2222,7 @@ class MainWindow:
     def edit_entry(self):
         entry = self._get_single_selected_entry("Изменить")
         if not entry:
-            messagebox.showwarning("Предупреждение", "Выберите запись для редактирования.")
+            self._show_warning("Предупреждение", "Выберите запись для редактирования.")
             return
 
         dialog, title_entry, username_entry, password_entry, url_entry, notes_text = self._build_entry_dialog(
@@ -2058,7 +2236,7 @@ class MainWindow:
                     title_entry, username_entry, password_entry, url_entry, notes_text
                 )
             except ValueError as error:
-                messagebox.showerror("Ошибка", str(error), parent=dialog)
+                self._show_error("Ошибка", str(error), parent=dialog)
                 return
 
             self.entry_manager.update_entry(
@@ -2081,30 +2259,30 @@ class MainWindow:
     def delete_entry(self):
         selected_items = self.table.get_selected_items()
         if len(selected_items) > 1:
-            if not messagebox.askyesno("Подтверждение", f"Удалить выбранные записи ({len(selected_items)})?"):
+            if not self._ask_yes_no("Подтверждение", f"Удалить выбранные записи ({len(selected_items)})?"):
                 return
             for selected in selected_items:
                 self.entry_manager.delete_entry(selected["id"])
             return
         selected = self.table.get_selected()
         if not selected:
-            messagebox.showwarning("Предупреждение", "Выберите запись для удаления.")
+            self._show_warning("Предупреждение", "Выберите запись для удаления.")
             return
-        if messagebox.askyesno("Подтверждение", f"Удалить запись «{selected['title']}»?"):
+        if self._ask_yes_no("Подтверждение", f"Удалить запись «{selected['title']}»?"):
             self.entry_manager.delete_entry(selected["id"])
 
     def show_selected_password(self):
         entry = self._get_single_selected_entry("Показать пароль")
         if not entry:
-            messagebox.showwarning("Предупреждение", "Сначала выберите запись.")
+            self._show_warning("Предупреждение", "Сначала выберите запись.")
             return
-        messagebox.showinfo("Пароль", self._decrypt_password(entry.encrypted_password))
+        self._show_info("Пароль", self._decrypt_password(entry.encrypted_password))
         self._on_activity()
 
     def copy_selected_password(self):
         entry = self._get_single_selected_entry("Скопировать пароль")
         if not entry:
-            messagebox.showwarning("Предупреждение", "Сначала выберите запись.")
+            self._show_warning("Предупреждение", "Сначала выберите запись.")
             return
         password = self._decrypt_password(entry.encrypted_password)
         try:
@@ -2117,14 +2295,14 @@ class MainWindow:
                 entry_clipboard_policy=self._get_entry_clipboard_policy(entry),
             )
         except ClipboardAccessError as error:
-            messagebox.showerror("Ошибка буфера обмена", str(error))
+            self._show_error("Ошибка буфера обмена", str(error))
             return
         self._on_activity()
 
     def copy_selected_username(self):
         entry = self._get_single_selected_entry("Скопировать логин")
         if not entry:
-            messagebox.showwarning("Предупреждение", "Сначала выберите запись.")
+            self._show_warning("Предупреждение", "Сначала выберите запись.")
             return
         username = str(entry.get("username", "")).strip()
         if not self._copy_entry_to_clipboard(
@@ -2139,7 +2317,7 @@ class MainWindow:
     def copy_selected_all(self):
         entry = self._get_single_selected_entry("Скопировать запись")
         if not entry:
-            messagebox.showwarning("Предупреждение", "Сначала выберите запись.")
+            self._show_warning("Предупреждение", "Сначала выберите запись.")
             return
 
         payload_parts = [
@@ -2164,7 +2342,7 @@ class MainWindow:
     def _copy_entry_to_clipboard(self, value: str, *, data_type: str, entry, action_name: str) -> bool:
         normalized_value = str(value or "")
         if not normalized_value.strip():
-            messagebox.showwarning("Предупреждение", f"Для действия «{action_name}» нет данных.")
+            self._show_warning("Предупреждение", f"Для действия «{action_name}» нет данных.")
             return False
         try:
             self.clipboard_service.copy_text(
@@ -2176,7 +2354,7 @@ class MainWindow:
                 entry_clipboard_policy=self._get_entry_clipboard_policy(entry),
             )
         except ClipboardAccessError as error:
-            messagebox.showerror("Ошибка буфера обмена", str(error))
+            self._show_error("Ошибка буфера обмена", str(error))
             return False
         return True
 
@@ -2668,17 +2846,15 @@ class MainWindow:
     def _apply_audit_log_context_action(self, log, action_id: str):
         if action_id == "show_vault_entry":
             if not self._highlight_vault_entry_from_audit_log(log):
-                messagebox.showinfo(
+                self._show_info(
                     "Журнал аудита",
                     "Связанная запись vault не найдена в текущем списке.",
-                    parent=self.root,
                 )
             return
         if action_id == "inspect_failed_login":
-            messagebox.showinfo(
+            self._show_info(
                 "Неуспешный вход",
                 self._build_failed_login_investigation_text(log),
-                parent=self.root,
             )
 
     def _get_audit_logs_for_export(
@@ -2878,7 +3054,7 @@ class MainWindow:
         )
         if not logs:
             if not scheduled:
-                messagebox.showinfo("Экспорт аудита", "Для выбранных фильтров журнал аудита пуст.", parent=self.root)
+                self._show_info("Экспорт аудита", "Для выбранных фильтров журнал аудита пуст.")
             return False
 
         normalized_format = str(export_format or "").strip().lower()
@@ -2902,13 +3078,12 @@ class MainWindow:
             )
         )
         if not scheduled:
-            messagebox.showinfo(
+            self._show_info(
                 "Экспорт аудита",
                 (
                     f"Журнал аудита экспортирован в формате {normalized_format.upper()} "
                     f"и {'зашифрован' if export_encrypted else 'сохранён без шифрования'}."
                 ),
-                parent=self.root,
             )
         return True
 
@@ -2933,8 +3108,7 @@ class MainWindow:
             "cef": ".cef",
             "pdf": ".pdf",
         }
-        target_path = filedialog.asksaveasfilename(
-            parent=self.root,
+        target_path = self._ask_saveas_filename(
             title="Экспорт журнала аудита",
             defaultextension=extension_map.get(normalized_format, ".txt"),
             filetypes=[
@@ -3048,10 +3222,9 @@ class MainWindow:
         self._record_audit_security_event(result, trigger=trigger)
         should_notify = manual or not getattr(self, "_audit_tampering_notified", False)
         if should_notify:
-            messagebox.showwarning(
+            self._show_warning(
                 "Проверка аудита",
                 self._build_audit_verification_failure_message(result, trigger=trigger),
-                parent=getattr(self, "root", None),
             )
             self._audit_tampering_notified = True
         policy = self._get_audit_verification_policy()
@@ -3074,8 +3247,7 @@ class MainWindow:
                 trigger="report_export",
             )
             report_text = json.dumps(report_result, ensure_ascii=False, indent=2, sort_keys=True)
-        target_path = filedialog.asksaveasfilename(
-            parent=self.root,
+        target_path = self._ask_saveas_filename(
             title="Экспорт отчёта проверки аудита",
             defaultextension=".json",
             filetypes=[
@@ -3101,10 +3273,9 @@ class MainWindow:
                 },
             )
         )
-        messagebox.showinfo(
+        self._show_info(
             "Отчёт проверки аудита",
             "Отчёт проверки целостности экспортирован.",
-            parent=self.root,
         )
         return True
 
@@ -3148,10 +3319,9 @@ class MainWindow:
                 )
             )
             if manual:
-                messagebox.showinfo(
+                self._show_info(
                     "Проверка аудита",
                     f"Проверка завершена успешно. Проверено записей: {result.get('valid_entries', 0)}.",
-                    parent=self.root,
                 )
             return result
 
@@ -3240,10 +3410,11 @@ class MainWindow:
 
     def show_logs(self):
         dialog = tk.Toplevel(self.root)
+        self._prepare_dialog(dialog)
         dialog.title("Журнал аудита")
         dialog.geometry("980x620")
 
-        filter_frame = ttk.Frame(dialog)
+        filter_frame = ttk.Frame(dialog, style="App.TFrame")
         filter_frame.pack(fill=tk.X, padx=8, pady=8)
 
         search_var = tk.StringVar()
@@ -3286,13 +3457,13 @@ class MainWindow:
         content = ttk.Panedwindow(dialog, orient=tk.VERTICAL)
         content.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
 
-        upper = ttk.Frame(content)
-        lower = ttk.Frame(content)
+        upper = ttk.Frame(content, style="Surface.TFrame")
+        lower = ttk.Frame(content, style="Surface.TFrame")
         content.add(upper, weight=3)
         content.add(lower, weight=2)
 
         columns = ("timestamp", "event_type", "severity", "source", "user_id", "entry_id")
-        tree = ttk.Treeview(upper, columns=columns, show="headings", height=14)
+        tree = ttk.Treeview(upper, columns=columns, show="headings", height=14, style="Vault.Treeview")
         headers = {
             "timestamp": "Время",
             "event_type": "Событие",
@@ -3318,7 +3489,7 @@ class MainWindow:
         summary_frame = ttk.LabelFrame(lower, text="Статистика и целостность")
         summary_frame.pack(fill=tk.X, expand=False, padx=4, pady=(0, 6))
 
-        dashboard_text = tk.Text(summary_frame, wrap=tk.WORD, height=8)
+        dashboard_text = self._style_text_widget(tk.Text(summary_frame, wrap=tk.WORD, height=8))
         dashboard_text.pack(fill=tk.X, expand=False, padx=6, pady=(6, 4))
 
         frequency_canvas = tk.Canvas(
@@ -3327,14 +3498,14 @@ class MainWindow:
             height=200,
             bg="#ffffff",
             highlightthickness=1,
-            highlightbackground="#d1d5db",
+            highlightbackground=self.UI_COLORS["line"],
         )
         frequency_canvas.pack(fill=tk.X, expand=False, padx=6, pady=(0, 6))
 
-        details_text = tk.Text(lower, wrap=tk.WORD, height=12)
+        details_text = self._style_text_widget(tk.Text(lower, wrap=tk.WORD, height=12))
         details_text.pack(fill=tk.BOTH, expand=True)
 
-        pager = ttk.Frame(dialog)
+        pager = ttk.Frame(dialog, style="App.TFrame")
         pager.pack(fill=tk.X, padx=8, pady=(0, 8))
 
         def load_page(page: Optional[int] = None):
@@ -3488,15 +3659,17 @@ class MainWindow:
 
     def show_clipboard_diagnostics(self):
         dialog = tk.Toplevel(self.root)
+        self._prepare_dialog(dialog)
         dialog.title("Диагностика буфера обмена")
         dialog.geometry("720x420")
-        text = tk.Text(dialog, wrap=tk.WORD)
+        text = self._style_text_widget(tk.Text(dialog, wrap=tk.WORD))
         text.pack(fill=tk.BOTH, expand=True)
         text.insert("1.0", "\n".join(self._build_clipboard_diagnostics_lines()))
         text.config(state=tk.DISABLED)
 
     def show_settings(self):
         dialog = tk.Toplevel(self.root)
+        self._prepare_dialog(dialog)
         dialog.title("Настройки")
         dialog.geometry("460x620")
 
@@ -3741,22 +3914,22 @@ class MainWindow:
                 )
             )
             self._refresh_clipboard_status()
-            messagebox.showinfo("Настройки", "Настройки сохранены.", parent=dialog)
+            self._show_info("Настройки", "Настройки сохранены.", parent=dialog)
             dialog.destroy()
 
         ttk.Button(dialog, text="Сохранить", command=save).pack(pady=16)
         ttk.Button(dialog, text="Сменить мастер-пароль", command=self.change_master_password).pack(pady=2)
 
     def change_master_password(self):
-        current_password = simpledialog.askstring("Смена пароля", "Текущий мастер-пароль:", show="*", parent=self.root)
+        current_password = self._ask_string("Смена пароля", "Текущий мастер-пароль:", show="*")
         if current_password is None:
             return
-        new_password = simpledialog.askstring("Смена пароля", "Новый мастер-пароль:", show="*", parent=self.root)
+        new_password = self._ask_string("Смена пароля", "Новый мастер-пароль:", show="*")
         if new_password is None:
             return
-        confirm = simpledialog.askstring("Смена пароля", "Подтвердите новый мастер-пароль:", show="*", parent=self.root)
+        confirm = self._ask_string("Смена пароля", "Подтвердите новый мастер-пароль:", show="*")
         if confirm != new_password:
-            messagebox.showerror("Ошибка", "Пароли не совпадают.")
+            self._show_error("Ошибка", "Пароли не совпадают.")
             return
         try:
             self.auth_service.change_master_password(
@@ -3765,9 +3938,9 @@ class MainWindow:
                 rotate_entries_callback=self._rotate_vault_entries,
             )
             self.key_manager.store_key("active", self.auth_service.get_active_key())
-            messagebox.showinfo("Успешно", "Мастер-пароль успешно изменён.")
+            self._show_info("Успешно", "Мастер-пароль успешно изменён.")
         except AuthenticationError as error:
-            messagebox.showerror("Ошибка", str(error))
+            self._show_error("Ошибка", str(error))
 
     def _lock_vault(self, show_dialog: bool = True):
         self.auth_service.logout()
@@ -3808,7 +3981,7 @@ class MainWindow:
         self.root.destroy()
 
     def show_about(self):
-        messagebox.showinfo(
+        self._show_info(
             "О программе",
             "CryptoSafe Manager\nВерсия 2.0\n\n"
             "Менеджер паролей с локальным зашифрованным хранилищем, мастер-паролем и журналом аудита.",

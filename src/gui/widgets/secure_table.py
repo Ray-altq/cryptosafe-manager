@@ -20,6 +20,7 @@ class SecureTable(ttk.Frame):
             columns=[col["id"] for col in columns],
             show="headings",
             selectmode="extended",
+            style="Vault.Treeview",
         )
 
         for col in columns:
@@ -34,6 +35,12 @@ class SecureTable(ttk.Frame):
         vsb = ttk.Scrollbar(self, orient="vertical", command=self.tree.yview)
         hsb = ttk.Scrollbar(self, orient="horizontal", command=self.tree.xview)
         self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        self._supports_row_tags = True
+        try:
+            self.tree.tag_configure("even", background="#ffffff")
+            self.tree.tag_configure("odd", background="#fbfbfc")
+        except (AttributeError, tk.TclError):
+            self._supports_row_tags = False
 
         self.tree.grid(row=0, column=0, sticky="nsew")
         vsb.grid(row=0, column=1, sticky="ns")
@@ -67,7 +74,10 @@ class SecureTable(ttk.Frame):
 
         for i, row in enumerate(self.data):
             values = [row.get(col["id"], "") for col in self.columns]
-            self.tree.insert("", "end", iid=str(i), values=values)
+            if getattr(self, "_supports_row_tags", False):
+                self.tree.insert("", "end", iid=str(i), values=values, tags=("odd" if i % 2 else "even",))
+            else:
+                self.tree.insert("", "end", iid=str(i), values=values)
 
     def get_selected(self) -> Optional[Dict[str, Any]]:
         """Получить выбранную запись."""

@@ -301,9 +301,15 @@ class Database:
             conn.execute("ALTER TABLE audit_log ADD COLUMN public_key TEXT")
         if "sequence_number" not in columns:
             conn.execute("ALTER TABLE audit_log ADD COLUMN sequence_number INTEGER")
+        if "signature" not in columns:
+            conn.execute("ALTER TABLE audit_log ADD COLUMN signature TEXT")
 
         rows = conn.execute(
-            "SELECT rowid, action, timestamp, entry_id, details FROM audit_log ORDER BY COALESCE(timestamp, ''), rowid"
+            """
+            SELECT rowid AS audit_rowid, action, timestamp, entry_id, details
+            FROM audit_log
+            ORDER BY COALESCE(timestamp, ''), rowid
+            """
         ).fetchall()
         previous_hash = "0" * 64
         for index, row in enumerate(rows, start=1):
@@ -347,7 +353,7 @@ class Database:
                     "legacy",
                     index,
                     "legacy",
-                    row["rowid"],
+                    row["audit_rowid"],
                 ),
             )
             previous_hash = entry_hash
