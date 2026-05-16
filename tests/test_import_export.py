@@ -215,6 +215,85 @@ class TestImportExportFoundation(unittest.TestCase):
         self.assertEqual(result["skipped"], 2)
         self.assertEqual(len(manager.entries), 2)
 
+    def test_csv_export_requires_explicit_plaintext_allow_and_roundtrips(self):
+        exporter = VaultExporter(FakeEntryManager(), database=self.db)
+
+        with self.assertRaises(ValueError):
+            exporter.export_csv(ExportOptions(format="csv", plaintext_allowed=False))
+
+        exported = exporter.export_csv(ExportOptions(format="csv", plaintext_allowed=True))
+        preview = VaultImporter(FakeEntryManager(), database=self.db).preview_plaintext(
+            exported,
+            ImportOptions(format="csv"),
+        )
+
+        self.assertIn("title,username,password", exported)
+        self.assertEqual(preview[0]["title"], "GitHub")
+        self.assertEqual(preview[0]["password"], "Secret!123")
+
+    def test_lastpass_csv_import_maps_known_columns(self):
+        manager = FakeEntryManager()
+        manager.entries = []
+        payload = "url,username,password,extra,name,grouping\nhttps://example.test,alice,Secret!123,notes,Example,Work\n"
+
+        result = VaultImporter(manager, database=self.db).import_plaintext(
+            payload,
+            ImportOptions(format="lastpass_csv", mode="merge"),
+        )
+
+        self.assertEqual(result["created"], 1)
+        self.assertEqual(manager.entries[0]["title"], "Example")
+        self.assertEqual(manager.entries[0]["category"], "Work")
+
+    def test_bitwarden_json_import_maps_login_items(self):
+        manager = FakeEntryManager()
+        manager.entries = []
+        payload = json.dumps(
+            {
+                "items": [
+                    {
+                        "type": 1,
+                        "name": "Vault Item",
+                        "notes": "safe notes",
+                        "folderId": "Personal",
+                        "login": {
+                            "username": "bob",
+                            "password": "Secret!123",
+                            "uris": [{"uri": "https://vault.example"}],
+                        },
+                        "fields": [{"name": "tag-one"}, {"name": "tag-two"}],
+                    }
+                ]
+            }
+        )
+
+        preview = VaultImporter(manager, database=self.db).preview_plaintext(
+            payload,
+            ImportOptions(format="bitwarden_json"),
+        )
+        result = VaultImporter(manager, database=self.db).import_plaintext(
+            payload,
+            ImportOptions(format="bitwarden_json", mode="merge"),
+        )
+
+        self.assertEqual(preview[0]["title"], "Vault Item")
+        self.assertEqual(preview[0]["url"], "https://vault.example")
+        self.assertEqual(preview[0]["tags"], "tag-one,tag-two")
+        self.assertEqual(result["created"], 1)
+
+    def test_plaintext_import_dry_run_does_not_create_entries(self):
+        manager = FakeEntryManager()
+        manager.entries = []
+        payload = "title,username,password,url,notes,category,tags\nExample,alice,Secret!123,,,,\n"
+
+        result = VaultImporter(manager, database=self.db).import_plaintext(
+            payload,
+            ImportOptions(format="csv", mode="dry-run"),
+        )
+
+        self.assertEqual(result["validated"], 1)
+        self.assertEqual(manager.entries, [])
+
 
 if __name__ == "__main__":
     unittest.main()

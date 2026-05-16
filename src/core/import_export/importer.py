@@ -8,7 +8,7 @@ from typing import Any, Dict, Iterable, List
 from ..events import Event, EventType
 from .crypto import checksum, decrypt_aes_gcm, derive_password_key
 from .exceptions import ImportValidationError
-from .formats import NativeJSONFormat
+from .formats import BitwardenJSONFormat, CSVVaultFormat, LastPassCSVFormat, NativeJSONFormat
 from .models import ImportOptions
 
 
@@ -74,6 +74,29 @@ class VaultImporter:
         self._publish(EventType.IMPORT_OPERATION_COMPLETED, result)
         return result
 
+    def preview_plaintext(self, payload: str | bytes, options: ImportOptions | None = None) -> List[Dict[str, Any]]:
+        import_options = options or ImportOptions(format="csv")
+        raw_entries = self._parse_plaintext_payload(payload, import_options)
+        return self.validate_entries(raw_entries, import_options)
+
+    def import_plaintext(self, payload: str | bytes, options: ImportOptions | None = None) -> Dict[str, Any]:
+        started = time.monotonic()
+        import_options = options or ImportOptions(format="csv", mode="dry-run")
+        entries = self.preview_plaintext(payload, import_options)
+        result = self._apply_entries(entries, import_options, started)
+        self._record_history(
+            "import",
+            import_options.format,
+            "none",
+            len(entries),
+            len(self._as_bytes(payload)),
+            checksum(self._as_bytes(payload)),
+            "validated" if import_options.mode == "dry-run" else "verified",
+            result,
+        )
+        self._publish(EventType.IMPORT_OPERATION_COMPLETED, result)
+        return result
+
     def _sanitize_entry(self, entry: Dict[str, Any]) -> Dict[str, str]:
         normalized = {
             "title": self._sanitize_text(entry.get("title", "")),
@@ -107,6 +130,20 @@ class VaultImporter:
         if checksum(ciphertext) != expected_checksum:
             raise ImportValidationError("Native export checksum does not match")
         return package
+
+    def _parse_plaintext_payload(self, payload: str | bytes, options: ImportOptions) -> List[Dict[str, str]]:
+        payload_bytes = self._as_bytes(payload)
+        if len(payload_bytes) > max(1, int(options.max_file_size)):
+            raise ImportValidationError("Import file exceeds the maximum allowed size")
+        text = payload_bytes.decode("utf-8-sig")
+        normalized_format = str(options.format or "csv").strip().lower()
+        if normalized_format in {"csv", "cryptosafe_csv"}:
+            return CSVVaultFormat().parse_rows(text)
+        if normalized_format in {"lastpass", "lastpass_csv"}:
+            return LastPassCSVFormat().parse_entries(text)
+        if normalized_format in {"bitwarden", "bitwarden_json"}:
+            return BitwardenJSONFormat().parse_entries(text)
+        raise ImportValidationError(f"Unsupported import format: {options.format}")
 
     def _decrypt_native_payload(self, package: Dict[str, Any], password: str) -> Dict[str, Any]:
         encryption = package["encryption"]
@@ -146,6 +183,30 @@ class VaultImporter:
 
     def _identity(self, entry: Dict[str, Any]) -> tuple[str, str]:
         return (str(entry.get("title", "")).strip().lower(), str(entry.get("username", "")).strip().lower())
+
+    def _apply_entries(self, entries: List[Dict[str, Any]], options: ImportOptions, started: float) -> Dict[str, Any]:
+        result = {"validated": len(entries), "created": 0, "updated": 0, "skipped": 0, "mode": options.mode}
+        if options.mode == "dry-run":
+            return result
+
+        existing = self._existing_entries_by_identity()
+        deadline = started + max(1, int(options.timeout_seconds))
+        for entry in entries:
+            if time.monotonic() > deadline:
+                raise ImportValidationError("Import timed out")
+            identity = self._identity(entry)
+            existing_entry = existing.get(identity)
+            if existing_entry and options.duplicate_strategy == "skip":
+                result["skipped"] += 1
+                continue
+            if existing_entry and options.duplicate_strategy == "replace":
+                self.entry_manager.update_entry(existing_entry["id"], entry)
+                result["updated"] += 1
+                continue
+            created = self.entry_manager.create_entry(entry)
+            existing[identity] = created
+            result["created"] += 1
+        return result
 
     def _record_history(
         self,

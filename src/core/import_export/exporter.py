@@ -7,7 +7,7 @@ from typing import Any, Dict, Iterable, Optional
 from ..events import Event, EventType
 from .crypto import checksum, derive_password_key, encrypt_aes_gcm, new_salt_and_nonce
 from .models import ExportOptions
-from .formats import NativeJSONFormat
+from .formats import CSVVaultFormat, NativeJSONFormat
 
 
 class VaultExporter:
@@ -87,6 +87,28 @@ class VaultExporter:
             details=package["metadata"],
         )
         self._publish(EventType.EXPORT_OPERATION_COMPLETED, {"format": "encrypted_json", "entry_count": len(entries)})
+        return output
+
+    def export_csv(self, options: Optional[ExportOptions] = None) -> str:
+        selected_options = options or ExportOptions(format="csv", plaintext_allowed=True)
+        if not selected_options.plaintext_allowed:
+            raise ValueError("Plaintext CSV export must be explicitly allowed")
+        entries = self.filter_entry_fields(
+            self.get_entries_for_export(selected_options),
+            selected_options.include_fields,
+        )
+        output = CSVVaultFormat().serialize_rows(self._serialize_entry(entry) for entry in entries)
+        self._record_history(
+            operation_type="export",
+            format="csv",
+            encryption_used="none",
+            entry_count=len(entries),
+            file_size=len(output.encode("utf-8")),
+            package_checksum=checksum(output.encode("utf-8")),
+            verification_status="created",
+            details={"plaintext": True, "mode": "selected" if selected_options.entry_ids else "full"},
+        )
+        self._publish(EventType.EXPORT_OPERATION_COMPLETED, {"format": "csv", "entry_count": len(entries)})
         return output
 
     def _serialize_entry(self, entry: Dict[str, Any]) -> Dict[str, Any]:
