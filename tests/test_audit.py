@@ -172,6 +172,17 @@ class TestAuditLogging(unittest.TestCase):
         log = self.database.get_audit_log_by_sequence(2)
         self.assertIn('"event_type": "settings_changed"', log.entry_data)
 
+    def test_audit_entry_includes_utc_reliable_time_source_metadata(self):
+        self._generate_logs(1)
+
+        log = self.database.get_audit_log_by_sequence(2)
+        payload = json.loads(log.entry_data)
+
+        self.assertTrue(payload["timestamp"].endswith("Z"))
+        self.assertEqual(payload["time_source"]["timezone"], "UTC")
+        self.assertTrue(payload["time_source"]["synchronized"])
+        self.assertEqual(payload["time_source"]["reliable_source"], "operating_system_clock")
+
     def test_append_only_protection_blocks_update_attempt_and_logs_violation(self):
         self._generate_logs(3)
 

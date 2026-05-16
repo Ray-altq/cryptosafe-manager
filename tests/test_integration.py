@@ -1343,6 +1343,29 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
         self.assertEqual(frequency[0]["count"], 3)
         self.assertEqual(frequency[1]["event_type"], "user_login_failed")
 
+    def test_audit_dashboard_frequency_uses_7_30_90_day_windows(self):
+        window = MainWindow.__new__(MainWindow)
+
+        class AuditLogRecord:
+            def __init__(self, event_type, timestamp):
+                self.action = event_type
+                self.event_type = event_type
+                self.timestamp = timestamp
+                self.severity = "INFO"
+                self.user_id = "local-user"
+
+        now = datetime(2026, 5, 16, 12, 0, 0)
+        logs = [
+            AuditLogRecord("settings_changed", now),
+            AuditLogRecord("clipboard_cleared", now.replace(day=6)),
+            AuditLogRecord("user_login_failed", datetime(2026, 3, 20, 12, 0, 0)),
+            AuditLogRecord("entry_created", datetime(2026, 1, 1, 12, 0, 0)),
+        ]
+
+        self.assertEqual(len(window._filter_audit_logs_by_days(logs, 7, now=now)), 1)
+        self.assertEqual(len(window._filter_audit_logs_by_days(logs, 30, now=now)), 2)
+        self.assertEqual(len(window._filter_audit_logs_by_days(logs, 90, now=now)), 3)
+
     def test_build_audit_dashboard_lines_include_integrity_and_security_metrics(self):
         window = MainWindow.__new__(MainWindow)
         window._audit_integrity_status = {

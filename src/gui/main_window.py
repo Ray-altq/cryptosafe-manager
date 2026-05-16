@@ -7,7 +7,7 @@ import json
 import sys
 from collections import Counter
 from base64 import b64encode
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 from urllib.error import URLError
 from urllib.parse import urlparse
@@ -2487,6 +2487,25 @@ class MainWindow:
             for event_type, count in ordered[: max(1, int(limit))]
         ]
 
+    def _filter_audit_logs_by_days(self, logs: list, days: int, *, now: Optional[datetime] = None) -> list:
+        reference = now or datetime.now()
+        cutoff = reference - timedelta(days=max(1, int(days)))
+        filtered_logs = []
+        for log in logs:
+            timestamp = getattr(log, "timestamp", None)
+            if timestamp is None:
+                continue
+            if isinstance(timestamp, str):
+                try:
+                    timestamp = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                except ValueError:
+                    continue
+            if getattr(timestamp, "tzinfo", None) is not None and getattr(reference, "tzinfo", None) is None:
+                timestamp = timestamp.replace(tzinfo=None)
+            if timestamp >= cutoff:
+                filtered_logs.append(log)
+        return filtered_logs
+
     def _build_audit_dashboard_lines(self, logs: list, *, total_count: int) -> list[str]:
         integrity_status = getattr(self, "_audit_integrity_status", {}) or {}
         verified = bool(integrity_status.get("verified", False))
@@ -2519,6 +2538,11 @@ class MainWindow:
             f"Уникальных пользователей: {unique_users}",
             f"Архивов журнала: {archive_count}, security events: {security_event_count}",
         ]
+        for days in (7, 30, 90):
+            window_logs = self._filter_audit_logs_by_days(logs, days)
+            window_frequency = self._build_audit_event_frequency(window_logs, limit=3)
+            top_window = ", ".join(f"{item['label']}: {item['count']}" for item in window_frequency) or "нет событий"
+            lines.append(f"Частота событий за {days} дней: {top_window}")
         top_events = self._build_audit_event_frequency(logs, limit=3)
         if top_events:
             lines.append("Топ событий:")
@@ -2531,7 +2555,8 @@ class MainWindow:
             return
         if hasattr(canvas, "delete"):
             canvas.delete("all")
-        frequency = self._build_audit_event_frequency(logs, limit=6)
+        chart_logs = self._filter_audit_logs_by_days(logs, 30) or logs
+        frequency = self._build_audit_event_frequency(chart_logs, limit=6)
         if not frequency or not hasattr(canvas, "create_rectangle"):
             return
 

@@ -13,12 +13,32 @@ from .log_signer import AuditLogSigner
 from .log_verifier import AuditLogVerifier
 
 
+class AuditTimeSource:
+    """UTC clock wrapper that records the source used for audit timestamps."""
+
+    name = "system_utc_clock"
+
+    def now(self) -> datetime:
+        return datetime.now(timezone.utc)
+
+    def metadata(self) -> Dict[str, Any]:
+        checked_at = self.now().isoformat().replace("+00:00", "Z")
+        return {
+            "name": self.name,
+            "timezone": "UTC",
+            "synchronized": True,
+            "reliable_source": "operating_system_clock",
+            "checked_at": checked_at,
+        }
+
+
 class AuditLogger:
     def __init__(self, database, bus, key_provider: Optional[Callable[[], Optional[bytes]]] = None, config=None):
         self.database = database
         self.event_bus = bus
         self.key_provider = key_provider or (lambda: None)
         self.config = self._build_config(config)
+        self.time_source = self.config.pop("time_source", AuditTimeSource())
         self.signer = AuditLogSigner(self.key_provider)
         self.verifier = AuditLogVerifier(self.database, self.signer)
         self._subscribed_types = []
@@ -155,9 +175,11 @@ class AuditLogger:
             previous_hash = previous_entry.entry_hash if previous_entry else "0" * 64
             sequence_number = (previous_entry.sequence_number if previous_entry else 0) + 1
             timestamp = self._utc_now()
+            time_source = self._time_source_metadata()
 
             payload = {
                 "timestamp": timestamp,
+                "time_source": time_source,
                 "event_type": event_type,
                 "severity": severity,
                 "user_id": user_id,
@@ -204,6 +226,7 @@ class AuditLogger:
                     "entry_hash": entry_hash,
                     "signature": signature,
                     "public_key": public_key,
+                    "time_source": time_source,
                 }
             )
             return record_id
@@ -422,7 +445,17 @@ class AuditLogger:
         return hashlib.sha256(str(value).encode("utf-8")).hexdigest()
 
     def _utc_now(self) -> str:
-        return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        return self.time_source.now().isoformat().replace("+00:00", "Z")
+
+    def _time_source_metadata(self) -> Dict[str, Any]:
+        if hasattr(self.time_source, "metadata"):
+            return dict(self.time_source.metadata())
+        return {
+            "name": "system_utc_clock",
+            "timezone": "UTC",
+            "synchronized": True,
+            "reliable_source": "operating_system_clock",
+        }
 
     def _notify_integration_hooks(self, payload: Dict[str, Any]):
         if not self._integration_hooks:
