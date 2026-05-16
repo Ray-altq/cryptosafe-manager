@@ -5,6 +5,7 @@ import tkinter as tk
 import ctypes
 import json
 import sys
+from collections import Counter
 from base64 import b64encode
 from datetime import datetime
 from typing import Optional
@@ -2469,6 +2470,87 @@ class MainWindow:
             )
         return rows
 
+    def _build_audit_event_frequency(self, logs: list, limit: int = 8) -> list[dict]:
+        counter = Counter()
+        for log in logs:
+            event_type = str(getattr(log, "event_type", getattr(log, "action", "")) or "unknown")
+            counter[event_type] += 1
+        ordered = sorted(counter.items(), key=lambda item: (-item[1], item[0]))
+        return [
+            {
+                "event_type": event_type,
+                "count": count,
+                "label": self._format_audit_action(event_type),
+            }
+            for event_type, count in ordered[: max(1, int(limit))]
+        ]
+
+    def _build_audit_dashboard_lines(self, logs: list, *, total_count: int) -> list[str]:
+        integrity_status = getattr(self, "_audit_integrity_status", {}) or {}
+        verified = bool(integrity_status.get("verified", False))
+        invalid_entries = len(integrity_status.get("invalid_entries", []))
+        chain_breaks = len(integrity_status.get("chain_breaks", []))
+        critical_count = sum(1 for log in logs if str(getattr(log, "severity", "")).upper() == "CRITICAL")
+        warn_count = sum(1 for log in logs if str(getattr(log, "severity", "")).upper() == "WARN")
+        unique_users = len({str(getattr(log, "user_id", "local-user")) for log in logs})
+
+        archive_count = 0
+        if hasattr(self, "db") and hasattr(self.db, "get_audit_archives"):
+            try:
+                archive_count = len(self.db.get_audit_archives(limit=100))
+            except Exception:
+                archive_count = 0
+
+        security_event_count = 0
+        if hasattr(self, "db") and hasattr(self.db, "get_audit_security_events"):
+            try:
+                security_event_count = len(self.db.get_audit_security_events(limit=100))
+            except Exception:
+                security_event_count = 0
+
+        lines = [
+            "Сводка журнала аудита",
+            f"Записей в текущем представлении: {len(logs)} из {total_count}",
+            f"Статус целостности: {'валиден' if verified else 'требует внимания'}",
+            f"Ошибок проверки: {invalid_entries}, разрывов цепочки: {chain_breaks}",
+            f"Критических событий: {critical_count}, предупреждений: {warn_count}",
+            f"Уникальных пользователей: {unique_users}",
+            f"Архивов журнала: {archive_count}, security events: {security_event_count}",
+        ]
+        top_events = self._build_audit_event_frequency(logs, limit=3)
+        if top_events:
+            lines.append("Топ событий:")
+            for item in top_events:
+                lines.append(f"- {item['label']}: {item['count']}")
+        return lines
+
+    def _render_audit_frequency_chart(self, canvas, logs: list):
+        if canvas is None:
+            return
+        if hasattr(canvas, "delete"):
+            canvas.delete("all")
+        frequency = self._build_audit_event_frequency(logs, limit=6)
+        if not frequency or not hasattr(canvas, "create_rectangle"):
+            return
+
+        chart_width = int(canvas.cget("width")) if hasattr(canvas, "cget") else 520
+        bar_height = 20
+        gap = 10
+        left = 140
+        top = 12
+        usable_width = max(80, chart_width - left - 24)
+        max_count = max(item["count"] for item in frequency) or 1
+
+        for index, item in enumerate(frequency):
+            y1 = top + index * (bar_height + gap)
+            y2 = y1 + bar_height
+            width = int((item["count"] / max_count) * usable_width)
+            if hasattr(canvas, "create_text"):
+                canvas.create_text(8, y1 + bar_height / 2, anchor="w", text=item["label"][:24], fill="#1f2937")
+            canvas.create_rectangle(left, y1, left + width, y2, fill="#2f6fed", outline="")
+            if hasattr(canvas, "create_text"):
+                canvas.create_text(left + width + 8, y1 + bar_height / 2, anchor="w", text=str(item["count"]), fill="#111827")
+
     def _build_audit_log_detail_lines(self, log) -> list[str]:
         parsed_details = self._parse_audit_details(getattr(log, "details", ""))
         details_payload = str(getattr(log, "entry_data", "") or "")
@@ -3033,6 +3115,22 @@ class MainWindow:
             tree.column(key, width=120 if key != "event_type" else 180, anchor="w")
         tree.pack(fill=tk.BOTH, expand=True)
 
+        summary_frame = ttk.LabelFrame(lower, text="Статистика и целостность")
+        summary_frame.pack(fill=tk.X, expand=False, padx=4, pady=(0, 6))
+
+        dashboard_text = tk.Text(summary_frame, wrap=tk.WORD, height=8)
+        dashboard_text.pack(fill=tk.X, expand=False, padx=6, pady=(6, 4))
+
+        frequency_canvas = tk.Canvas(
+            summary_frame,
+            width=520,
+            height=200,
+            bg="#ffffff",
+            highlightthickness=1,
+            highlightbackground="#d1d5db",
+        )
+        frequency_canvas.pack(fill=tk.X, expand=False, padx=6, pady=(0, 6))
+
         details_text = tk.Text(lower, wrap=tk.WORD, height=12)
         details_text.pack(fill=tk.BOTH, expand=True)
 
@@ -3064,6 +3162,11 @@ class MainWindow:
             details_text.config(state=tk.NORMAL)
             details_text.delete("1.0", tk.END)
             details_text.config(state=tk.DISABLED)
+            dashboard_text.config(state=tk.NORMAL)
+            dashboard_text.delete("1.0", tk.END)
+            dashboard_text.insert("1.0", "\n".join(self._build_audit_dashboard_lines(sorted_logs, total_count=model["total_count"])))
+            dashboard_text.config(state=tk.DISABLED)
+            self._render_audit_frequency_chart(frequency_canvas, sorted_logs)
             dialog._audit_logs = {
                 str(getattr(log, "sequence_number", getattr(log, "id", ""))): log for log in sorted_logs
             }

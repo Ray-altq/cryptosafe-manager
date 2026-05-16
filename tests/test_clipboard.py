@@ -714,9 +714,9 @@ class ClipboardServiceTestCase(unittest.TestCase):
 
         cpu_started_at = time.process_time()
         wall_started_at = time.perf_counter()
-        for _index in range(80):
+        for _index in range(100):
             monitor.poll()
-            time.sleep(0.05)
+            time.sleep(0.06)
         cpu_elapsed = time.process_time() - cpu_started_at
         wall_elapsed = time.perf_counter() - wall_started_at
         cpu_ratio = 0 if wall_elapsed <= 0 else cpu_elapsed / wall_elapsed

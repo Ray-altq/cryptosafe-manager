@@ -1319,6 +1319,68 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
 
         self.assertEqual([log.sequence_number for log in sorted_logs], [2, 1, 3])
 
+    def test_build_audit_event_frequency_orders_by_count_and_formats_labels(self):
+        window = MainWindow.__new__(MainWindow)
+
+        class AuditLogRecord:
+            def __init__(self, event_type):
+                self.action = event_type
+                self.event_type = event_type
+
+        logs = [
+            AuditLogRecord("settings_changed"),
+            AuditLogRecord("settings_changed"),
+            AuditLogRecord("user_login_failed"),
+            AuditLogRecord("clipboard_error"),
+            AuditLogRecord("settings_changed"),
+            AuditLogRecord("user_login_failed"),
+        ]
+
+        frequency = window._build_audit_event_frequency(logs, limit=2)
+
+        self.assertEqual(frequency[0]["event_type"], "settings_changed")
+        self.assertEqual(frequency[0]["count"], 3)
+        self.assertEqual(frequency[1]["event_type"], "user_login_failed")
+
+    def test_build_audit_dashboard_lines_include_integrity_and_security_metrics(self):
+        window = MainWindow.__new__(MainWindow)
+        window._audit_integrity_status = {
+            "verified": False,
+            "invalid_entries": [{"sequence_number": 8, "reason": "invalid_signature"}],
+            "chain_breaks": [{"sequence_number": 9}],
+        }
+
+        class FakeAuditDb:
+            def get_audit_archives(self, limit=100):
+                return [{"id": 1}, {"id": 2}]
+
+            def get_audit_security_events(self, limit=100):
+                return [{"id": 1}, {"id": 2}, {"id": 3}]
+
+        class AuditLogRecord:
+            def __init__(self, sequence_number, event_type, severity, user_id):
+                self.sequence_number = sequence_number
+                self.action = event_type
+                self.event_type = event_type
+                self.severity = severity
+                self.user_id = user_id
+
+        window.db = FakeAuditDb()
+        logs = [
+            AuditLogRecord(1, "settings_changed", "WARN", "alice"),
+            AuditLogRecord(2, "user_login_failed", "CRITICAL", "alice"),
+            AuditLogRecord(3, "clipboard_error", "CRITICAL", "bob"),
+        ]
+
+        lines = window._build_audit_dashboard_lines(logs, total_count=42)
+        joined = "\n".join(lines)
+
+        self.assertIn("Записей в текущем представлении: 3 из 42", joined)
+        self.assertIn("Статус целостности: требует внимания", joined)
+        self.assertIn("Ошибок проверки: 1, разрывов цепочки: 1", joined)
+        self.assertIn("Критических событий: 2, предупреждений: 1", joined)
+        self.assertIn("Архивов журнала: 2, security events: 3", joined)
+
     def test_build_audit_log_detail_lines_for_failed_login_include_ip_and_time(self):
         window = MainWindow.__new__(MainWindow)
         window.audit_logger = FakeAuditLogger()
