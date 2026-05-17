@@ -178,6 +178,43 @@ class FakeClipboardService:
         return self.revealed_text
 
 
+class FakeVaultEntryManager:
+    def __init__(self):
+        self.entries = [
+            {
+                "id": 1,
+                "title": "GitHub",
+                "username": "ray",
+                "password": "Secret!123",
+                "url": "https://github.com",
+                "notes": "note",
+                "category": "Dev",
+                "tags": "git",
+            }
+        ]
+
+    def get_all_entries(self):
+        return list(self.entries)
+
+    def get_entry(self, entry_id):
+        return next(entry for entry in self.entries if entry["id"] == entry_id)
+
+    def create_entry(self, entry):
+        created = dict(entry)
+        created["id"] = max((item["id"] for item in self.entries), default=0) + 1
+        self.entries.append(created)
+        return created
+
+    def update_entry(self, entry_id, entry):
+        for index, existing in enumerate(self.entries):
+            if existing["id"] == entry_id:
+                updated = dict(existing)
+                updated.update(entry)
+                self.entries[index] = updated
+                return updated
+        raise KeyError(entry_id)
+
+
 class FakeAuthService:
     def __init__(self):
         self.logged_out = False
@@ -2345,6 +2382,95 @@ class TestMainWindowSecurityState(IntegrationTestCase):
             "\u041e\u0447\u0438\u0441\u0442\u0438\u0442\u0435 \u0431\u0443\u0444\u0435\u0440 \u043e\u0431\u043c\u0435\u043d\u0430 \u0432\u0440\u0443\u0447\u043d\u0443\u044e",
             showwarning.call_args.args[1],
         )
+
+    def test_vault_export_import_gui_helpers_roundtrip_encrypted_json(self):
+        window = MainWindow.__new__(MainWindow)
+        temp_dir = Path(self.make_db_path("vault-import-export-gui")).parent
+        export_path = temp_dir / "vault-export.json"
+        window.db = Database(str(temp_dir / "vault.db"))
+        self.addCleanup(window.db.close)
+        window.entry_manager = FakeVaultEntryManager()
+        window._get_selected_entries = lambda: []
+        window._show_info = lambda *args, **kwargs: None
+        window._show_warning = lambda *args, **kwargs: None
+        window._load_entries = lambda: setattr(window, "_entries_reloaded", True)
+
+        exported = window.export_vault_encrypted_json_to_path(str(export_path), "ExportPassword!123")
+        window.entry_manager.entries = []
+        result = window.import_vault_file(
+            str(export_path),
+            import_format="encrypted_json",
+            password="ExportPassword!123",
+            mode="merge",
+        )
+
+        self.assertTrue(exported)
+        self.assertEqual(result["created"], 1)
+        self.assertEqual(window.entry_manager.entries[0]["title"], "GitHub")
+        self.assertTrue(getattr(window, "_entries_reloaded", False))
+
+    def test_vault_csv_export_gui_helper_requires_confirmation(self):
+        window = MainWindow.__new__(MainWindow)
+        temp_dir = Path(self.make_db_path("vault-csv-export-gui")).parent
+        export_path = temp_dir / "vault-export.csv"
+        window.db = Database(str(temp_dir / "vault.db"))
+        self.addCleanup(window.db.close)
+        window.entry_manager = FakeVaultEntryManager()
+        window._get_selected_entries = lambda: []
+        window._ask_yes_no = lambda *args, **kwargs: True
+        window._show_info = lambda *args, **kwargs: None
+        window._show_warning = lambda *args, **kwargs: None
+
+        result = window.export_vault_csv_to_path(str(export_path))
+
+        self.assertTrue(result)
+        self.assertIn("GitHub", export_path.read_text(encoding="utf-8"))
+        self.assertIn("Secret!123", export_path.read_text(encoding="utf-8"))
+
+    def test_share_selected_entry_gui_helper_writes_package_and_db_record(self):
+        window = MainWindow.__new__(MainWindow)
+        temp_dir = Path(self.make_db_path("vault-share-gui")).parent
+        share_path = temp_dir / "entry-share.json"
+        window.db = Database(str(temp_dir / "vault.db"))
+        self.addCleanup(window.db.close)
+        entry_id = window.db.add_entry(
+            VaultEntry(
+                title="GitHub",
+                username="ray",
+                encrypted_password=b"secret",
+                encrypted_data=b"secret",
+                created_at=datetime.now(),
+                updated_at=datetime.now(),
+            )
+        )
+        window.entry_manager = FakeVaultEntryManager()
+        window.entry_manager.entries[0]["id"] = entry_id
+        window._get_single_selected_entry = lambda _action: EntryView(window.entry_manager.entries[0])
+        window._show_info = lambda *args, **kwargs: None
+
+        result = window.share_selected_entry_to_path(
+            str(share_path),
+            recipient="student@example.test",
+            password="SharePassword!123",
+        )
+
+        self.assertTrue(result)
+        self.assertTrue(share_path.exists())
+        self.assertEqual(window.db.get_shared_entries(limit=1)[0]["recipient_info"], "student@example.test")
+
+    def test_key_exchange_gui_helpers_generate_and_import_contact(self):
+        window = MainWindow.__new__(MainWindow)
+        window.db = Database(self.make_db_path("key-exchange-gui.db"))
+        self.addCleanup(window.db.close)
+        window._show_info = lambda *args, **kwargs: None
+
+        payload = window.generate_key_exchange_payload_text(identifier="alice@example.test", public_key="public-key")
+        contact_id = window.import_key_exchange_payload_text(payload, contact_name="Alice")
+        contacts = window.db.get_contacts(limit=5)
+
+        self.assertGreater(contact_id, 0)
+        self.assertEqual(contacts[0]["identifier"], "alice@example.test")
+        self.assertEqual(contacts[0]["name"], "Alice")
 
 
 if __name__ == "__main__":

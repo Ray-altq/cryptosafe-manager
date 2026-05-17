@@ -39,6 +39,11 @@ from ..core.crypto.key_storage import KeyStorage
 from ..core.crypto.password_validator import PasswordValidator
 from ..core.crypto.placeholder import AES256Placeholder
 from ..core.events import Event, EventType, event_bus
+from ..core.import_export import ExportOptions, ImportOptions, KeyExchangeService, SharePermissions
+from ..core.import_export.exceptions import ImportExportError, ImportValidationError
+from ..core.import_export.exporter import VaultExporter
+from ..core.import_export.importer import VaultImporter
+from ..core.import_export.sharing_service import SharingService
 from ..core.key_manager import KeyManager
 from ..core.state_manager import StateManager
 from ..core.vault import (
@@ -340,6 +345,9 @@ class MainWindow:
         file_menu.add_command(label="Открыть vault", command=self.open_database)
         file_menu.add_command(label="Резервная копия", command=self.backup)
         file_menu.add_separator()
+        file_menu.add_command(label="Экспорт vault", command=self.show_export_dialog)
+        file_menu.add_command(label="Импорт vault", command=self.show_import_dialog)
+        file_menu.add_separator()
         file_menu.add_command(label="Заблокировать", command=self._lock_vault)
         file_menu.add_command(label="Выход", command=self._on_close)
 
@@ -353,6 +361,8 @@ class MainWindow:
 
         entry_menu.add_command(label="Скопировать логин", command=self.copy_selected_username)
         entry_menu.add_command(label="Скопировать запись", command=self.copy_selected_all)
+        entry_menu.add_separator()
+        entry_menu.add_command(label="Поделиться записью", command=self.show_share_dialog)
 
         security_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Безопасность", menu=security_menu)
@@ -363,6 +373,7 @@ class MainWindow:
         security_menu.add_command(label="Сменить мастер-пароль", command=self.change_master_password)
         security_menu.add_command(label="Настройки", command=self.show_settings)
         security_menu.add_command(label="Журнал аудита", command=self.show_logs)
+        security_menu.add_command(label="Обмен ключами / QR", command=self.show_key_exchange_dialog)
 
         help_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Справка", menu=help_menu)
@@ -401,6 +412,9 @@ class MainWindow:
         ttk.Button(actions_row, textvariable=self.password_toggle_text, style="Ghost.TButton", command=self._toggle_password_visibility).pack(
             side=tk.LEFT, padx=3
         )
+        ttk.Button(actions_row, text="Экспорт", style="Ghost.TButton", command=self.show_export_dialog).pack(side=tk.LEFT, padx=(14, 3))
+        ttk.Button(actions_row, text="Импорт", style="Ghost.TButton", command=self.show_import_dialog).pack(side=tk.LEFT, padx=3)
+        ttk.Button(actions_row, text="Share", style="Ghost.TButton", command=self.show_share_dialog).pack(side=tk.LEFT, padx=3)
 
         ttk.Label(search_row, text="Поиск", style="TLabel").pack(side=tk.LEFT, padx=(0, 10))
         self.search_var = tk.StringVar()
@@ -2408,6 +2422,209 @@ class MainWindow:
             self._show_error("Ошибка буфера обмена", str(error))
             return False
         return True
+
+    def _build_vault_exporter(self) -> VaultExporter:
+        return VaultExporter(self.entry_manager, database=self.db, event_bus=event_bus)
+
+    def _build_vault_importer(self) -> VaultImporter:
+        return VaultImporter(self.entry_manager, database=self.db, event_bus=event_bus)
+
+    def _build_sharing_service(self) -> SharingService:
+        return SharingService(self.entry_manager, database=self.db, event_bus=event_bus)
+
+    def export_vault_encrypted_json_to_path(
+        self,
+        target_path: str,
+        password: str,
+        *,
+        selected_only: bool = False,
+        compression: bool = True,
+    ) -> bool:
+        entry_ids = [entry["id"] for entry in self._get_selected_entries()] if selected_only else None
+        if selected_only and not entry_ids:
+            self._show_warning("Экспорт vault", "Выберите записи для выборочного экспорта.")
+            return False
+        payload = self._build_vault_exporter().export_encrypted_json(
+            password,
+            ExportOptions(entry_ids=entry_ids, compression=compression),
+        )
+        self._write_audit_export_file(target_path, payload)
+        self._show_info("Экспорт vault", "Зашифрованный экспорт vault успешно сохранён.")
+        return True
+
+    def export_vault_csv_to_path(self, target_path: str, *, selected_only: bool = False) -> bool:
+        if not self._ask_yes_no(
+            "Экспорт CSV",
+            "CSV сохраняет данные в открытом виде. Продолжить только если файл будет защищён отдельно?",
+        ):
+            return False
+        entry_ids = [entry["id"] for entry in self._get_selected_entries()] if selected_only else None
+        if selected_only and not entry_ids:
+            self._show_warning("Экспорт CSV", "Выберите записи для выборочного экспорта.")
+            return False
+        payload = self._build_vault_exporter().export_csv(
+            ExportOptions(format="csv", entry_ids=entry_ids, plaintext_allowed=True),
+        )
+        self._write_audit_export_file(target_path, payload)
+        self._show_info("Экспорт CSV", "CSV экспорт vault сохранён.")
+        return True
+
+    def import_vault_file(self, source_path: str, *, import_format: str, password: str = "", mode: str = "dry-run") -> dict:
+        with open(source_path, "rb") as handle:
+            payload = handle.read()
+        importer = self._build_vault_importer()
+        normalized_format = str(import_format or "encrypted_json").strip().lower()
+        options = ImportOptions(format=normalized_format, mode=mode, duplicate_strategy="skip")
+        if normalized_format in {"encrypted_json", "json"}:
+            if not password:
+                raise ImportValidationError("Для encrypted JSON нужен пароль экспорта")
+            result = importer.import_encrypted_json(payload, password, options)
+        else:
+            result = importer.import_plaintext(payload, options)
+        if mode != "dry-run":
+            self._load_entries()
+        self._show_info(
+            "Импорт vault",
+            (
+                f"Проверено: {result.get('validated', 0)}; "
+                f"создано: {result.get('created', 0)}; "
+                f"обновлено: {result.get('updated', 0)}; "
+                f"пропущено: {result.get('skipped', 0)}."
+            ),
+        )
+        return result
+
+    def share_selected_entry_to_path(self, target_path: str, *, recipient: str, password: str, expires_in_days: int = 7) -> bool:
+        entry = self._get_single_selected_entry("Поделиться записью")
+        if not entry:
+            return False
+        package = self._build_sharing_service().create_password_share_package(
+            entry_id=entry["id"],
+            recipient=recipient,
+            password=password,
+            permissions=SharePermissions(read=True, edit=False, expires_in_days=expires_in_days),
+        )
+        self._write_audit_export_file(target_path, package)
+        self._show_info("Поделиться записью", "Зашифрованный share package сохранён.")
+        return True
+
+    def generate_key_exchange_payload_text(self, *, identifier: str, public_key: str) -> str:
+        service = KeyExchangeService(database=self.db, event_bus=event_bus)
+        return service.serialize_qr_payload(service.build_qr_payload(identifier=identifier, public_key=public_key))
+
+    def import_key_exchange_payload_text(self, payload_text: str, *, contact_name: str = "") -> int | None:
+        service = KeyExchangeService(database=self.db, event_bus=event_bus)
+        payload = service.parse_qr_payload(payload_text)
+        contact_id = service.remember_contact(payload, name=contact_name)
+        self._show_info("Обмен ключами", "Контакт и публичный ключ сохранены.")
+        return contact_id
+
+    def show_export_dialog(self):
+        if not self._reauthenticate_for_sensitive_action("Экспорт vault"):
+            return False
+        export_format = self._ask_string("Экспорт vault", "Формат: encrypted_json или csv", initialvalue="encrypted_json")
+        if not export_format:
+            return False
+        normalized_format = str(export_format).strip().lower()
+        selected_only = self._ask_yes_no("Экспорт vault", "Экспортировать только выбранные записи?")
+        if normalized_format in {"encrypted_json", "json"}:
+            password = self._ask_string("Пароль экспорта", "Введите пароль для файла экспорта:", show="*")
+            if not password:
+                return False
+            target_path = self._ask_saveas_filename(
+                title="Экспорт vault",
+                defaultextension=".json",
+                filetypes=[("CryptoSafe JSON", "*.json"), ("Все файлы", "*.*")],
+            )
+            if not target_path:
+                return False
+            return self.export_vault_encrypted_json_to_path(target_path, password, selected_only=selected_only)
+        if normalized_format == "csv":
+            target_path = self._ask_saveas_filename(
+                title="Экспорт vault CSV",
+                defaultextension=".csv",
+                filetypes=[("CSV", "*.csv"), ("Все файлы", "*.*")],
+            )
+            if not target_path:
+                return False
+            return self.export_vault_csv_to_path(target_path, selected_only=selected_only)
+        self._show_error("Экспорт vault", "Поддерживаются только encrypted_json и csv.")
+        return False
+
+    def show_import_dialog(self):
+        if not self._reauthenticate_for_sensitive_action("Импорт vault"):
+            return False
+        import_format = self._ask_string(
+            "Импорт vault",
+            "Формат: encrypted_json, csv, lastpass_csv или bitwarden_json",
+            initialvalue="encrypted_json",
+        )
+        if not import_format:
+            return False
+        source_path = self._ask_open_filename(
+            title="Импорт vault",
+            filetypes=[("Поддерживаемые файлы", "*.json *.csv"), ("Все файлы", "*.*")],
+        )
+        if not source_path:
+            return False
+        mode = "merge" if self._ask_yes_no("Импорт vault", "Применить импорт сейчас? Нет = dry-run preview.") else "dry-run"
+        password = ""
+        if str(import_format).strip().lower() in {"encrypted_json", "json"}:
+            password = self._ask_string("Пароль импорта", "Введите пароль файла экспорта:", show="*") or ""
+        try:
+            return self.import_vault_file(source_path, import_format=import_format, password=password, mode=mode)
+        except ImportExportError as error:
+            self._show_error("Импорт vault", str(error))
+            return False
+
+    def show_share_dialog(self):
+        if not self._reauthenticate_for_sensitive_action("Поделиться записью"):
+            return False
+        recipient = self._ask_string("Поделиться записью", "Получатель:")
+        if not recipient:
+            return False
+        password = self._ask_string("Пароль share package", "Пароль для получателя:", show="*")
+        if not password:
+            return False
+        target_path = self._ask_saveas_filename(
+            title="Сохранить share package",
+            defaultextension=".cs-share.json",
+            filetypes=[("CryptoSafe Share", "*.json"), ("Все файлы", "*.*")],
+        )
+        if not target_path:
+            return False
+        return self.share_selected_entry_to_path(target_path, recipient=recipient, password=password)
+
+    def show_key_exchange_dialog(self):
+        dialog = tk.Toplevel(self.root)
+        self._prepare_dialog(dialog)
+        dialog.title("Обмен ключами / QR")
+        dialog.geometry("720x520")
+        text = self._style_text_widget(tk.Text(dialog, wrap=tk.WORD, height=18))
+        text.pack(fill=tk.BOTH, expand=True, padx=14, pady=14)
+        controls = ttk.Frame(dialog, style="App.TFrame")
+        controls.pack(fill=tk.X, padx=14, pady=(0, 14))
+
+        def generate():
+            identifier = self._ask_string("Обмен ключами", "Identifier контакта:", initialvalue="local-user")
+            public_key = self._ask_string("Обмен ключами", "Публичный ключ или fingerprint payload:")
+            if not identifier or not public_key:
+                return
+            text.delete("1.0", tk.END)
+            text.insert("1.0", self.generate_key_exchange_payload_text(identifier=identifier, public_key=public_key))
+
+        def import_payload():
+            payload_text = text.get("1.0", tk.END).strip()
+            contact_name = self._ask_string("Обмен ключами", "Имя контакта:", initialvalue="")
+            try:
+                self.import_key_exchange_payload_text(payload_text, contact_name=contact_name or "")
+            except ImportExportError as error:
+                self._show_error("Обмен ключами", str(error), parent=dialog)
+
+        ttk.Button(controls, text="Сгенерировать payload", style="Ghost.TButton", command=generate).pack(side=tk.LEFT, padx=3)
+        ttk.Button(controls, text="Импортировать payload", style="Ghost.TButton", command=import_payload).pack(side=tk.LEFT, padx=3)
+        ttk.Button(controls, text="Закрыть", style="Ghost.TButton", command=dialog.destroy).pack(side=tk.RIGHT, padx=3)
+        return dialog
 
     def _get_entry_clipboard_policy(self, entry) -> str:
         return str(entry.get("clipboard_policy", "allow") or "allow").strip().lower()
