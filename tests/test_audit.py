@@ -11,7 +11,7 @@ from unittest.mock import patch
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from src.core.audit import AuditLogger, AuditLogVerifier, export_logs_to_cef, export_logs_to_json, import_logs_from_json
-from src.core.events import EventBus
+from src.core.events import Event, EventBus, EventType
 from src.database.db import Database
 
 
@@ -284,6 +284,21 @@ class TestAuditLogging(unittest.TestCase):
         security_events = self.database.get_audit_security_events(limit=1)
         self.assertEqual(security_events[0]["event_type"], "audit_integration_hook_failed")
         self.assertIn("broken-hook", security_events[0]["details"])
+
+    def test_sprint6_import_export_share_and_key_exchange_events_are_audited_with_sources(self):
+        self.event_bus.publish(Event(EventType.EXPORT_OPERATION_COMPLETED, {"format": "encrypted_json", "entry_count": 3}))
+        self.event_bus.publish(Event(EventType.IMPORT_OPERATION_COMPLETED, {"format": "csv", "created": 2}))
+        self.event_bus.publish(Event(EventType.SHARE_CREATED, {"share_id": "share-1", "entry_id": 7}))
+        self.event_bus.publish(Event(EventType.KEY_EXCHANGE_IMPORTED, {"identifier": "alice@example.test"}))
+        self.logger.flush()
+
+        logs = self.database.get_audit_log_chain()
+        by_event = {log.event_type: log for log in logs}
+
+        self.assertEqual(by_event["export_operation_completed"].source, "data_export")
+        self.assertEqual(by_event["import_operation_completed"].source, "data_import")
+        self.assertEqual(by_event["share_created"].source, "secure_sharing")
+        self.assertEqual(by_event["key_exchange_imported"].source, "key_exchange")
 
 
 if __name__ == "__main__":

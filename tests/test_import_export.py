@@ -2,6 +2,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 
@@ -59,6 +60,23 @@ class FakeEntryManager:
                 self.entries[index] = updated
                 return updated
         raise KeyError(entry_id)
+
+
+class LargeFakeEntryManager(FakeEntryManager):
+    def __init__(self, total=1000):
+        self.entries = [
+            {
+                "id": index + 1,
+                "title": f"Site {index}",
+                "username": f"user{index}",
+                "password": f"Secret!{index:04d}",
+                "url": f"https://example{index}.test",
+                "notes": "bulk import export test",
+                "category": "Bulk",
+                "tags": "perf,sprint6",
+            }
+            for index in range(total)
+        ]
 
 
 class TestImportExportFoundation(unittest.TestCase):
@@ -156,6 +174,47 @@ class TestImportExportFoundation(unittest.TestCase):
         with self.assertRaises(ImportValidationError):
             service.parse_qr_payload(json.dumps(tampered))
 
+    def test_key_exchange_rejects_replayed_nonce(self):
+        service = KeyExchangeService()
+        serialized = service.serialize_qr_payload(
+            service.build_qr_payload(identifier="alice@example.test", public_key="public-key")
+        )
+
+        service.parse_qr_payload(serialized)
+
+        with self.assertRaises(ImportValidationError):
+            service.parse_qr_payload(serialized)
+
+    def test_key_exchange_qr_payload_chunking_handles_one_kilobyte_payload(self):
+        service = KeyExchangeService()
+        public_key = "PUBLIC-" + ("A" * 1024)
+        serialized = service.serialize_qr_payload(
+            service.build_qr_payload(identifier="large@example.test", public_key=public_key)
+        )
+
+        chunks = service.split_qr_payload(serialized, max_chunk_size=256)
+        assembled = service.assemble_qr_chunks(chunks)
+        parsed = service.parse_qr_payload(assembled)
+
+        self.assertGreater(len(serialized), 1024)
+        self.assertGreater(len(chunks), 1)
+        self.assertEqual(parsed.public_key, public_key)
+
+    def test_key_exchange_contact_rotation_and_revocation(self):
+        service = KeyExchangeService(database=self.db)
+
+        first_id = service.rotate_contact_key(identifier="alice@example.test", public_key="first-key", name="Alice")
+        second_id = service.rotate_contact_key(identifier="alice@example.test", public_key="second-key", name="Alice")
+        contacts = self.db.get_contacts(include_revoked=True, limit=5)
+        revoked = service.revoke_contact("alice@example.test")
+        active_contacts = self.db.get_contacts(limit=5)
+
+        self.assertEqual(first_id, second_id)
+        self.assertEqual(contacts[0]["public_key"], "second-key")
+        self.assertEqual(contacts[0]["key_fingerprint"], service.fingerprint_public_key("second-key"))
+        self.assertTrue(revoked)
+        self.assertEqual(active_contacts, [])
+
     def test_native_encrypted_json_export_import_roundtrip(self):
         source_manager = FakeEntryManager()
         target_manager = FakeEntryManager()
@@ -187,6 +246,19 @@ class TestImportExportFoundation(unittest.TestCase):
 
         with self.assertRaises(ImportValidationError):
             importer.preview_encrypted_json(json.dumps(exported), "ExportPassword!123")
+
+    def test_native_encrypted_json_rejects_wrong_password(self):
+        exported = VaultExporter(FakeEntryManager(), database=self.db).export_encrypted_json("ExportPassword!123")
+
+        with self.assertRaises(ImportValidationError):
+            VaultImporter(FakeEntryManager(), database=self.db).preview_encrypted_json(exported, "WrongPassword!123")
+
+    def test_native_encrypted_json_does_not_expose_plaintext_secrets(self):
+        exported = VaultExporter(FakeEntryManager(), database=self.db).export_encrypted_json("ExportPassword!123")
+
+        self.assertNotIn("Secret!123", exported)
+        self.assertNotIn("MailSecret!123", exported)
+        self.assertIn('"ciphertext"', exported)
 
     def test_native_encrypted_json_dry_run_does_not_create_entries(self):
         target_manager = FakeEntryManager()
@@ -293,6 +365,38 @@ class TestImportExportFoundation(unittest.TestCase):
 
         self.assertEqual(result["validated"], 1)
         self.assertEqual(manager.entries, [])
+
+    def test_import_rejects_files_above_size_limit(self):
+        payload = "title,username,password\nExample,alice,Secret!123\n"
+
+        with self.assertRaises(ImportValidationError):
+            VaultImporter(FakeEntryManager(), database=self.db).preview_plaintext(
+                payload,
+                ImportOptions(format="csv", max_file_size=8),
+            )
+
+    def test_performance_export_import_1000_entries_stays_within_target(self):
+        source_manager = LargeFakeEntryManager(total=1000)
+        target_manager = LargeFakeEntryManager(total=0)
+        exporter = VaultExporter(source_manager, database=self.db)
+        importer = VaultImporter(target_manager, database=self.db)
+
+        export_started = time.perf_counter()
+        exported = exporter.export_encrypted_json("ExportPassword!123", ExportOptions(compression=True))
+        export_elapsed = time.perf_counter() - export_started
+
+        import_started = time.perf_counter()
+        result = importer.import_encrypted_json(
+            exported,
+            "ExportPassword!123",
+            ImportOptions(format="encrypted_json", mode="merge", timeout_seconds=30),
+        )
+        import_elapsed = time.perf_counter() - import_started
+
+        self.assertEqual(result["created"], 1000)
+        self.assertEqual(len(target_manager.entries), 1000)
+        self.assertLess(export_elapsed, 5.0)
+        self.assertLess(import_elapsed, 10.0)
 
     def test_password_share_package_roundtrips_and_records_metadata(self):
         self.db.add_entry(self.entry)

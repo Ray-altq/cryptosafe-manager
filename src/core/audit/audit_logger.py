@@ -261,6 +261,12 @@ class AuditLogger:
             "entry_deleted",
             "vault_locked",
             "vault_unlocked",
+            "export_operation_completed",
+            "import_operation_completed",
+            "share_created",
+            "share_imported",
+            "key_exchange_created",
+            "key_exchange_imported",
         }
 
     def _build_config(self, config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -422,8 +428,14 @@ class AuditLogger:
             return "application"
         if event_type.startswith("vault_"):
             return "system"
+        if event_type.startswith("export_operation"):
+            return "data_export"
         if event_type.startswith("import_operation"):
             return "data_import"
+        if event_type.startswith("share_"):
+            return "secure_sharing"
+        if event_type.startswith("key_exchange_"):
+            return "key_exchange"
         if event_type.startswith("panic_mode"):
             return "panic_mode"
         if event_type.startswith("totp_"):
