@@ -1,13 +1,14 @@
 import base64
 import gzip
+import hmac
 import json
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, Optional
 
 from ..events import Event, EventType
-from .crypto import checksum, derive_password_key, encrypt_aes_gcm, new_salt_and_nonce
+from .crypto import checksum, derive_password_key, encrypt_aes_gcm, encrypt_with_public_key, new_salt_and_nonce, wipe_bytes
 from .models import ExportOptions
-from .formats import CSVVaultFormat, NativeJSONFormat
+from .formats import BitwardenJSONFormat, CSVVaultFormat, LastPassCSVFormat, NativeJSONFormat
 
 
 class VaultExporter:
@@ -48,7 +49,12 @@ class VaultExporter:
 
         salt, _ = new_salt_and_nonce()
         key = derive_password_key(password, salt, bits=selected_options.encryption_strength)
-        nonce, ciphertext = encrypt_aes_gcm(payload_bytes, key)
+        key_buffer = bytearray(key)
+        try:
+            nonce, ciphertext = encrypt_aes_gcm(payload_bytes, key_buffer)
+            package_hmac = hmac.new(bytes(key_buffer), ciphertext, "sha256").hexdigest()
+        finally:
+            wipe_bytes(key_buffer)
         package = {
             "cryptosafe_export": True,
             "format": NativeJSONFormat.name,
@@ -73,6 +79,66 @@ class VaultExporter:
             "integrity": {
                 "checksum": checksum(ciphertext),
                 "payload_checksum": checksum(payload_bytes),
+                "hmac": package_hmac,
+                "signature": package_hmac,
+            },
+        }
+        output = NativeJSONFormat().serialize_header(package)
+        self._record_history(
+            operation_type="export",
+            format="encrypted_json",
+            encryption_used=package["encryption"]["algorithm"],
+            entry_count=len(entries),
+            file_size=len(output.encode("utf-8")),
+            package_checksum=package["integrity"]["checksum"],
+            verification_status="created",
+            details=package["metadata"],
+        )
+        self._publish(EventType.EXPORT_OPERATION_COMPLETED, {"format": "encrypted_json", "entry_count": len(entries)})
+        return output
+
+    def export_encrypted_json_for_public_key(self, public_key: str, options: Optional[ExportOptions] = None) -> str:
+        selected_options = options or ExportOptions()
+        entries = self.filter_entry_fields(
+            self.get_entries_for_export(selected_options),
+            selected_options.include_fields,
+        )
+        payload = {
+            "entries": [self._serialize_entry(entry) for entry in entries],
+            "entry_count": len(entries),
+        }
+        payload_bytes = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        compressed = bool(selected_options.compression)
+        if compressed:
+            payload_bytes = gzip.compress(payload_bytes)
+
+        encrypted = encrypt_with_public_key(payload_bytes, public_key)
+        package = {
+            "cryptosafe_export": True,
+            "format": NativeJSONFormat.name,
+            "version": NativeJSONFormat.version,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "metadata": {
+                "mode": "selected" if selected_options.entry_ids else "full",
+                "entry_count": len(entries),
+                "fields": selected_options.include_fields or "all",
+                "compressed": compressed,
+            },
+            "encryption": {
+                "algorithm": encrypted["algorithm"],
+                "method": encrypted["method"],
+                "key_size": encrypted["key_size"],
+                "key_fingerprint": encrypted["key_fingerprint"],
+                "nonce": encrypted["nonce"],
+            },
+            "data": {
+                "ciphertext": encrypted["ciphertext"],
+                "encrypted_key": encrypted["encrypted_key"],
+            },
+            "integrity": {
+                "checksum": encrypted["checksum"],
+                "payload_checksum": checksum(payload_bytes),
+                "signature": encrypted["checksum"],
             },
         }
         output = NativeJSONFormat().serialize_header(package)
@@ -109,6 +175,50 @@ class VaultExporter:
             details={"plaintext": True, "mode": "selected" if selected_options.entry_ids else "full"},
         )
         self._publish(EventType.EXPORT_OPERATION_COMPLETED, {"format": "csv", "entry_count": len(entries)})
+        return output
+
+    def export_bitwarden_json(self, options: Optional[ExportOptions] = None) -> str:
+        selected_options = options or ExportOptions(format="bitwarden_json", plaintext_allowed=True)
+        if not selected_options.plaintext_allowed:
+            raise ValueError("Password-manager exports must be explicitly allowed because they are plaintext migration files")
+        entries = self.filter_entry_fields(
+            self.get_entries_for_export(selected_options),
+            selected_options.include_fields,
+        )
+        output = BitwardenJSONFormat().serialize_entries([self._serialize_entry(entry) for entry in entries])
+        self._record_history(
+            operation_type="export",
+            format="bitwarden_json",
+            encryption_used="none",
+            entry_count=len(entries),
+            file_size=len(output.encode("utf-8")),
+            package_checksum=checksum(output.encode("utf-8")),
+            verification_status="created",
+            details={"plaintext": True, "target": "bitwarden"},
+        )
+        self._publish(EventType.EXPORT_OPERATION_COMPLETED, {"format": "bitwarden_json", "entry_count": len(entries)})
+        return output
+
+    def export_lastpass_csv(self, options: Optional[ExportOptions] = None) -> str:
+        selected_options = options or ExportOptions(format="lastpass_csv", plaintext_allowed=True)
+        if not selected_options.plaintext_allowed:
+            raise ValueError("Password-manager exports must be explicitly allowed because they are plaintext migration files")
+        entries = self.filter_entry_fields(
+            self.get_entries_for_export(selected_options),
+            selected_options.include_fields,
+        )
+        output = LastPassCSVFormat().serialize_entries([self._serialize_entry(entry) for entry in entries])
+        self._record_history(
+            operation_type="export",
+            format="lastpass_csv",
+            encryption_used="none",
+            entry_count=len(entries),
+            file_size=len(output.encode("utf-8")),
+            package_checksum=checksum(output.encode("utf-8")),
+            verification_status="created",
+            details={"plaintext": True, "target": "lastpass"},
+        )
+        self._publish(EventType.EXPORT_OPERATION_COMPLETED, {"format": "lastpass_csv", "entry_count": len(entries)})
         return output
 
     def _serialize_entry(self, entry: Dict[str, Any]) -> Dict[str, Any]:

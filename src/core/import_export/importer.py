@@ -1,12 +1,13 @@
 import re
 import base64
 import gzip
+import hmac
 import json
 import time
 from typing import Any, Dict, Iterable, List
 
 from ..events import Event, EventType
-from .crypto import checksum, decrypt_aes_gcm, derive_password_key
+from .crypto import checksum, decrypt_aes_gcm, decrypt_with_private_key, derive_password_key, wipe_bytes
 from .exceptions import ImportValidationError
 from .formats import BitwardenJSONFormat, CSVVaultFormat, LastPassCSVFormat, NativeJSONFormat
 from .models import ImportOptions
@@ -53,7 +54,9 @@ class VaultImporter:
             self._publish(EventType.IMPORT_OPERATION_COMPLETED, result)
             return result
 
-        existing = self._existing_entries_by_identity()
+        if import_options.mode == "replace":
+            self._clear_vault()
+        existing = {} if import_options.mode == "replace" else self._existing_entries_by_identity()
         deadline = started + max(1, int(import_options.timeout_seconds))
         for entry in entries:
             if time.monotonic() > deadline:
@@ -147,12 +150,39 @@ class VaultImporter:
 
     def _decrypt_native_payload(self, package: Dict[str, Any], password: str) -> Dict[str, Any]:
         encryption = package["encryption"]
+        if str(encryption.get("method", "")).lower() == "public_key":
+            plaintext = decrypt_with_private_key(
+                {
+                    "encrypted_key": package["data"].get("encrypted_key", ""),
+                    "nonce": encryption.get("nonce", ""),
+                    "ciphertext": package["data"].get("ciphertext", ""),
+                    "checksum": package["integrity"].get("checksum", ""),
+                },
+                password,
+            )
+            return self._decode_native_plaintext(package, plaintext)
+
         salt = self._decode_b64(encryption.get("salt", ""))
         nonce = self._decode_b64(encryption.get("nonce", ""))
         ciphertext = self._decode_b64(package["data"].get("ciphertext", ""))
         bits = 128 if "128" in str(encryption.get("algorithm", "")) else 256
         key = derive_password_key(password, salt, bits=bits, iterations=int(encryption.get("iterations", 100000)))
-        plaintext = decrypt_aes_gcm(ciphertext, key, nonce)
+        key_buffer = bytearray(key)
+        try:
+            expected_hmac = str(package["integrity"].get("hmac", ""))
+            if expected_hmac and not hmac.compare_digest(hmac.new(bytes(key_buffer), ciphertext, "sha256").hexdigest(), expected_hmac):
+                raise ImportValidationError("Native export HMAC does not match")
+            plaintext = decrypt_aes_gcm(ciphertext, key_buffer, nonce)
+        finally:
+            wipe_bytes(key_buffer)
+        return self._decode_native_plaintext(package, plaintext)
+
+    def estimate_import_export_memory_ratio(self, payload: str | bytes, entries: List[Dict[str, Any]]) -> float:
+        payload_size = max(1, len(self._as_bytes(payload)))
+        entry_size = len(json.dumps(entries, ensure_ascii=False, sort_keys=True).encode("utf-8"))
+        return entry_size / payload_size
+
+    def _decode_native_plaintext(self, package: Dict[str, Any], plaintext: bytes) -> Dict[str, Any]:
         if checksum(plaintext) != str(package["integrity"].get("payload_checksum", "")):
             raise ImportValidationError("Native export plaintext checksum does not match")
         if package.get("metadata", {}).get("compressed"):
@@ -189,7 +219,9 @@ class VaultImporter:
         if options.mode == "dry-run":
             return result
 
-        existing = self._existing_entries_by_identity()
+        if options.mode == "replace":
+            self._clear_vault()
+        existing = {} if options.mode == "replace" else self._existing_entries_by_identity()
         deadline = started + max(1, int(options.timeout_seconds))
         for entry in entries:
             if time.monotonic() > deadline:
@@ -207,6 +239,14 @@ class VaultImporter:
             existing[identity] = created
             result["created"] += 1
         return result
+
+    def _clear_vault(self):
+        if hasattr(self.entry_manager, "get_all_entries") and hasattr(self.entry_manager, "delete_entry"):
+            for entry in list(self.entry_manager.get_all_entries()):
+                self.entry_manager.delete_entry(int(entry["id"]), soft_delete=False)
+            return
+        if hasattr(self.entry_manager, "entries"):
+            self.entry_manager.entries = []
 
     def _record_history(
         self,

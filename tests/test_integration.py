@@ -2172,6 +2172,22 @@ class TestMainWindowSecurityState(IntegrationTestCase):
         self.assertTrue(window.auth_service.authenticated)
         self.assertTrue(window._entries_reloaded)
 
+    def test_unlock_vault_button_flow_prompts_login_and_reloads_entries(self):
+        window = MainWindow.__new__(MainWindow)
+        window.auth_service = FakeAuthService()
+        window.auth_service.authenticated = False
+        window.key_manager = FakeKeyManager()
+        window._initial_login_completed = True
+        window._login_prompt_active = False
+        window._require_login = lambda initial=False: setattr(window.auth_service, "authenticated", True)
+        window._load_entries = lambda: setattr(window, "_entries_reloaded", True)
+
+        unlocked = window._unlock_vault()
+
+        self.assertTrue(unlocked)
+        self.assertTrue(window.auth_service.authenticated)
+        self.assertTrue(window._entries_reloaded)
+
     def test_focus_loss_lock_is_delayed_while_temporary_clipboard_is_active(self):
         window = MainWindow.__new__(MainWindow)
         window.auth_service = FakeAuthService()
@@ -2458,6 +2474,19 @@ class TestMainWindowSecurityState(IntegrationTestCase):
         self.assertTrue(share_path.exists())
         self.assertEqual(window.db.get_shared_entries(limit=1)[0]["recipient_info"], "student@example.test")
 
+    def test_show_share_dialog_checks_selected_entry_before_prompting_details(self):
+        window = MainWindow.__new__(MainWindow)
+        window._reauthenticate_for_sensitive_action = lambda _action: True
+        window._get_single_selected_entry = lambda _action: None
+        window._ask_string = lambda *args, **kwargs: setattr(window, "_asked_string", True)
+        window._ask_saveas_filename = lambda *args, **kwargs: setattr(window, "_asked_file", True)
+
+        result = window.show_share_dialog()
+
+        self.assertFalse(result)
+        self.assertFalse(hasattr(window, "_asked_string"))
+        self.assertFalse(hasattr(window, "_asked_file"))
+
     def test_key_exchange_gui_helpers_generate_and_import_contact(self):
         window = MainWindow.__new__(MainWindow)
         window.db = Database(self.make_db_path("key-exchange-gui.db"))
@@ -2471,6 +2500,21 @@ class TestMainWindowSecurityState(IntegrationTestCase):
         self.assertGreater(contact_id, 0)
         self.assertEqual(contacts[0]["identifier"], "alice@example.test")
         self.assertEqual(contacts[0]["name"], "Alice")
+
+    def test_key_exchange_gui_helper_writes_private_payload_and_qr_files(self):
+        window = MainWindow.__new__(MainWindow)
+        temp_dir = Path(self.make_db_path("key-exchange-files")).parent
+        window.db = Database(str(temp_dir / "key-exchange.db"))
+        self.addCleanup(window.db.close)
+
+        bundle = window.generate_key_exchange_file_bundle(identifier="alice@example.test", output_dir=str(temp_dir))
+
+        self.assertTrue(Path(bundle["private_key_path"]).exists())
+        self.assertTrue(Path(bundle["payload_path"]).exists())
+        self.assertTrue(Path(bundle["qr_paths"][0]).exists())
+        self.assertIn("BEGIN PRIVATE KEY", Path(bundle["private_key_path"]).read_text(encoding="utf-8"))
+        self.assertIn("cryptosafe_key_exchange", Path(bundle["payload_path"]).read_text(encoding="utf-8"))
+        self.assertIn("<svg", Path(bundle["qr_paths"][0]).read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

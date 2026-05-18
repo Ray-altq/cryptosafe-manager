@@ -7,6 +7,30 @@ from ..exceptions import ImportValidationError
 class BitwardenJSONFormat:
     name = "bitwarden_json"
 
+    def serialize_entries(self, entries: List[Dict[str, Any]]) -> str:
+        items = []
+        for entry in entries:
+            tags = [
+                {"name": tag.strip(), "type": 0, "value": "true"}
+                for tag in str(entry.get("tags", "") or "").split(",")
+                if tag.strip()
+            ]
+            items.append(
+                {
+                    "type": 1,
+                    "name": str(entry.get("title", "") or ""),
+                    "notes": str(entry.get("notes", "") or ""),
+                    "folderId": str(entry.get("category", "") or ""),
+                    "login": {
+                        "username": str(entry.get("username", "") or ""),
+                        "password": str(entry.get("password", "") or ""),
+                        "uris": [{"uri": str(entry.get("url", "") or "")}] if entry.get("url") else [],
+                    },
+                    "fields": tags,
+                }
+            )
+        return json.dumps({"encrypted": False, "items": items}, ensure_ascii=False, sort_keys=True)
+
     def parse_entries(self, payload: str) -> List[Dict[str, str]]:
         try:
             parsed = json.loads(payload)
@@ -44,6 +68,27 @@ class BitwardenJSONFormat:
 
 class LastPassCSVFormat:
     name = "lastpass_csv"
+
+    def serialize_entries(self, entries: List[Dict[str, Any]]) -> str:
+        import csv
+        import io
+
+        output = io.StringIO(newline="")
+        fieldnames = ["url", "username", "password", "extra", "name", "grouping"]
+        writer = csv.DictWriter(output, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        for entry in entries:
+            writer.writerow(
+                {
+                    "url": str(entry.get("url", "") or ""),
+                    "username": str(entry.get("username", "") or ""),
+                    "password": str(entry.get("password", "") or ""),
+                    "extra": str(entry.get("notes", "") or ""),
+                    "name": str(entry.get("title", "") or ""),
+                    "grouping": str(entry.get("category", "") or ""),
+                }
+            )
+        return output.getvalue()
 
     def parse_entries(self, payload: str) -> List[Dict[str, str]]:
         from .csv_format import CSVVaultFormat

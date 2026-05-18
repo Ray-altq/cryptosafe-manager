@@ -8,8 +8,8 @@ from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from src.core.import_export import ExportOptions, ImportOptions, ImportValidationError, KeyExchangeService, SharePermissions
-from src.core.import_export.crypto import EXPORT_KEY_CONTEXT, SHARE_KEY_CONTEXT, derive_separated_key
+from src.core.import_export import ExportOptions, ImportOptions, ImportValidationError, KeyExchangeService, QRCodeService, SharePermissions
+from src.core.import_export.crypto import EXPORT_KEY_CONTEXT, SHARE_KEY_CONTEXT, derive_separated_key, wipe_bytes
 from src.core.import_export.exporter import VaultExporter
 from src.core.import_export.importer import VaultImporter
 from src.core.import_export.sharing_service import SharingService
@@ -61,6 +61,9 @@ class FakeEntryManager:
                 return updated
         raise KeyError(entry_id)
 
+    def delete_entry(self, entry_id, soft_delete=True):
+        self.entries = [entry for entry in self.entries if entry["id"] != entry_id]
+
 
 class LargeFakeEntryManager(FakeEntryManager):
     def __init__(self, total=1000):
@@ -110,6 +113,13 @@ class TestImportExportFoundation(unittest.TestCase):
         self.assertNotEqual(share_key, master_key)
         self.assertNotEqual(export_key, share_key)
         self.assertEqual(len(export_key), 32)
+
+    def test_sensitive_temporary_key_buffers_are_zeroized(self):
+        key_buffer = bytearray(b"temporary-export-key")
+
+        wipe_bytes(key_buffer)
+
+        self.assertEqual(bytes(key_buffer), b"\x00" * len(key_buffer))
 
     def test_exporter_supports_selected_entries_and_field_exclusion(self):
         exporter = VaultExporter(FakeEntryManager())
@@ -165,6 +175,30 @@ class TestImportExportFoundation(unittest.TestCase):
         self.assertEqual(parsed.fingerprint, service.fingerprint_public_key("public-key"))
         self.assertEqual(contacts[0]["identifier"], "alice@example.test")
 
+    def test_key_exchange_generates_rsa_2048_key_pair_for_public_key_sharing(self):
+        service = KeyExchangeService()
+
+        key_pair = service.generate_key_pair()
+        payload = service.build_qr_payload(identifier="alice@example.test", public_key=key_pair["public_key"])
+        parsed = service.parse_qr_payload(service.serialize_qr_payload(payload))
+
+        self.assertEqual(key_pair["algorithm"], "RSA-2048")
+        self.assertIn("BEGIN PRIVATE KEY", key_pair["private_key"])
+        self.assertIn("BEGIN PUBLIC KEY", key_pair["public_key"])
+        self.assertEqual(parsed.fingerprint, key_pair["fingerprint"])
+
+    def test_key_exchange_generates_ecc_p256_key_pair_for_ecies_sharing(self):
+        service = KeyExchangeService()
+
+        key_pair = service.generate_key_pair("ECC-P256")
+        payload = service.build_qr_payload(identifier="alice@example.test", public_key=key_pair["public_key"])
+        parsed = service.parse_qr_payload(service.serialize_qr_payload(payload))
+
+        self.assertEqual(key_pair["algorithm"], "ECC-P256")
+        self.assertIn("BEGIN PRIVATE KEY", key_pair["private_key"])
+        self.assertIn("BEGIN PUBLIC KEY", key_pair["public_key"])
+        self.assertEqual(parsed.fingerprint, key_pair["fingerprint"])
+
     def test_key_exchange_qr_payload_rejects_tampering(self):
         service = KeyExchangeService()
         payload = service.build_qr_payload(identifier="alice@example.test", public_key="public-key")
@@ -198,6 +232,48 @@ class TestImportExportFoundation(unittest.TestCase):
 
         self.assertGreater(len(serialized), 1024)
         self.assertGreater(len(chunks), 1)
+        self.assertEqual(parsed.public_key, public_key)
+
+    def test_qr_code_service_generates_svg_for_one_kilobyte_payload_and_roundtrips_fast(self):
+        key_exchange = KeyExchangeService()
+        qr_service = QRCodeService(key_exchange, error_correction="M")
+        public_key = "PUBLIC-" + ("A" * 1024)
+        raw_payload = key_exchange.serialize_qr_payload(
+            key_exchange.build_qr_payload(identifier="large@example.test", public_key=public_key)
+        )
+
+        started = time.perf_counter()
+        svgs = qr_service.generate_qr_svgs(raw_payload, max_chunk_size=512)
+        elapsed = time.perf_counter() - started
+        assembled = qr_service.parse_qr_svgs(svgs)
+        parsed = key_exchange.parse_qr_payload(assembled)
+
+        self.assertLess(elapsed, 0.1)
+        self.assertGreaterEqual(len(svgs), 1)
+        self.assertIn("<svg", svgs[0])
+        self.assertIn("data-error-correction=\"M\"", svgs[0])
+        self.assertEqual(parsed.public_key, public_key)
+
+    def test_qr_code_service_imports_payload_from_svg_image_file(self):
+        key_exchange = KeyExchangeService()
+        qr_service = QRCodeService(key_exchange, error_correction="Q")
+        public_key = "PUBLIC-" + ("B" * 1024)
+        raw_payload = key_exchange.serialize_qr_payload(
+            key_exchange.build_qr_payload(identifier="file@example.test", public_key=public_key)
+        )
+        svgs = qr_service.generate_qr_svgs(raw_payload, max_chunk_size=512)
+        svg_paths = []
+        for svg in svgs:
+            with tempfile.NamedTemporaryFile("w", suffix=".svg", encoding="utf-8", delete=False) as handle:
+                handle.write(svg)
+                svg_paths.append(handle.name)
+        try:
+            assembled = qr_service.parse_qr_svg_files(svg_paths)
+            parsed = key_exchange.parse_qr_payload(assembled)
+        finally:
+            for svg_path in svg_paths:
+                os.unlink(svg_path)
+
         self.assertEqual(parsed.public_key, public_key)
 
     def test_key_exchange_contact_rotation_and_revocation(self):
@@ -259,6 +335,31 @@ class TestImportExportFoundation(unittest.TestCase):
         self.assertNotIn("Secret!123", exported)
         self.assertNotIn("MailSecret!123", exported)
         self.assertIn('"ciphertext"', exported)
+        self.assertIn('"hmac"', exported)
+
+    def test_native_encrypted_json_public_key_roundtrip_uses_hybrid_encryption(self):
+        key_pair = KeyExchangeService().generate_key_pair()
+        source_manager = FakeEntryManager()
+        target_manager = FakeEntryManager()
+        target_manager.entries = []
+
+        exported = VaultExporter(source_manager, database=self.db).export_encrypted_json_for_public_key(
+            key_pair["public_key"],
+            ExportOptions(compression=True),
+        )
+        exported_package = json.loads(exported)
+        result = VaultImporter(target_manager, database=self.db).import_encrypted_json(
+            exported,
+            key_pair["private_key"],
+            ImportOptions(format="encrypted_json", mode="merge"),
+        )
+
+        self.assertEqual(exported_package["encryption"]["algorithm"], "RSA-OAEP/AES-256-GCM")
+        self.assertEqual(exported_package["encryption"]["key_fingerprint"], key_pair["fingerprint"])
+        self.assertIn("encrypted_key", exported_package["data"])
+        self.assertNotIn("Secret!123", exported)
+        self.assertEqual(result["created"], 2)
+        self.assertEqual(target_manager.entries[0]["password"], "Secret!123")
 
     def test_native_encrypted_json_dry_run_does_not_create_entries(self):
         target_manager = FakeEntryManager()
@@ -300,8 +401,69 @@ class TestImportExportFoundation(unittest.TestCase):
         )
 
         self.assertIn("title,username,password", exported)
+        self.assertTrue(exported.startswith("# CryptoSafe CSV Export"))
         self.assertEqual(preview[0]["title"], "GitHub")
         self.assertEqual(preview[0]["password"], "Secret!123")
+
+    def test_bitwarden_and_lastpass_exports_are_compatible_with_importers(self):
+        exporter = VaultExporter(FakeEntryManager(), database=self.db)
+
+        bitwarden = exporter.export_bitwarden_json(ExportOptions(format="bitwarden_json", plaintext_allowed=True))
+        lastpass = exporter.export_lastpass_csv(ExportOptions(format="lastpass_csv", plaintext_allowed=True))
+        bitwarden_preview = VaultImporter(FakeEntryManager(), database=self.db).preview_plaintext(
+            bitwarden,
+            ImportOptions(format="bitwarden_json"),
+        )
+        lastpass_preview = VaultImporter(FakeEntryManager(), database=self.db).preview_plaintext(
+            lastpass,
+            ImportOptions(format="lastpass_csv"),
+        )
+
+        self.assertIn('"items"', bitwarden)
+        self.assertIn("url,username,password,extra,name,grouping", lastpass)
+        self.assertEqual(bitwarden_preview[0]["title"], "GitHub")
+        self.assertEqual(bitwarden_preview[0]["password"], "Secret!123")
+        self.assertEqual(lastpass_preview[0]["title"], "GitHub")
+        self.assertEqual(lastpass_preview[0]["category"], "Dev")
+
+    def test_replace_import_mode_clears_vault_before_import(self):
+        source_manager = FakeEntryManager()
+        source_manager.entries = [
+            {
+                "id": 10,
+                "title": "Replacement",
+                "username": "new",
+                "password": "NewSecret!123",
+                "url": "",
+                "notes": "",
+                "category": "Fresh",
+                "tags": "replace",
+            }
+        ]
+        target_manager = FakeEntryManager()
+        exported = VaultExporter(source_manager, database=self.db).export_encrypted_json("ExportPassword!123")
+
+        result = VaultImporter(target_manager, database=self.db).import_encrypted_json(
+            exported,
+            "ExportPassword!123",
+            ImportOptions(format="encrypted_json", mode="replace"),
+        )
+
+        self.assertEqual(result["created"], 1)
+        self.assertEqual(len(target_manager.entries), 1)
+        self.assertEqual(target_manager.entries[0]["title"], "Replacement")
+
+    def test_import_export_memory_ratio_stays_under_two_times_file_size(self):
+        source_manager = LargeFakeEntryManager(total=1000)
+        target_manager = LargeFakeEntryManager(total=0)
+        exported = VaultExporter(source_manager, database=self.db).export_encrypted_json(
+            "ExportPassword!123",
+            ExportOptions(compression=False),
+        )
+        importer = VaultImporter(target_manager, database=self.db)
+        preview = importer.preview_encrypted_json(exported, "ExportPassword!123")
+
+        self.assertLessEqual(importer.estimate_import_export_memory_ratio(exported, preview), 2.0)
 
     def test_lastpass_csv_import_maps_known_columns(self):
         manager = FakeEntryManager()
@@ -445,6 +607,67 @@ class TestImportExportFoundation(unittest.TestCase):
                 json.dumps(package),
                 "SharePassword!123",
             )
+
+    def test_public_key_share_package_roundtrips_and_rejects_tampering(self):
+        self.db.add_entry(self.entry)
+        key_pair = KeyExchangeService().generate_key_pair()
+        target_manager = FakeEntryManager()
+        target_manager.entries = []
+
+        package = SharingService(FakeEntryManager(), database=self.db).create_public_key_share_package(
+            entry_id=1,
+            recipient="student@example.test",
+            public_key=key_pair["public_key"],
+            sender_public_key=key_pair["public_key"],
+            permissions=SharePermissions(read=True, edit=False, expires_in_days=2),
+        )
+        preview = SharingService(target_manager, database=self.db).preview_public_key_share_package(
+            package,
+            key_pair["private_key"],
+        )
+        result = SharingService(target_manager, database=self.db).import_public_key_share_package(
+            package,
+            key_pair["private_key"],
+        )
+        tampered = json.loads(package)
+        tampered["data"]["ciphertext"] = tampered["data"]["ciphertext"][:-4] + "AAAA"
+
+        self.assertEqual(preview["entry"]["title"], "GitHub")
+        self.assertEqual(preview["entry"]["password"], "Secret!123")
+        self.assertEqual(result["created"], 1)
+        self.assertNotIn("Secret!123", package)
+        self.assertIn("sender_public_key", package)
+        with self.assertRaises(ImportValidationError):
+            SharingService(FakeEntryManager()).preview_public_key_share_package(
+                json.dumps(tampered),
+                key_pair["private_key"],
+            )
+
+    def test_ecies_share_package_uses_ephemeral_p256_key_and_roundtrips(self):
+        self.db.add_entry(self.entry)
+        recipient_key_pair = KeyExchangeService().generate_key_pair("ECC-P256")
+        sender_key_pair = KeyExchangeService().generate_key_pair("ECC-P256")
+        target_manager = FakeEntryManager()
+        target_manager.entries = []
+
+        package = SharingService(FakeEntryManager(), database=self.db).create_public_key_share_package(
+            entry_id=1,
+            recipient="student@example.test",
+            public_key=recipient_key_pair["public_key"],
+            sender_public_key=sender_key_pair["public_key"],
+            encryption_method="ecies",
+        )
+        parsed_package = json.loads(package)
+        result = SharingService(target_manager, database=self.db).import_public_key_share_package(
+            package,
+            recipient_key_pair["private_key"],
+        )
+
+        self.assertEqual(parsed_package["encryption"]["algorithm"], "ECIES-P256/AES-256-GCM")
+        self.assertEqual(parsed_package["encryption"]["curve"], "P-256")
+        self.assertIn("ephemeral_public_key", parsed_package["data"])
+        self.assertEqual(result["created"], 1)
+        self.assertEqual(target_manager.entries[0]["password"], "Secret!123")
 
     def test_password_share_package_rejects_expired_package(self):
         self.db.add_entry(self.entry)

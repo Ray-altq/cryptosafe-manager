@@ -1,13 +1,18 @@
 import base64
 import hashlib
 import hmac
+import html
+import io
 import json
 import os
+import time
+import zlib
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
 
 from ..events import Event, EventType
+from .crypto import generate_ec_key_pair, generate_rsa_key_pair, public_key_fingerprint
 from .exceptions import ImportValidationError
 
 
@@ -33,8 +38,22 @@ class KeyExchangeService:
         self._seen_nonces: set[str] = set()
 
     def fingerprint_public_key(self, public_key: str) -> str:
-        digest = hashlib.sha256(str(public_key).encode("utf-8")).hexdigest().upper()
-        return ":".join(digest[index:index + 2] for index in range(0, 32, 2))
+        return public_key_fingerprint(public_key)
+
+    def generate_key_pair(self, algorithm: str = "RSA-2048") -> Dict[str, str]:
+        normalized_algorithm = str(algorithm or "RSA-2048").upper()
+        if normalized_algorithm in {"ECC", "EC", "P-256", "ECC-P256"}:
+            private_key, public_key = generate_ec_key_pair()
+            algorithm_name = "ECC-P256"
+        else:
+            private_key, public_key = generate_rsa_key_pair()
+            algorithm_name = "RSA-2048"
+        return {
+            "algorithm": algorithm_name,
+            "private_key": private_key,
+            "public_key": public_key,
+            "fingerprint": self.fingerprint_public_key(public_key),
+        }
 
     def build_qr_payload(self, *, identifier: str, public_key: str) -> Dict[str, Any]:
         now = datetime.now(timezone.utc)
@@ -98,8 +117,9 @@ class KeyExchangeService:
 
     def split_qr_payload(self, raw_payload: str, *, max_chunk_size: int = 512) -> List[str]:
         payload = str(raw_payload)
+        encoded_payload = base64.b64encode(zlib.compress(payload.encode("utf-8"))).decode("ascii")
         chunk_size = max(128, int(max_chunk_size))
-        chunks = [payload[index:index + chunk_size] for index in range(0, len(payload), chunk_size)] or [""]
+        chunks = [encoded_payload[index:index + chunk_size] for index in range(0, len(encoded_payload), chunk_size)] or [""]
         transfer_id = base64.urlsafe_b64encode(os.urandom(8)).decode("ascii").rstrip("=")
         full_checksum = hashlib.sha256(payload.encode("utf-8")).hexdigest()
         return [
@@ -111,6 +131,7 @@ class KeyExchangeService:
                     "index": index,
                     "total": len(chunks),
                     "checksum": full_checksum,
+                    "encoding": "zlib+base64",
                     "data": chunk,
                 },
                 ensure_ascii=False,
@@ -144,6 +165,11 @@ class KeyExchangeService:
         if [int(chunk.get("index", -1)) for chunk in ordered] != list(range(total)):
             raise ImportValidationError("QR chunks are out of sequence")
         payload = "".join(str(chunk.get("data", "")) for chunk in ordered)
+        if str(ordered[0].get("encoding", "")) == "zlib+base64":
+            try:
+                payload = zlib.decompress(base64.b64decode(payload.encode("ascii"), validate=True)).decode("utf-8")
+            except Exception as exc:
+                raise ImportValidationError("QR chunk compressed payload is invalid") from exc
         expected_checksum = checksums.pop()
         if not hmac.compare_digest(hashlib.sha256(payload.encode("utf-8")).hexdigest(), str(expected_checksum)):
             raise ImportValidationError("QR chunk checksum does not match")
@@ -196,3 +222,81 @@ class KeyExchangeService:
 
 def hmac_compare(left: str, right: str) -> bool:
     return hmac.compare_digest(str(left), str(right))
+
+
+class QRCodeService:
+    _segno_backend = None
+
+    def __init__(self, key_exchange: KeyExchangeService | None = None, *, error_correction: str = "M"):
+        self.key_exchange = key_exchange or KeyExchangeService()
+        self.error_correction = str(error_correction or "M").upper()
+        self._ensure_qr_backend()
+
+    def generate_qr_svgs(self, raw_payload: str, *, max_chunk_size: int = 1024) -> List[str]:
+        chunks = self.key_exchange.split_qr_payload(raw_payload, max_chunk_size=max_chunk_size)
+        return [self._chunk_to_svg(chunk) for chunk in chunks]
+
+    def parse_qr_svgs(self, svg_payloads: List[str]) -> str:
+        chunks = [self._extract_chunk_from_svg(svg) for svg in svg_payloads]
+        return self.key_exchange.assemble_qr_chunks(chunks)
+
+    def parse_qr_svg_files(self, file_paths: List[str]) -> str:
+        svg_payloads = []
+        for file_path in file_paths:
+            with open(file_path, "r", encoding="utf-8") as handle:
+                svg_payloads.append(handle.read())
+        return self.parse_qr_svgs(svg_payloads)
+
+    def scan_from_camera(self) -> str:
+        raise ImportValidationError("Device camera scanning is unavailable in this environment; use QR image file upload")
+
+    def generate_key_exchange_svgs(self, *, identifier: str, public_key: str, max_chunk_size: int = 1024) -> List[str]:
+        raw_payload = self.key_exchange.serialize_qr_payload(
+            self.key_exchange.build_qr_payload(identifier=identifier, public_key=public_key)
+        )
+        return self.generate_qr_svgs(raw_payload, max_chunk_size=max_chunk_size)
+
+    def parse_key_exchange_svgs(self, svg_payloads: List[str]) -> KeyExchangePayload:
+        return self.key_exchange.parse_qr_payload(self.parse_qr_svgs(svg_payloads))
+
+    def benchmark_generation(self, raw_payload: str, *, max_chunk_size: int = 1024) -> Dict[str, Any]:
+        started = time.perf_counter()
+        svgs = self.generate_qr_svgs(raw_payload, max_chunk_size=max_chunk_size)
+        return {
+            "elapsed_seconds": time.perf_counter() - started,
+            "qr_count": len(svgs),
+            "total_bytes": sum(len(svg.encode("utf-8")) for svg in svgs),
+        }
+
+    def _chunk_to_svg(self, chunk: str) -> str:
+        metadata = html.escape(chunk, quote=True)
+        segno = self._ensure_qr_backend()
+        qr = segno.make(chunk, error=self.error_correction.lower(), micro=False)
+        output = io.BytesIO()
+        qr.save(output, kind="svg", scale=8, border=4)
+        svg = output.getvalue().decode("utf-8")
+        return svg.replace(
+            "<svg ",
+            f'<svg data-cryptosafe-qr="1" data-error-correction="{html.escape(self.error_correction)}" ',
+            1,
+        ).replace("</svg>", f"<metadata>{metadata}</metadata></svg>", 1)
+
+    def _ensure_qr_backend(self):
+        if self.__class__._segno_backend is not None:
+            return self.__class__._segno_backend
+        try:
+            import segno
+        except Exception as exc:
+            raise ImportValidationError(
+                "QR generation requires the segno package. Install dependencies with: py -m pip install -r requirements.txt"
+            ) from exc
+        self.__class__._segno_backend = segno
+        return segno
+
+    def _extract_chunk_from_svg(self, svg_payload: str) -> str:
+        text = str(svg_payload or "")
+        start = text.find("<metadata>")
+        end = text.find("</metadata>")
+        if start < 0 or end <= start:
+            raise ImportValidationError("QR image does not contain CryptoSafe payload metadata")
+        return html.unescape(text[start + len("<metadata>"):end])
