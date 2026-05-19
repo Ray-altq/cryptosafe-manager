@@ -15,6 +15,12 @@ except ImportError as e:
     sys.exit(1)
 
 if __name__ == "__main__":
+    if os.environ.get("CRYPTOSAFE_RUN_MEMORY_DUMP_TEST") == "1":
+        from tests.test_run_memory_dump import run_memory_dump_mode
+
+        run_memory_dump_mode()
+        sys.exit(0)
+
     print("=" * 50)
     print("CryptoSafe Manager")
     print("=" * 50)

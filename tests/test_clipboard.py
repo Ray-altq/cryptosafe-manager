@@ -1,7 +1,5 @@
-import ctypes
-import json
+﻿import ctypes
 import os
-import subprocess
 import sys
 import tempfile
 import threading
@@ -9,7 +7,6 @@ import time
 import tracemalloc
 import types
 import unittest
-import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -64,7 +61,7 @@ def _contains_secret_in_process_memory(pid: int, secret_bytes: bytes) -> bool:
         return _contains_secret_in_windows_process_memory(pid, secret_bytes)
     if sys.platform.startswith("linux"):
         return _contains_secret_in_linux_process_memory(pid, secret_bytes)
-    raise unittest.SkipTest("Реальная проверка дампа памяти поддерживается только на Windows и Linux")
+    raise unittest.SkipTest("Р РµР°Р»СЊРЅР°СЏ РїСЂРѕРІРµСЂРєР° РґР°РјРїР° РїР°РјСЏС‚Рё РїРѕРґРґРµСЂР¶РёРІР°РµС‚СЃСЏ С‚РѕР»СЊРєРѕ РЅР° Windows Рё Linux")
 
 
 def _contains_secret_in_windows_process_memory(pid: int, secret_bytes: bytes) -> bool:
@@ -82,7 +79,7 @@ def _contains_secret_in_windows_process_memory(pid: int, secret_bytes: bytes) ->
     kernel32 = ctypes.windll.kernel32
     process_handle = kernel32.OpenProcess(0x0400 | 0x0010, False, pid)
     if not process_handle:
-        raise RuntimeError("Не удалось открыть процесс для чтения памяти")
+        raise RuntimeError("РќРµ СѓРґР°Р»РѕСЃСЊ РѕС‚РєСЂС‹С‚СЊ РїСЂРѕС†РµСЃСЃ РґР»СЏ С‡С‚РµРЅРёСЏ РїР°РјСЏС‚Рё")
 
     try:
         address = 0
@@ -124,7 +121,7 @@ def _contains_secret_in_linux_process_memory(pid: int, secret_bytes: bytes) -> b
     maps_path = Path(f"/proc/{pid}/maps")
     mem_path = Path(f"/proc/{pid}/mem")
     if not maps_path.exists() or not mem_path.exists():
-        raise unittest.SkipTest("Текущая Linux-среда не поддерживает чтение /proc/<pid>/mem")
+        raise unittest.SkipTest("РўРµРєСѓС‰Р°СЏ Linux-СЃСЂРµРґР° РЅРµ РїРѕРґРґРµСЂР¶РёРІР°РµС‚ С‡С‚РµРЅРёРµ /proc/<pid>/mem")
 
     with maps_path.open("r", encoding="utf-8") as maps_file, mem_path.open("rb", buffering=0) as mem_file:
         for line in maps_file:
@@ -442,46 +439,6 @@ class ClipboardServiceTestCase(unittest.TestCase):
         snapshot = self.service.build_memory_dump_snapshot()
 
         self.assertNotIn(b"Secret!123", snapshot)
-
-    def test_real_process_memory_dump_does_not_find_plaintext_password(self):
-        helper_path = Path(__file__).with_name("clipboard_memory_dump_helper.py")
-        if not helper_path.exists():
-            self.fail("Не найден helper для реальной проверки дампа памяти")
-
-        seed_bytes = f"seed-{uuid.uuid4().hex}-{time.time_ns()}".encode("utf-8")
-        secret_bytes = _derive_memory_dump_secret(seed_bytes)
-        process = subprocess.Popen(
-            [sys.executable, str(helper_path)],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-
-        try:
-            process.stdin.write(seed_bytes + b"\n")
-            process.stdin.flush()
-            process.stdin.close()
-
-            ready_line = process.stdout.readline().decode("utf-8", errors="replace").strip()
-            if not ready_line:
-                stderr_output = process.stderr.read().decode("utf-8", errors="replace")
-                self.fail(f"Helper не сообщил о готовности к memory dump проверке: {stderr_output}")
-
-            ready_payload = json.loads(ready_line)
-            self.assertEqual(ready_payload.get("status"), "ready")
-            self.assertFalse(_contains_secret_in_process_memory(int(ready_payload["pid"]), secret_bytes))
-        finally:
-            if process.poll() is None:
-                process.terminate()
-                try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=5)
-            if process.stdout is not None:
-                process.stdout.close()
-            if process.stderr is not None:
-                process.stderr.close()
 
     def test_copy_rejects_null_bytes_in_value(self):
         clipboard_errors = []

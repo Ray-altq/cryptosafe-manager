@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from src.core.audit import AuditLogger, AuditLogVerifier, export_logs_to_cef, export_logs_to_json, import_logs_from_json
+from src.core.audit import AuditLogger, AuditLogSigner, AuditLogVerifier, export_logs_to_cef, export_logs_to_json, import_logs_from_json
 from src.core.events import Event, EventBus, EventType
 from src.database.db import Database
 
@@ -48,22 +48,27 @@ class TestAuditLogging(unittest.TestCase):
         if flush:
             self.logger.flush()
 
-    def test_integrity_test_detects_database_tampering_after_1000_entries(self):
+    def test_detects_tampered_audit_entry(self):
+        #сначала создаём длинную нормальную цепочку аудит-записей
         self._generate_logs(1000)
 
         with self.database._get_connection() as conn:
+            #в обычной работе апдейт запрещён триггером, поэтому для теста
+            #временно убираем защиту и портим одну запись в БД
             conn.execute("DROP TRIGGER IF EXISTS trg_audit_log_no_update")
             conn.execute(
                 "UPDATE audit_log SET entry_data = ? WHERE sequence_number = ?",
                 ('{"tampered":true}', 501),
             )
 
+        #верифаер должен заметить, что подпись/хэш у записи больше не сходятся
         results = self.verifier.verify()
 
         self.assertFalse(results["verified"])
         self.assertTrue(any(item["sequence_number"] == 501 for item in results["invalid_entries"]))
 
-    def test_performance_test_handles_10000_events_with_target_thresholds(self):
+    def test_audit_performance_10000_events(self):
+        #проверяем, что аудит сабсистем выдерживает большой объём событий
         started_at = time.perf_counter()
         self._generate_logs(10000, flush=False)
         enqueue_elapsed = time.perf_counter() - started_at
@@ -100,14 +105,17 @@ class TestAuditLogging(unittest.TestCase):
         self.assertLess(query_elapsed, 0.5)
         self.assertLess(peak_memory, 50 * 1024 * 1024)
 
-    def test_export_import_test_verifies_signed_json_and_reimported_chain(self):
+    def test_signed_json_export_import(self):
         self._generate_logs(25)
         original_logs = self.database.get_audit_log_chain()
         exported_json = export_logs_to_json(original_logs, public_key=self.logger.signer.public_key_hex)
 
-        exported_verification = self.verifier.verify_exported_json(exported_json)
+        #подписанный джсон проверяется отдельным верифаером, а не тем же логгер-объектом
+        independent_verifier = AuditLogVerifier(self.database, AuditLogSigner(lambda: b"b" * 32))
+        exported_verification = independent_verifier.verify_exported_json(exported_json)
         self.assertTrue(exported_verification["verified"])
 
+        #после обратного импорта цепочка также должна остаться валидной
         imported_entries = import_logs_from_json(exported_json)
         imported_temp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         imported_temp.close()
@@ -137,9 +145,10 @@ class TestAuditLogging(unittest.TestCase):
         self.assertIn("suser=", first_line)
         self.assertIn("cn1Label=sequence_number", first_line)
 
-    def test_failure_recovery_test_reports_database_corruption_gracefully(self):
+    def test_database_error_returns_recovery_options(self):
         self._generate_logs(5)
 
+        #имитируем ошибку чтения аудит тэйбл верифаер не должен падать наружу
         with patch.object(self.database, "get_audit_log_chain", side_effect=sqlite3.DatabaseError("corrupted")):
             results = self.verifier.verify()
 
@@ -147,10 +156,41 @@ class TestAuditLogging(unittest.TestCase):
         self.assertEqual(results["invalid_entries"][0]["reason"], "database_error")
         self.assertIn("restore_from_backup", results["recovery_options"])
 
-    def test_security_test_blocks_sql_injection_style_queries_and_keeps_audit_table_intact(self):
+    def test_corrupted_database_file_returns_recovery_options(self):
+        #это уже не мокк, создаём настоящий файл, который скулайт не может прочитать
+        corrupted_temp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        corrupted_temp.write(b"not a sqlite database")
+        corrupted_temp.close()
+
+        class CorruptedDatabase:
+            def get_audit_log_chain(self, start_sequence=0, limit=None):
+                connection = sqlite3.connect(corrupted_temp.name)
+                try:
+                    connection.execute("SELECT * FROM audit_log").fetchall()
+                finally:
+                    connection.close()
+
+        try:
+            verifier = AuditLogVerifier(CorruptedDatabase(), self.logger.signer)
+            results = verifier.verify()
+        finally:
+            try:
+                os.unlink(corrupted_temp.name)
+            except OSError:
+                pass
+
+        #вместо краша пользователь получает понятный статус и варианты восстановления
+        self.assertFalse(results["verified"])
+        self.assertEqual(results["invalid_entries"][0]["reason"], "database_error")
+        self.assertIn("restore_from_backup", results["recovery_options"])
+        self.assertIn("export_verification_report", results["recovery_options"])
+        self.assertIn("rebuild_audit_log", results["recovery_options"])
+
+    def test_sql_injection_search_does_not_change_audit_log(self):
         self._generate_logs(10)
         malicious_search = "'; DROP TABLE audit_log; --"
 
+        #cтрока поиска должна уйти в скулайт как параметр, а не как часть запроса
         results = self.database.query_audit_logs(search_text=malicious_search, limit=10, offset=0)
         remaining_count = self.database.count_audit_logs()
 
@@ -183,15 +223,17 @@ class TestAuditLogging(unittest.TestCase):
         self.assertTrue(payload["time_source"]["synchronized"])
         self.assertEqual(payload["time_source"]["reliable_source"], "operating_system_clock")
 
-    def test_append_only_protection_blocks_update_attempt_and_logs_violation(self):
+    def test_append_only_blocks_changes_and_logs_them(self):
         self._generate_logs(3)
 
+        #прямой апдейт и попытка отключить защиту блокируются
         with self.assertRaises(sqlite3.DatabaseError):
             self.database.try_update_audit_log_entry(2, '{"tampered":true}')
         with self.assertRaises(PermissionError):
             self.database.try_disable_audit_guards()
         self.logger.flush()
 
+        #сами попытки вмешательства тоже попадают в отдельный секурити лог
         logs = self.database.get_audit_log_chain()
         self.assertEqual(logs[-2].event_type, "audit_log_protection_triggered")
         self.assertIn('"operation": "update"', logs[-2].details)
@@ -285,7 +327,7 @@ class TestAuditLogging(unittest.TestCase):
         self.assertEqual(security_events[0]["event_type"], "audit_integration_hook_failed")
         self.assertIn("broken-hook", security_events[0]["details"])
 
-    def test_sprint6_import_export_share_and_key_exchange_events_are_audited_with_sources(self):
+    def test_import_export_share_events_have_sources(self):
         self.event_bus.publish(Event(EventType.EXPORT_OPERATION_COMPLETED, {"format": "encrypted_json", "entry_count": 3}))
         self.event_bus.publish(Event(EventType.IMPORT_OPERATION_COMPLETED, {"format": "csv", "created": 2}))
         self.event_bus.publish(Event(EventType.SHARE_CREATED, {"share_id": "share-1", "entry_id": 7}))
