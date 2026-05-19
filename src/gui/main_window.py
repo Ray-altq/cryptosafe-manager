@@ -8,7 +8,7 @@ import sys
 from collections import Counter
 from contextlib import contextmanager
 from base64 import b64encode
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from urllib.error import URLError
 from urllib.parse import urlparse
@@ -2450,6 +2450,60 @@ class MainWindow:
 
     def _build_sharing_service(self) -> SharingService:
         return SharingService(self.entry_manager, database=self.db, event_bus=event_bus)
+
+    def build_vault_export_preview(self, *, selected_only: bool = False, excluded_fields: Optional[list[str]] = None) -> dict:
+        entry_ids = [entry["id"] for entry in self._get_selected_entries()] if selected_only else None
+        entries = self._build_vault_exporter().get_entries_for_export(ExportOptions(entry_ids=entry_ids))
+        fields = {"title", "username", "password", "url", "notes", "category", "tags"}
+        excluded = {str(field).strip() for field in (excluded_fields or []) if str(field).strip()}
+        return {
+            "entry_count": len(entries),
+            "mode": "selected" if selected_only else "full",
+            "included_fields": sorted(fields.difference(excluded)),
+            "excluded_fields": sorted(excluded),
+            "titles": [str(entry.get("title", "")) for entry in entries[:10]],
+        }
+
+    def preview_vault_import_file(self, source_path: str, *, import_format: str, password: str = "") -> dict:
+        with open(source_path, "rb") as handle:
+            payload = handle.read()
+        importer = self._build_vault_importer()
+        normalized_format = str(import_format or "encrypted_json").strip().lower()
+        options = ImportOptions(format=normalized_format, mode="dry-run", duplicate_strategy="skip")
+        if normalized_format in {"encrypted_json", "json"}:
+            if not password:
+                raise ImportValidationError("Для encrypted JSON нужен пароль экспорта")
+            entries = importer.preview_encrypted_json(payload, password, options)
+        else:
+            entries = importer.preview_plaintext(payload, options)
+        return {
+            "validated": len(entries),
+            "mode": "dry-run",
+            "format": normalized_format,
+            "titles": [str(entry.get("title", "")) for entry in entries[:10]],
+        }
+
+    def get_share_history_status(self, *, limit: int = 20) -> list[dict]:
+        if not hasattr(self, "db") or not hasattr(self.db, "get_shared_entries"):
+            return []
+        rows = self.db.get_shared_entries(limit=limit)
+        now = datetime.now(timezone.utc)
+        history = []
+        for row in rows:
+            item = dict(row)
+            status = str(item.get("status", "active") or "active")
+            expires_at = item.get("expires_at")
+            try:
+                expires_dt = datetime.fromisoformat(str(expires_at).replace("Z", "+00:00"))
+                if expires_dt.tzinfo is None:
+                    expires_dt = expires_dt.replace(tzinfo=timezone.utc)
+                if status == "active" and expires_dt < now:
+                    status = "expired"
+            except (TypeError, ValueError):
+                pass
+            item["computed_status"] = status
+            history.append(item)
+        return history
 
     def export_vault_encrypted_json_to_path(
         self,

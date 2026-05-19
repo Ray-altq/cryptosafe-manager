@@ -2425,6 +2425,44 @@ class TestMainWindowSecurityState(IntegrationTestCase):
         self.assertEqual(window.entry_manager.entries[0]["title"], "GitHub")
         self.assertTrue(getattr(window, "_entries_reloaded", False))
 
+    def test_vault_export_preview_lists_scope_fields_and_titles(self):
+        window = MainWindow.__new__(MainWindow)
+        window.db = Database(self.make_db_path("vault-export-preview.db"))
+        self.addCleanup(window.db.close)
+        window.entry_manager = FakeVaultEntryManager()
+        window._get_selected_entries = lambda: [EntryView(window.entry_manager.entries[0])]
+
+        preview = window.build_vault_export_preview(selected_only=True, excluded_fields=["notes"])
+
+        self.assertEqual(preview["mode"], "selected")
+        self.assertEqual(preview["entry_count"], 1)
+        self.assertIn("GitHub", preview["titles"])
+        self.assertIn("notes", preview["excluded_fields"])
+        self.assertNotIn("notes", preview["included_fields"])
+
+    def test_vault_import_preview_dry_run_does_not_create_entries(self):
+        window = MainWindow.__new__(MainWindow)
+        temp_dir = Path(self.make_db_path("vault-import-preview")).parent
+        export_path = temp_dir / "vault-export.json"
+        window.db = Database(str(temp_dir / "vault.db"))
+        self.addCleanup(window.db.close)
+        window.entry_manager = FakeVaultEntryManager()
+        window._get_selected_entries = lambda: []
+        window._show_info = lambda *args, **kwargs: None
+
+        window.export_vault_encrypted_json_to_path(str(export_path), "ExportPassword!123")
+        window.entry_manager.entries = []
+        preview = window.preview_vault_import_file(
+            str(export_path),
+            import_format="encrypted_json",
+            password="ExportPassword!123",
+        )
+
+        self.assertEqual(preview["mode"], "dry-run")
+        self.assertEqual(preview["validated"], 1)
+        self.assertEqual(preview["titles"], ["GitHub"])
+        self.assertEqual(window.entry_manager.entries, [])
+
     def test_vault_csv_export_gui_helper_requires_confirmation(self):
         window = MainWindow.__new__(MainWindow)
         temp_dir = Path(self.make_db_path("vault-csv-export-gui")).parent
@@ -2473,6 +2511,37 @@ class TestMainWindowSecurityState(IntegrationTestCase):
         self.assertTrue(result)
         self.assertTrue(share_path.exists())
         self.assertEqual(window.db.get_shared_entries(limit=1)[0]["recipient_info"], "student@example.test")
+
+    def test_share_history_status_marks_expired_packages(self):
+        window = MainWindow.__new__(MainWindow)
+        window.db = Database(self.make_db_path("share-history-status.db"))
+        self.addCleanup(window.db.close)
+        entry_id = window.db.add_entry(
+            VaultEntry(
+                title="GitHub",
+                username="ray",
+                encrypted_password=b"secret",
+                encrypted_data=b"secret",
+                created_at=datetime.now(),
+                updated_at=datetime.now(),
+            )
+        )
+        window.db.add_shared_entry(
+            share_id="share-expired",
+            original_entry_id=entry_id,
+            recipient_info="student@example.test",
+            permissions={"read": True},
+            shared_at=datetime.now(timezone.utc),
+            expires_at=datetime(2000, 1, 1, tzinfo=timezone.utc),
+            encryption_method="password",
+            status="active",
+            package_checksum="checksum",
+        )
+
+        history = window.get_share_history_status(limit=5)
+
+        self.assertEqual(history[0]["share_id"], "share-expired")
+        self.assertEqual(history[0]["computed_status"], "expired")
 
     def test_show_share_dialog_checks_selected_entry_before_prompting_details(self):
         window = MainWindow.__new__(MainWindow)
