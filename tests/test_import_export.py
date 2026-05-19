@@ -276,6 +276,28 @@ class TestImportExportFoundation(unittest.TestCase):
 
         self.assertEqual(parsed.public_key, public_key)
 
+    def test_qr_code_service_scans_camera_chunks_when_camera_is_available(self):
+        key_exchange = KeyExchangeService()
+        public_key = "PUBLIC-" + ("C" * 1024)
+        raw_payload = key_exchange.serialize_qr_payload(
+            key_exchange.build_qr_payload(identifier="camera@example.test", public_key=public_key)
+        )
+        camera_chunks = key_exchange.split_qr_payload(raw_payload, max_chunk_size=512)
+        qr_service = QRCodeService(key_exchange, camera_scanner=lambda: camera_chunks)
+
+        scanned_payload = qr_service.scan_from_camera()
+        parsed = key_exchange.parse_qr_payload(scanned_payload)
+
+        self.assertEqual(parsed.public_key, public_key)
+
+    def test_qr_code_service_reports_camera_unavailable_with_file_upload_fallback(self):
+        qr_service = QRCodeService()
+
+        with self.assertRaises(ImportValidationError) as context:
+            qr_service.scan_from_camera()
+
+        self.assertIn("file upload", str(context.exception))
+
     def test_key_exchange_contact_rotation_and_revocation(self):
         service = KeyExchangeService(database=self.db)
 

@@ -227,9 +227,10 @@ def hmac_compare(left: str, right: str) -> bool:
 class QRCodeService:
     _segno_backend = None
 
-    def __init__(self, key_exchange: KeyExchangeService | None = None, *, error_correction: str = "M"):
+    def __init__(self, key_exchange: KeyExchangeService | None = None, *, error_correction: str = "M", camera_scanner=None):
         self.key_exchange = key_exchange or KeyExchangeService()
         self.error_correction = str(error_correction or "M").upper()
+        self.camera_scanner = camera_scanner
         self._ensure_qr_backend()
 
     def generate_qr_svgs(self, raw_payload: str, *, max_chunk_size: int = 1024) -> List[str]:
@@ -248,7 +249,18 @@ class QRCodeService:
         return self.parse_qr_svgs(svg_payloads)
 
     def scan_from_camera(self) -> str:
-        raise ImportValidationError("Device camera scanning is unavailable in this environment; use QR image file upload")
+        if self.camera_scanner is None:
+            raise ImportValidationError("Device camera scanning is unavailable in this environment; use QR image file upload")
+        try:
+            scanned_payload = self.camera_scanner()
+        except Exception as exc:
+            raise ImportValidationError("QR camera scan failed; use QR image file upload") from exc
+        if isinstance(scanned_payload, list):
+            return self.key_exchange.assemble_qr_chunks([str(item) for item in scanned_payload])
+        scanned_text = str(scanned_payload or "")
+        if not scanned_text:
+            raise ImportValidationError("QR camera scan did not return payload data")
+        return scanned_text
 
     def generate_key_exchange_svgs(self, *, identifier: str, public_key: str, max_chunk_size: int = 1024) -> List[str]:
         raw_payload = self.key_exchange.serialize_qr_payload(
