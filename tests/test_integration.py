@@ -1,4 +1,5 @@
 import os
+import json
 import shutil
 import sys
 import tempfile
@@ -19,6 +20,7 @@ from src.core.crypto.key_storage import KeyStorage
 from src.core.crypto.placeholder import AES256Placeholder
 from src.core.crypto.password_validator import PasswordValidator
 from src.core.audit import AuditLogger as RealAuditLogger
+from src.core.import_export import ImportValidationError
 from src.core.key_manager import KeyManager
 from src.core.vault import AESGCMEncryptionService, EntryManager
 from src.database.db import Database
@@ -447,6 +449,11 @@ class TestMainWindowIntegration(IntegrationTestCase):
             patch.object(MainWindow, "_setup_events", lambda self: None),
             patch.object(MainWindow, "_setup_activity_tracking", lambda self: None),
             patch.object(MainWindow, "_schedule_security_tasks", lambda self: None),
+            patch.object(
+                MainWindow,
+                "_select_startup_vault_path",
+                lambda self: self.config.get("database.path", "cryptosafe.db"),
+            ),
         ]
 
     def test_main_window_starts_with_existing_vault_and_loads_entries(self):
@@ -2232,6 +2239,17 @@ class TestMainWindowSecurityState(IntegrationTestCase):
         self.assertTrue(window.state.application_active)
         self.assertEqual(window.root.after_calls, [])
 
+    def test_combobox_popdown_focus_loss_does_not_crash_or_lock(self):
+        window = MainWindow.__new__(MainWindow)
+        window.root = FakeRoot()
+        window.state = FakeStateManager()
+        window.root.grab_current = lambda: (_ for _ in ()).throw(KeyError("popdown"))
+
+        window._on_focus_out()
+
+        self.assertTrue(window.state.application_active)
+        self.assertEqual(window.root.after_calls, [])
+
     def test_clipboard_expiration_locks_unfocused_window_when_focus_lock_is_enabled(self):
         window = MainWindow.__new__(MainWindow)
         window.auth_service = FakeAuthService()
@@ -2440,6 +2458,73 @@ class TestMainWindowSecurityState(IntegrationTestCase):
         self.assertIn("notes", preview["excluded_fields"])
         self.assertNotIn("notes", preview["included_fields"])
 
+    def test_vault_export_helper_applies_selected_fields_and_strength(self):
+        window = MainWindow.__new__(MainWindow)
+        temp_dir = Path(self.make_db_path("vault-export-fields")).parent
+        export_path = temp_dir / "vault-export.json"
+        window.db = Database(str(temp_dir / "vault.db"))
+        self.addCleanup(window.db.close)
+        window.entry_manager = FakeVaultEntryManager()
+        window._get_selected_entries = lambda: []
+        window._show_info = lambda *args, **kwargs: None
+
+        result = window.export_vault_encrypted_json_to_path(
+            str(export_path),
+            "ExportPassword!123",
+            include_fields=["title", "username", "password"],
+            encryption_strength=128,
+            compression=False,
+        )
+        preview = window.preview_vault_import_file(
+            str(export_path),
+            import_format="encrypted_json",
+            password="ExportPassword!123",
+        )
+        exported_payload = json.loads(export_path.read_text(encoding="utf-8"))
+
+        self.assertTrue(result)
+        self.assertEqual(exported_payload["encryption"]["algorithm"], "AES-128-GCM")
+        self.assertEqual(preview["validated"], 1)
+        self.assertEqual(preview["titles"], ["GitHub"])
+
+    def test_vault_export_helper_uses_explicit_dialog_entry_selection(self):
+        window = MainWindow.__new__(MainWindow)
+        temp_dir = Path(self.make_db_path("vault-export-explicit-selection")).parent
+        export_path = temp_dir / "vault-export-selected.json"
+        window.db = Database(str(temp_dir / "vault.db"))
+        self.addCleanup(window.db.close)
+        window.entry_manager = FakeVaultEntryManager()
+        window.entry_manager.entries.append(
+            {
+                "id": 2,
+                "title": "Steam",
+                "username": "ray-steam",
+                "password": "SteamSecret!123",
+                "url": "https://steam.example",
+                "notes": "games",
+                "category": "Games",
+                "tags": "steam",
+            }
+        )
+        window._get_selected_entries = lambda: []
+        window._show_info = lambda *args, **kwargs: None
+
+        result = window.export_vault_encrypted_json_to_path(
+            str(export_path),
+            "ExportPassword!123",
+            selected_only=True,
+            selected_entry_ids=[2],
+        )
+        preview = window.preview_vault_import_file(
+            str(export_path),
+            import_format="encrypted_json",
+            password="ExportPassword!123",
+        )
+
+        self.assertTrue(result)
+        self.assertEqual(preview["validated"], 1)
+        self.assertEqual(preview["titles"], ["Steam"])
+
     def test_vault_import_preview_dry_run_does_not_create_entries(self):
         window = MainWindow.__new__(MainWindow)
         temp_dir = Path(self.make_db_path("vault-import-preview")).parent
@@ -2462,6 +2547,34 @@ class TestMainWindowSecurityState(IntegrationTestCase):
         self.assertEqual(preview["validated"], 1)
         self.assertEqual(preview["titles"], ["GitHub"])
         self.assertEqual(window.entry_manager.entries, [])
+
+    def test_vault_import_auto_detects_native_and_password_manager_formats(self):
+        window = MainWindow.__new__(MainWindow)
+        temp_dir = Path(self.make_db_path("vault-import-detect")).parent
+        native_path = temp_dir / "vault-export.json"
+        bitwarden_path = temp_dir / "bitwarden.json"
+        lastpass_path = temp_dir / "lastpass.csv"
+        window.db = Database(str(temp_dir / "vault.db"))
+        self.addCleanup(window.db.close)
+        window.entry_manager = FakeVaultEntryManager()
+        window._get_selected_entries = lambda: []
+        window._show_info = lambda *args, **kwargs: None
+
+        window.export_vault_encrypted_json_to_path(str(native_path), "ExportPassword!123")
+        bitwarden_path.write_text('{"items":[{"type":1,"name":"Example","login":{"username":"u","password":"p"}}]}', encoding="utf-8")
+        lastpass_path.write_text("url,username,password,extra,name,grouping\nhttps://e.test,u,p,,Example,Work\n", encoding="utf-8")
+
+        self.assertEqual(window.detect_vault_import_format(str(native_path), native_path.read_bytes()), "encrypted_json")
+        self.assertEqual(window.detect_vault_import_format(str(bitwarden_path), bitwarden_path.read_bytes()), "bitwarden_json")
+        self.assertEqual(window.detect_vault_import_format(str(lastpass_path), lastpass_path.read_bytes()), "lastpass_csv")
+
+    def test_vault_import_auto_detect_failure_requires_manual_format(self):
+        window = MainWindow.__new__(MainWindow)
+
+        with self.assertRaises(ImportValidationError) as context:
+            window.detect_vault_import_format("unknown.data", b"not a known export")
+
+        self.assertIn("Выберите формат вручную", str(context.exception))
 
     def test_vault_csv_export_gui_helper_requires_confirmation(self):
         window = MainWindow.__new__(MainWindow)
@@ -2512,6 +2625,43 @@ class TestMainWindowSecurityState(IntegrationTestCase):
         self.assertTrue(share_path.exists())
         self.assertEqual(window.db.get_shared_entries(limit=1)[0]["recipient_info"], "student@example.test")
 
+    def test_share_selected_entry_helper_applies_permissions_and_expiration(self):
+        window = MainWindow.__new__(MainWindow)
+        temp_dir = Path(self.make_db_path("vault-share-permissions")).parent
+        share_path = temp_dir / "entry-share.json"
+        window.db = Database(str(temp_dir / "vault.db"))
+        self.addCleanup(window.db.close)
+        entry_id = window.db.add_entry(
+            VaultEntry(
+                title="GitHub",
+                username="ray",
+                encrypted_password=b"secret",
+                encrypted_data=b"secret",
+                created_at=datetime.now(),
+                updated_at=datetime.now(),
+            )
+        )
+        window.entry_manager = FakeVaultEntryManager()
+        window.entry_manager.entries[0]["id"] = entry_id
+        window._get_single_selected_entry = lambda _action: EntryView(window.entry_manager.entries[0])
+        window._show_info = lambda *args, **kwargs: None
+
+        result = window.share_selected_entry_to_path(
+            str(share_path),
+            recipient="editor@example.test",
+            password="SharePassword!123",
+            expires_in_days=14,
+            read=True,
+            edit=True,
+        )
+        package = json.loads(share_path.read_text(encoding="utf-8"))
+        permissions = package["metadata"]["permissions"]
+
+        self.assertTrue(result)
+        self.assertTrue(permissions["read"])
+        self.assertTrue(permissions["edit"])
+        self.assertEqual(permissions["expires_in_days"], 14)
+
     def test_share_history_status_marks_expired_packages(self):
         window = MainWindow.__new__(MainWindow)
         window.db = Database(self.make_db_path("share-history-status.db"))
@@ -2556,6 +2706,24 @@ class TestMainWindowSecurityState(IntegrationTestCase):
         self.assertFalse(hasattr(window, "_asked_string"))
         self.assertFalse(hasattr(window, "_asked_file"))
 
+    def test_share_package_gui_helper_generates_qr_preview_png(self):
+        window = MainWindow.__new__(MainWindow)
+        window.db = Database(self.make_db_path("share-package-qr.db"))
+        self.addCleanup(window.db.close)
+        package_payload = json.dumps(
+            {
+                "cryptosafe_share": True,
+                "metadata": {"recipient": "alice"},
+                "data": {"ciphertext": "encrypted-only"},
+            },
+            sort_keys=True,
+        )
+
+        pngs = window.generate_share_package_qr_pngs(package_payload=package_payload, label="alice")
+
+        self.assertTrue(pngs)
+        self.assertTrue(pngs[0].startswith(b"\x89PNG"))
+
     def test_key_exchange_gui_helpers_generate_and_import_contact(self):
         window = MainWindow.__new__(MainWindow)
         window.db = Database(self.make_db_path("key-exchange-gui.db"))
@@ -2570,6 +2738,17 @@ class TestMainWindowSecurityState(IntegrationTestCase):
         self.assertEqual(contacts[0]["identifier"], "alice@example.test")
         self.assertEqual(contacts[0]["name"], "Alice")
 
+    def test_key_exchange_gui_helper_scans_payload_from_camera_adapter(self):
+        window = MainWindow.__new__(MainWindow)
+        window.db = Database(self.make_db_path("key-exchange-camera.db"))
+        self.addCleanup(window.db.close)
+        payload = window.generate_key_exchange_payload_text(identifier="camera@example.test", public_key="public-key")
+        window.qr_camera_scanner = lambda: payload
+
+        scanned_payload = window.scan_key_exchange_payload_from_camera()
+
+        self.assertEqual(scanned_payload, payload)
+
     def test_key_exchange_gui_helper_writes_private_payload_and_qr_files(self):
         window = MainWindow.__new__(MainWindow)
         temp_dir = Path(self.make_db_path("key-exchange-files")).parent
@@ -2581,9 +2760,25 @@ class TestMainWindowSecurityState(IntegrationTestCase):
         self.assertTrue(Path(bundle["private_key_path"]).exists())
         self.assertTrue(Path(bundle["payload_path"]).exists())
         self.assertTrue(Path(bundle["qr_paths"][0]).exists())
+        self.assertTrue(bundle["qr_pngs"][0].startswith(b"\x89PNG"))
         self.assertIn("BEGIN PRIVATE KEY", Path(bundle["private_key_path"]).read_text(encoding="utf-8"))
         self.assertIn("cryptosafe_key_exchange", Path(bundle["payload_path"]).read_text(encoding="utf-8"))
         self.assertIn("<svg", Path(bundle["qr_paths"][0]).read_text(encoding="utf-8"))
+
+    def test_new_database_does_not_overwrite_existing_vault_file(self):
+        window = MainWindow.__new__(MainWindow)
+        existing_path = Path(self.make_db_path("existing-vault-file.db"))
+        existing_path.parent.mkdir(parents=True, exist_ok=True)
+        existing_path.write_text("existing vault data", encoding="utf-8")
+        warnings = []
+        window._ask_saveas_filename = lambda *args, **kwargs: str(existing_path)
+        window._show_warning = lambda title, message, **kwargs: warnings.append((title, message))
+
+        result = window.new_database()
+
+        self.assertIsNone(result)
+        self.assertEqual(existing_path.read_text(encoding="utf-8"), "existing vault data")
+        self.assertTrue(warnings)
 
 
 if __name__ == "__main__":

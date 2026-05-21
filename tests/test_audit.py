@@ -285,6 +285,21 @@ class TestAuditLogging(unittest.TestCase):
         )
         self.assertGreater(critical_record_id, 0)
 
+    def test_audit_logger_skips_events_when_active_key_is_locked(self):
+        locked_logger = AuditLogger(self.database, self.event_bus, key_provider=lambda: None)
+        self.addCleanup(locked_logger.close)
+
+        record_id = locked_logger.log_event(
+            event_type="key_exchange_created",
+            severity="INFO",
+            source="key_exchange",
+            details={"identifier": "alice@example.test"},
+            user_id="local-user",
+            force_sync=True,
+        )
+
+        self.assertEqual(record_id, 0)
+
     def test_integration_hook_receives_signed_audit_payload_without_breaking_logging(self):
         received_payloads = []
         self.logger.register_integration_hook(

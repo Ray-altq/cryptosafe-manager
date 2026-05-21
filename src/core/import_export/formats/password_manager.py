@@ -1,4 +1,5 @@
 import json
+import uuid
 from typing import Any, Dict, List
 
 from ..exceptions import ImportValidationError
@@ -8,8 +9,24 @@ class BitwardenJSONFormat:
     name = "bitwarden_json"
 
     def serialize_entries(self, entries: List[Dict[str, Any]]) -> str:
+        folder_ids: Dict[str, str] = {}
+        for entry in entries:
+            category = str(entry.get("category", "") or "").strip()
+            if category and category not in folder_ids:
+                folder_ids[category] = str(uuid.uuid5(uuid.NAMESPACE_URL, f"cryptosafe-folder:{category}"))
+
+        folders = [
+            {
+                "id": folder_id,
+                "name": folder_name,
+            }
+            for folder_name, folder_id in sorted(folder_ids.items())
+        ]
         items = []
         for entry in entries:
+            title = str(entry.get("title", "") or "Untitled")
+            category = str(entry.get("category", "") or "").strip()
+            url = str(entry.get("url", "") or "").strip()
             tags = [
                 {"name": tag.strip(), "type": 0, "value": "true"}
                 for tag in str(entry.get("tags", "") or "").split(",")
@@ -17,25 +34,36 @@ class BitwardenJSONFormat:
             ]
             items.append(
                 {
+                    "id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"cryptosafe-item:{entry.get('id', title)}:{title}")),
+                    "organizationId": None,
+                    "folderId": folder_ids.get(category),
                     "type": 1,
-                    "name": str(entry.get("title", "") or ""),
+                    "reprompt": 0,
+                    "name": title,
                     "notes": str(entry.get("notes", "") or ""),
-                    "folderId": str(entry.get("category", "") or ""),
+                    "favorite": False,
                     "login": {
+                        "uris": [{"match": None, "uri": url}] if url else [],
                         "username": str(entry.get("username", "") or ""),
                         "password": str(entry.get("password", "") or ""),
-                        "uris": [{"uri": str(entry.get("url", "") or "")}] if entry.get("url") else [],
+                        "totp": None,
                     },
                     "fields": tags,
                 }
             )
-        return json.dumps({"encrypted": False, "items": items}, ensure_ascii=False, sort_keys=True)
+        return json.dumps({"encrypted": False, "folders": folders, "items": items}, ensure_ascii=False, sort_keys=True)
 
     def parse_entries(self, payload: str) -> List[Dict[str, str]]:
         try:
             parsed = json.loads(payload)
         except json.JSONDecodeError as exc:
             raise ImportValidationError("Bitwarden JSON is invalid") from exc
+        folders = parsed.get("folders", []) if isinstance(parsed, dict) else []
+        folder_names = {
+            str(folder.get("id")): str(folder.get("name") or "")
+            for folder in folders
+            if isinstance(folder, dict) and folder.get("id")
+        }
         items = parsed.get("items") if isinstance(parsed, dict) else None
         if not isinstance(items, list):
             raise ImportValidationError("Bitwarden JSON does not contain items")
@@ -59,7 +87,7 @@ class BitwardenJSONFormat:
                     "password": str(login.get("password") or ""),
                     "url": url,
                     "notes": str(item.get("notes") or ""),
-                    "category": str(item.get("folderId") or ""),
+                    "category": folder_names.get(str(item.get("folderId")), str(item.get("folderId") or "")),
                     "tags": tags,
                 }
             )

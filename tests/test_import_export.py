@@ -282,6 +282,38 @@ class TestImportExportFoundation(unittest.TestCase):
 
         self.assertEqual(parsed.public_key, public_key)
 
+    def test_qr_code_service_supports_share_package_payload_without_plaintext_secret(self):
+        key_exchange = KeyExchangeService()
+        qr_service = QRCodeService(key_exchange)
+        raw_payload = key_exchange.serialize_qr_payload(
+            key_exchange.build_data_qr_payload(
+                payload_type="cryptosafe_share_package",
+                label="GitHub share",
+                data='{"ciphertext":"abc123","metadata":{"entry":"GitHub"}}',
+            )
+        )
+
+        svgs = qr_service.generate_qr_svgs(raw_payload, max_chunk_size=256)
+        assembled = qr_service.parse_qr_svgs(svgs)
+        parsed = key_exchange.parse_data_qr_payload(assembled)
+
+        self.assertEqual(parsed["type"], "cryptosafe_share_package")
+        self.assertEqual(parsed["label"], "GitHub share")
+        self.assertIn("ciphertext", parsed["data"])
+        self.assertNotIn("Secret!123", assembled)
+
+    def test_qr_code_service_generates_png_for_in_app_preview(self):
+        key_exchange = KeyExchangeService()
+        qr_service = QRCodeService(key_exchange)
+        raw_payload = key_exchange.serialize_qr_payload(
+            key_exchange.build_qr_payload(identifier="preview@example.test", public_key="public-key")
+        )
+
+        pngs = qr_service.generate_qr_pngs(raw_payload)
+
+        self.assertGreaterEqual(len(pngs), 1)
+        self.assertTrue(pngs[0].startswith(b"\x89PNG"))
+
     def test_qr_code_service_scans_camera_chunks_when_camera_is_available(self):
         key_exchange = KeyExchangeService()
         public_key = "PUBLIC-" + ("C" * 1024)
@@ -451,8 +483,22 @@ class TestImportExportFoundation(unittest.TestCase):
         self.assertIn("url,username,password,extra,name,grouping", lastpass)
         self.assertEqual(bitwarden_preview[0]["title"], "GitHub")
         self.assertEqual(bitwarden_preview[0]["password"], "Secret!123")
+        self.assertEqual(bitwarden_preview[0]["category"], "Dev")
         self.assertEqual(lastpass_preview[0]["title"], "GitHub")
         self.assertEqual(lastpass_preview[0]["category"], "Dev")
+
+    def test_bitwarden_export_uses_folder_objects_and_uuid_folder_ids(self):
+        exported = VaultExporter(FakeEntryManager(), database=self.db).export_bitwarden_json(
+            ExportOptions(format="bitwarden_json", plaintext_allowed=True)
+        )
+        parsed = json.loads(exported)
+
+        self.assertFalse(parsed["encrypted"])
+        self.assertEqual(parsed["folders"][0]["name"], "Dev")
+        self.assertEqual(parsed["items"][0]["folderId"], parsed["folders"][0]["id"])
+        self.assertRegex(parsed["items"][0]["folderId"], r"^[0-9a-f-]{36}$")
+        self.assertIsInstance(parsed["items"][0]["login"]["uris"], list)
+        self.assertIn("totp", parsed["items"][0]["login"])
 
     def test_replace_import_mode_clears_vault_before_import(self):
         source_manager = FakeEntryManager()

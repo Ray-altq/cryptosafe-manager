@@ -71,9 +71,35 @@ class KeyExchangeService:
         self._publish(EventType.KEY_EXCHANGE_CREATED, {"identifier": payload["identifier"], "fingerprint": payload["fingerprint"]})
         return payload
 
+    def build_data_qr_payload(self, *, payload_type: str, label: str, data: str, ttl_seconds: int = QR_PAYLOAD_TTL_SECONDS) -> Dict[str, Any]:
+        now = datetime.now(timezone.utc)
+        normalized_type = str(payload_type or "cryptosafe_encrypted_data").strip()
+        if normalized_type not in {"cryptosafe_encrypted_entry", "cryptosafe_share_package", "cryptosafe_share_link"}:
+            normalized_type = "cryptosafe_encrypted_data"
+        payload = {
+            "type": normalized_type,
+            "version": QR_PAYLOAD_VERSION,
+            "label": str(label or ""),
+            "data": str(data or ""),
+            "nonce": base64.urlsafe_b64encode(os.urandom(16)).decode("ascii").rstrip("="),
+            "created_at": now.isoformat(),
+            "expires_at": (now + timedelta(seconds=max(30, int(ttl_seconds)))).isoformat(),
+        }
+        payload["checksum"] = self._checksum(payload)
+        return payload
+
     def serialize_qr_payload(self, payload: Dict[str, Any]) -> str:
-        self.validate_qr_payload(payload)
+        self.validate_any_qr_payload(payload)
         return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+    def parse_data_qr_payload(self, raw_payload: str) -> Dict[str, Any]:
+        try:
+            payload = json.loads(raw_payload)
+        except json.JSONDecodeError as exc:
+            raise ImportValidationError("QR payload is not valid JSON") from exc
+        self.validate_data_qr_payload(payload)
+        self._remember_nonce(str(payload["nonce"]))
+        return payload
 
     def parse_qr_payload(self, raw_payload: str) -> KeyExchangePayload:
         try:
@@ -207,6 +233,30 @@ class KeyExchangeService:
         if str(payload["nonce"]) in self._seen_nonces:
             raise ImportValidationError("QR payload nonce has already been used")
 
+    def validate_data_qr_payload(self, payload: Dict[str, Any]):
+        if not isinstance(payload, dict):
+            raise ImportValidationError("QR payload must be an object")
+        required_fields = {"type", "version", "label", "data", "nonce", "created_at", "expires_at", "checksum"}
+        missing = sorted(required_fields.difference(payload))
+        if missing:
+            raise ImportValidationError(f"QR payload is missing fields: {', '.join(missing)}")
+        if payload["type"] not in {"cryptosafe_encrypted_entry", "cryptosafe_share_package", "cryptosafe_share_link", "cryptosafe_encrypted_data"}:
+            raise ImportValidationError("QR payload type is not supported")
+        if int(payload["version"]) != QR_PAYLOAD_VERSION:
+            raise ImportValidationError("QR payload version is not supported")
+        if not hmac_compare(str(payload["checksum"]), self._checksum(payload)):
+            raise ImportValidationError("QR payload checksum does not match")
+        expires_at = datetime.fromisoformat(str(payload["expires_at"]))
+        if expires_at < datetime.now(timezone.utc):
+            raise ImportValidationError("QR payload has expired")
+        if str(payload["nonce"]) in self._seen_nonces:
+            raise ImportValidationError("QR payload nonce has already been used")
+
+    def validate_any_qr_payload(self, payload: Dict[str, Any]):
+        if isinstance(payload, dict) and payload.get("type") == "cryptosafe_key_exchange":
+            return self.validate_qr_payload(payload)
+        return self.validate_data_qr_payload(payload)
+
     def _checksum(self, payload: Dict[str, Any]) -> str:
         unsigned = {key: value for key, value in payload.items() if key != "checksum"}
         encoded = json.dumps(unsigned, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -236,6 +286,10 @@ class QRCodeService:
     def generate_qr_svgs(self, raw_payload: str, *, max_chunk_size: int = 1024) -> List[str]:
         chunks = self.key_exchange.split_qr_payload(raw_payload, max_chunk_size=max_chunk_size)
         return [self._chunk_to_svg(chunk) for chunk in chunks]
+
+    def generate_qr_pngs(self, raw_payload: str, *, max_chunk_size: int = 1024, scale: int = 6) -> List[bytes]:
+        chunks = self.key_exchange.split_qr_payload(raw_payload, max_chunk_size=max_chunk_size)
+        return [self._chunk_to_png(chunk, scale=scale) for chunk in chunks]
 
     def parse_qr_svgs(self, svg_payloads: List[str]) -> str:
         chunks = [self._extract_chunk_from_svg(svg) for svg in svg_payloads]
@@ -268,6 +322,39 @@ class QRCodeService:
         )
         return self.generate_qr_svgs(raw_payload, max_chunk_size=max_chunk_size)
 
+    def generate_key_exchange_pngs(self, *, identifier: str, public_key: str, max_chunk_size: int = 1024, scale: int = 6) -> List[bytes]:
+        raw_payload = self.key_exchange.serialize_qr_payload(
+            self.key_exchange.build_qr_payload(identifier=identifier, public_key=public_key)
+        )
+        return self.generate_qr_pngs(raw_payload, max_chunk_size=max_chunk_size, scale=scale)
+
+    def generate_data_payload_svgs(
+        self,
+        *,
+        payload_type: str,
+        label: str,
+        data: str,
+        max_chunk_size: int = 1024,
+    ) -> List[str]:
+        raw_payload = self.key_exchange.serialize_qr_payload(
+            self.key_exchange.build_data_qr_payload(payload_type=payload_type, label=label, data=data)
+        )
+        return self.generate_qr_svgs(raw_payload, max_chunk_size=max_chunk_size)
+
+    def generate_data_payload_pngs(
+        self,
+        *,
+        payload_type: str,
+        label: str,
+        data: str,
+        max_chunk_size: int = 1024,
+        scale: int = 6,
+    ) -> List[bytes]:
+        raw_payload = self.key_exchange.serialize_qr_payload(
+            self.key_exchange.build_data_qr_payload(payload_type=payload_type, label=label, data=data)
+        )
+        return self.generate_qr_pngs(raw_payload, max_chunk_size=max_chunk_size, scale=scale)
+
     def parse_key_exchange_svgs(self, svg_payloads: List[str]) -> KeyExchangePayload:
         return self.key_exchange.parse_qr_payload(self.parse_qr_svgs(svg_payloads))
 
@@ -285,13 +372,20 @@ class QRCodeService:
         segno = self._ensure_qr_backend()
         qr = segno.make(chunk, error=self.error_correction.lower(), micro=False)
         output = io.BytesIO()
-        qr.save(output, kind="svg", scale=8, border=4)
+        qr.save(output, kind="svg", scale=4, border=4)
         svg = output.getvalue().decode("utf-8")
         return svg.replace(
             "<svg ",
             f'<svg data-cryptosafe-qr="1" data-error-correction="{html.escape(self.error_correction)}" ',
             1,
         ).replace("</svg>", f"<metadata>{metadata}</metadata></svg>", 1)
+
+    def _chunk_to_png(self, chunk: str, *, scale: int = 6) -> bytes:
+        segno = self._ensure_qr_backend()
+        qr = segno.make(chunk, error=self.error_correction.lower(), micro=False)
+        output = io.BytesIO()
+        qr.save(output, kind="png", scale=max(2, int(scale)), border=4)
+        return output.getvalue()
 
     def _ensure_qr_backend(self):
         if self.__class__._segno_backend is not None:

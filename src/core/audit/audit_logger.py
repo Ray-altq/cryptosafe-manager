@@ -135,6 +135,8 @@ class AuditLogger:
         *,
         force_sync: bool = False,
     ) -> int:
+        if not self._has_active_audit_key():
+            return 0
         if self._should_use_async_logging(event_type, severity, force_sync=force_sync):
             self._async_queue.put(
                 {
@@ -156,6 +158,12 @@ class AuditLogger:
             entry_id=entry_id,
             apply_retention=True,
         )
+
+    def _has_active_audit_key(self) -> bool:
+        try:
+            return bool(self.key_provider())
+        except Exception:
+            return False
 
     def _write_entry(
         self,

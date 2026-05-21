@@ -8,14 +8,28 @@ from ..database.db import Database
 
 
 class SetupWizard:
+    COLORS = {
+        "bg": "#1e1e1e",
+        "surface": "#252526",
+        "field": "#1b1b1b",
+        "ink": "#d4d4d4",
+        "muted": "#a6a6a6",
+        "accent": "#007acc",
+        "line": "#3c3c3c",
+        "selection": "#094771",
+    }
+
     def __init__(self, parent, config, auth_service: AuthenticationService):
         self.parent = parent
         self.config = config
         self.auth_service = auth_service
 
         self.wizard = tk.Toplevel(parent)
+        self._apply_theme()
         self.wizard.title("Первоначальная настройка")
-        self.wizard.geometry("540x480")
+        self.wizard.geometry("680x560")
+        if hasattr(self.wizard, "minsize"):
+            self.wizard.minsize(620, 520)
         self.wizard.transient(parent)
         self.wizard.grab_set()
         self.wizard.resizable(False, False)
@@ -41,14 +55,81 @@ class SetupWizard:
         self._show_step(0)
         self.wizard.wait_window()
 
+    def _apply_theme(self):
+        colors = self.COLORS
+        try:
+            self.wizard.configure(bg=colors["bg"])
+            style = ttk.Style(self.wizard)
+            style.configure("Wizard.TFrame", background=colors["bg"])
+            style.configure("WizardCard.TFrame", background=colors["surface"], relief="flat")
+            style.configure("WizardTitle.TLabel", background=colors["bg"], foreground="#ffffff", font=("Segoe UI Semibold", 14))
+            style.configure("Wizard.TLabel", background=colors["surface"], foreground=colors["ink"])
+            style.configure("WizardMuted.TLabel", background=colors["surface"], foreground=colors["muted"])
+            style.configure("WizardDialog.TFrame", background=colors["surface"], relief="flat")
+            style.configure("WizardDialogTitle.TLabel", background=colors["surface"], foreground="#ffffff", font=("Segoe UI Semibold", 12))
+            style.configure("WizardDialogText.TLabel", background=colors["surface"], foreground=colors["ink"])
+        except tk.TclError:
+            pass
+
+    def _style_text(self, widget):
+        colors = self.COLORS
+        try:
+            widget.configure(
+                bg=colors["surface"],
+                fg=colors["ink"],
+                insertbackground=colors["ink"],
+                selectbackground=colors["selection"],
+                selectforeground=colors["ink"],
+                highlightthickness=1,
+                highlightbackground=colors["line"],
+                highlightcolor=colors["accent"],
+                relief=tk.FLAT,
+                bd=0,
+                padx=8,
+                pady=8,
+            )
+        except tk.TclError:
+            pass
+        return widget
+
+    def _can_use_themed_dialogs(self) -> bool:
+        return hasattr(self.wizard, "tk") and hasattr(self.wizard, "wait_window")
+
+    def _show_themed_message(self, title: str, message: str):
+        if not self._can_use_themed_dialogs():
+            messagebox.showinfo(title, message)
+            return
+
+        dialog = tk.Toplevel(self.wizard)
+        dialog.configure(bg=self.COLORS["bg"])
+        dialog.title(title)
+        dialog.transient(self.wizard)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+
+        card = ttk.Frame(dialog, style="WizardDialog.TFrame", padding=(18, 16, 18, 14))
+        card.pack(fill=tk.BOTH, expand=True, padx=1, pady=1)
+        ttk.Label(card, text=title, style="WizardDialogTitle.TLabel").pack(fill=tk.X)
+        ttk.Label(card, text=message, style="WizardDialogText.TLabel", wraplength=420, justify=tk.LEFT).pack(
+            fill=tk.X, pady=(12, 18)
+        )
+        ttk.Button(card, text="OK", command=dialog.destroy).pack(anchor=tk.E)
+        dialog.wait_window()
+
+    def _show_themed_error(self, title: str, message: str):
+        if not self._can_use_themed_dialogs():
+            messagebox.showerror(title, message)
+            return
+        self._show_themed_message(title, message)
+
     def _create_widgets(self):
-        self.title_label = ttk.Label(self.wizard, text="", font=("Segoe UI", 14, "bold"))
+        self.title_label = ttk.Label(self.wizard, text="", style="WizardTitle.TLabel")
         self.title_label.pack(pady=10)
 
-        self.content_frame = ttk.Frame(self.wizard, relief=tk.SUNKEN, padding=12)
+        self.content_frame = ttk.Frame(self.wizard, padding=12, style="WizardCard.TFrame")
         self.content_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
 
-        button_frame = ttk.Frame(self.wizard)
+        button_frame = ttk.Frame(self.wizard, style="Wizard.TFrame")
         button_frame.pack(fill=tk.X, padx=20, pady=10)
 
         self.back_btn = ttk.Button(button_frame, text="< Назад", command=self._prev_step)
@@ -90,7 +171,7 @@ class SetupWizard:
             self._show_step(self.current_step)
 
     def _step_welcome(self):
-        text = tk.Text(self.content_frame, wrap=tk.WORD, height=10, font=("Segoe UI", 10))
+        text = self._style_text(tk.Text(self.content_frame, wrap=tk.WORD, height=10, font=("Segoe UI", 10)))
         text.insert(
             "1.0",
             "Добро пожаловать в CryptoSafe Manager.\n\n"
@@ -104,43 +185,43 @@ class SetupWizard:
         text.pack(fill=tk.BOTH, expand=True)
 
     def _step_master_password(self):
-        ttk.Label(self.content_frame, text="Создание мастер-пароля", font=("Segoe UI", 10, "bold")).pack(
+        ttk.Label(self.content_frame, text="Создание мастер-пароля", style="Wizard.TLabel", font=("Segoe UI", 10, "bold")).pack(
             anchor=tk.W, pady=(0, 8)
         )
-        ttk.Label(self.content_frame, text="Мастер-пароль").pack(anchor=tk.W)
+        ttk.Label(self.content_frame, text="Мастер-пароль", style="Wizard.TLabel").pack(anchor=tk.W)
         ttk.Entry(self.content_frame, textvariable=self.master_password, show="*", width=42).pack(
             fill=tk.X, pady=(0, 10)
         )
-        ttk.Label(self.content_frame, text="Подтверждение пароля").pack(anchor=tk.W)
+        ttk.Label(self.content_frame, text="Подтверждение пароля", style="Wizard.TLabel").pack(anchor=tk.W)
         ttk.Entry(self.content_frame, textvariable=self.confirm_password, show="*", width=42).pack(
             fill=tk.X, pady=(0, 10)
         )
         ttk.Label(
             self.content_frame,
             text="Используйте длинный пароль с буквами разного регистра, цифрами и специальными символами.",
-            foreground="gray",
+            style="WizardMuted.TLabel",
             justify=tk.LEFT,
         ).pack(anchor=tk.W, pady=(8, 0))
 
     def _step_database_location(self):
-        ttk.Label(self.content_frame, text="Расположение базы данных vault", font=("Segoe UI", 10, "bold")).pack(
+        ttk.Label(self.content_frame, text="Расположение базы данных vault", style="Wizard.TLabel", font=("Segoe UI", 10, "bold")).pack(
             anchor=tk.W, pady=(0, 8)
         )
-        ttk.Label(self.content_frame, text="Путь к файлу базы данных").pack(anchor=tk.W)
-        path_frame = ttk.Frame(self.content_frame)
+        ttk.Label(self.content_frame, text="Путь к файлу базы данных", style="Wizard.TLabel").pack(anchor=tk.W)
+        path_frame = ttk.Frame(self.content_frame, style="WizardCard.TFrame")
         path_frame.pack(fill=tk.X, pady=(0, 10))
         ttk.Entry(path_frame, textvariable=self.db_path).pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(path_frame, text="Обзор...", command=self._browse_db).pack(side=tk.RIGHT, padx=(5, 0))
 
     def _step_encryption_settings(self):
-        ttk.Label(self.content_frame, text="Настройки шифрования", font=("Segoe UI", 10, "bold")).pack(
+        ttk.Label(self.content_frame, text="Настройки шифрования", style="Wizard.TLabel", font=("Segoe UI", 10, "bold")).pack(
             anchor=tk.W, pady=(0, 8)
         )
-        ttk.Label(self.content_frame, text="Алгоритм").pack(anchor=tk.W)
+        ttk.Label(self.content_frame, text="Алгоритм", style="Wizard.TLabel").pack(anchor=tk.W)
         combo = ttk.Combobox(self.content_frame, textvariable=self.algorithm, values=["XOR"], state="readonly")
         combo.pack(fill=tk.X, pady=(0, 10))
 
-        ttk.Label(self.content_frame, text="Количество итераций PBKDF2").pack(anchor=tk.W)
+        ttk.Label(self.content_frame, text="Количество итераций PBKDF2", style="Wizard.TLabel").pack(anchor=tk.W)
         ttk.Spinbox(
             self.content_frame,
             from_=100000,
@@ -149,16 +230,16 @@ class SetupWizard:
             textvariable=self.pbkdf2_iterations,
         ).pack(fill=tk.X, pady=(0, 10))
 
-        ttk.Label(self.content_frame, text="Таймаут авто-блокировки (мин)").pack(anchor=tk.W)
+        ttk.Label(self.content_frame, text="Таймаут авто-блокировки (мин)", style="Wizard.TLabel").pack(anchor=tk.W)
         ttk.Spinbox(self.content_frame, from_=1, to=120, textvariable=self.auto_lock_minutes).pack(fill=tk.X, pady=(0, 10))
 
-        ttk.Label(self.content_frame, text="Таймаут кэша ключа (мин)").pack(anchor=tk.W)
+        ttk.Label(self.content_frame, text="Таймаут кэша ключа (мин)", style="Wizard.TLabel").pack(anchor=tk.W)
         ttk.Spinbox(self.content_frame, from_=1, to=60, textvariable=self.key_cache_timeout_minutes).pack(
             fill=tk.X, pady=(0, 10)
         )
 
     def _step_finish(self):
-        text = tk.Text(self.content_frame, wrap=tk.WORD, height=10, font=("Segoe UI", 10))
+        text = self._style_text(tk.Text(self.content_frame, wrap=tk.WORD, height=10, font=("Segoe UI", 10)))
         text.insert(
             "1.0",
             f"Все готово к инициализации vault.\n\n"
@@ -183,16 +264,16 @@ class SetupWizard:
 
     def _validate_password(self) -> bool:
         if not self.master_password.get():
-            messagebox.showerror("Ошибка", "Введите мастер-пароль")
+            self._show_themed_error("Ошибка", "Введите мастер-пароль")
             return False
         if self.master_password.get() != self.confirm_password.get():
-            messagebox.showerror("Ошибка", "Пароли не совпадают")
+            self._show_themed_error("Ошибка", "Пароли не совпадают")
             return False
         return True
 
     def _validate_db_path(self) -> bool:
         if not self.db_path.get():
-            messagebox.showerror("Ошибка", "Укажите путь к файлу базы данных")
+            self._show_themed_error("Ошибка", "Укажите путь к файлу базы данных")
             return False
         return True
 
@@ -212,7 +293,7 @@ class SetupWizard:
         try:
             self.auth_service.register_master_password(self.master_password.get())
         except AuthenticationError as error:
-            messagebox.showerror("Ошибка", str(error))
+            self._show_themed_error("Ошибка", str(error))
             return
 
         database.set_setting(
@@ -242,5 +323,5 @@ class SetupWizard:
         database.set_setting("security.lock_on_focus_loss", self.config.get("security.lock_on_focus_loss", True))
         database.set_setting("security.lock_on_minimize", self.config.get("security.lock_on_minimize", True))
 
-        messagebox.showinfo("Успешно", "Vault успешно инициализирован.")
+        self._show_themed_message("Успешно", "Vault успешно инициализирован.")
         self.wizard.destroy()

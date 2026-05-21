@@ -37,8 +37,8 @@ class SecureTable(ttk.Frame):
         self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
         self._supports_row_tags = True
         try:
-            self.tree.tag_configure("even", background="#ffffff")
-            self.tree.tag_configure("odd", background="#fbfbfc")
+            self.tree.tag_configure("even", background="#252526", foreground="#d4d4d4")
+            self.tree.tag_configure("odd", background="#2d2d30", foreground="#d4d4d4")
         except (AttributeError, tk.TclError):
             self._supports_row_tags = False
 

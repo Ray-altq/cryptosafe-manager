@@ -72,34 +72,44 @@ class MainWindow:
     AUDIT_PAGE_SIZE = 50
     AUDIT_VERIFICATION_INTERVAL_SECONDS = 24 * 60 * 60
     UI_COLORS = {
-        "bg": "#f5f5f7",
-        "surface": "#ffffff",
-        "surface_alt": "#f7f7f8",
-        "ink": "#1d1d1f",
-        "muted": "#6e6e73",
-        "accent": "#d8ecff",
-        "accent_hover": "#c8e2f8",
-        "button": "#eef0f2",
-        "button_hover": "#e2e5e9",
-        "danger": "#d70015",
-        "line": "#e5e5e7",
-        "selection": "#e8f3ff",
+        "bg": "#1e1e1e",
+        "surface": "#252526",
+        "surface_alt": "#2d2d30",
+        "surface_soft": "#333333",
+        "field": "#1b1b1b",
+        "ink": "#d4d4d4",
+        "ink_strong": "#ffffff",
+        "muted": "#a6a6a6",
+        "accent": "#007acc",
+        "accent_hover": "#0e8ee9",
+        "accent_soft": "#04395e",
+        "button": "#2d2d30",
+        "button_hover": "#3e3e42",
+        "danger": "#f14c4c",
+        "danger_soft": "#3a1f1f",
+        "warning": "#cca700",
+        "line": "#3c3c3c",
+        "line_strong": "#5a5a5a",
+        "selection": "#094771",
     }
 
     def __init__(self):
+        self._enable_windows_dpi_awareness()
         self.root = tk.Tk()
         self.root.title("CryptoSafe Manager")
-        self.root.geometry("1120x720")
+        self.root.geometry("1320x820")
         if hasattr(self.root, "minsize"):
-            self.root.minsize(980, 640)
+            self.root.minsize(1180, 720)
 
         self.config = Config()
         self._configure_visual_theme()
+        selected_vault_path = self._select_startup_vault_path()
+        self.config.set("database.path", selected_vault_path)
         self.state = StateManager()
         self.state.set_inactivity_timeout(self.config.get("security.auto_lock_minutes", 5) * 60)
         self.state.set_key_cache_timeout(self.config.get("security.key_cache_timeout_minutes", 60) * 60)
 
-        self.db = Database(self.config.get("database.path", "cryptosafe.db"))
+        self.db = Database(selected_vault_path)
         self.key_manager = KeyManager()
         self.key_storage = KeyStorage(self.db)
         self.key_derivation = KeyDerivation(self.config.get("crypto", {}))
@@ -176,6 +186,137 @@ class MainWindow:
         event_bus.publish(Event(EventType.APP_STARTED, {"component": "main_window"}))
         self._load_entries()
         self._schedule_security_tasks()
+
+    @staticmethod
+    def _enable_windows_dpi_awareness():
+        if os.name != "nt":
+            return
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        except Exception:
+            try:
+                ctypes.windll.user32.SetProcessDPIAware()
+            except Exception:
+                pass
+
+    def _get_recent_vault_paths(self, current_path: str = "") -> list[str]:
+        paths = []
+        for path in [current_path, *self.config.get("database.recent_paths", [])]:
+            normalized = str(path or "").strip()
+            if normalized and normalized not in paths:
+                paths.append(normalized)
+        return paths[:8]
+
+    def _remember_vault_path(self, path: str):
+        normalized = str(path or "").strip()
+        if not normalized:
+            return
+        self.config.set("database.path", normalized)
+        recent_paths = [normalized]
+        for existing_path in self.config.get("database.recent_paths", []):
+            existing = str(existing_path or "").strip()
+            if existing and existing != normalized:
+                recent_paths.append(existing)
+        self.config.set("database.recent_paths", recent_paths[:8])
+
+    def _select_startup_vault_path(self) -> str:
+        default_path = str(self.config.get("database.path", "cryptosafe.db"))
+        selected = {"path": default_path}
+
+        dialog = tk.Toplevel(self.root)
+        self._prepare_dialog(dialog)
+        dialog.title("Выбор vault")
+        dialog.geometry(self._get_screen_limited_geometry(980, 620))
+        if hasattr(dialog, "minsize"):
+            dialog.minsize(860, 560)
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        frame = ttk.Frame(dialog, padding=18, style="App.TFrame")
+        frame.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(frame, text="Выберите vault для открытия", style="DialogTitle.TLabel").pack(anchor="w")
+        ttk.Label(
+            frame,
+            text="Сначала выбирается файл vault, потом вводится мастер-пароль именно для него.",
+            wraplength=860,
+            style="Muted.TLabel",
+        ).pack(anchor="w", pady=(6, 14))
+
+        listbox = tk.Listbox(
+            frame,
+            height=12,
+            bg=self.UI_COLORS["field"],
+            fg=self.UI_COLORS["ink"],
+            selectbackground=self.UI_COLORS["selection"],
+            selectforeground=self.UI_COLORS["ink"],
+            highlightthickness=1,
+            highlightbackground=self.UI_COLORS["line"],
+            highlightcolor=self.UI_COLORS["accent"],
+            relief=tk.FLAT,
+            bd=0,
+        )
+        recent_paths = self._get_recent_vault_paths(default_path)
+        for path in recent_paths:
+            label = path
+            if path == default_path:
+                label = f"{path}  (последний)"
+            listbox.insert(tk.END, label)
+        listbox.pack(fill=tk.BOTH, expand=True)
+        if recent_paths:
+            listbox.selection_set(0)
+
+        def selected_from_list() -> str:
+            selection = listbox.curselection()
+            if not selection:
+                return selected["path"]
+            index = int(selection[0])
+            if 0 <= index < len(recent_paths):
+                return recent_paths[index]
+            return selected["path"]
+
+        def choose_existing():
+            path = filedialog.askopenfilename(
+                title="Открыть vault",
+                filetypes=[("SQLite database", "*.db"), ("All files", "*.*")],
+                parent=dialog,
+            )
+            if path:
+                selected["path"] = path
+                dialog.destroy()
+
+        def create_new():
+            path = filedialog.asksaveasfilename(
+                title="Создать новый vault",
+                defaultextension=".db",
+                filetypes=[("SQLite database", "*.db"), ("All files", "*.*")],
+                parent=dialog,
+            )
+            if not path:
+                return
+            if os.path.exists(path):
+                self._show_warning(
+                    "Создать новый vault",
+                    "Такой файл уже существует. Чтобы не потерять данные, выберите другой файл или откройте существующий vault.",
+                    parent=dialog,
+                )
+                return
+            selected["path"] = path
+            dialog.destroy()
+
+        def continue_selected():
+            selected["path"] = selected_from_list()
+            dialog.destroy()
+
+        button_row = ttk.Frame(frame, style="App.TFrame")
+        button_row.pack(fill=tk.X, pady=(14, 0))
+        ttk.Button(button_row, text="Открыть файл...", style="Ghost.TButton", command=choose_existing).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(button_row, text="Создать новый...", style="Ghost.TButton", command=create_new).pack(side=tk.LEFT, padx=6)
+        ttk.Button(button_row, text="Продолжить", style="Accent.TButton", command=continue_selected).pack(side=tk.RIGHT)
+        dialog.protocol("WM_DELETE_WINDOW", continue_selected)
+        self.root.wait_window(dialog)
+
+        self._remember_vault_path(selected["path"])
+        return selected["path"]
 
     def _persist_runtime_settings(self):
         self.db.set_setting(
@@ -284,6 +425,22 @@ class MainWindow:
                 self.root.configure(bg=colors["bg"])
             elif hasattr(self.root, "config"):
                 self.root.config(bg=colors["bg"])
+            for option, value in {
+                "*Menu.background": colors["surface"],
+                "*Menu.foreground": colors["ink"],
+                "*Menu.activeBackground": colors["selection"],
+                "*Menu.activeForeground": colors["ink"],
+                "*Menu.selectColor": colors["accent"],
+                "*Listbox.background": colors["field"],
+                "*Listbox.foreground": colors["ink"],
+                "*Listbox.selectBackground": colors["selection"],
+                "*Listbox.selectForeground": colors["ink"],
+                "*TCombobox*Listbox.background": colors["field"],
+                "*TCombobox*Listbox.foreground": colors["ink"],
+                "*TCombobox*Listbox.selectBackground": colors["selection"],
+                "*TCombobox*Listbox.selectForeground": colors["ink"],
+            }.items():
+                self.root.option_add(option, value)
             style = ttk.Style(self.root)
         except (AttributeError, tk.TclError):
             return
@@ -293,53 +450,189 @@ class MainWindow:
             pass
 
         base_font = ("Segoe UI", 10)
-        title_font = ("Segoe UI Semibold", 16)
+        title_font = ("Segoe UI Semibold", 18)
         section_font = ("Segoe UI Semibold", 10)
 
         style.configure(".", font=base_font)
+        style.map(".", foreground=[("disabled", "#6f6f6f")])
+        style.configure("TFrame", background=colors["bg"])
         style.configure("App.TFrame", background=colors["bg"])
-        style.configure("Surface.TFrame", background=colors["surface"], relief="flat")
+        style.configure("Surface.TFrame", background=colors["surface"], relief="flat", borderwidth=1)
         style.configure("TopBar.TFrame", background=colors["surface"])
         style.configure("Status.TFrame", background=colors["surface_alt"], relief="flat")
-        style.configure("AppTitle.TLabel", background=colors["surface"], foreground=colors["ink"], font=title_font)
+        style.configure("AppTitle.TLabel", background=colors["surface"], foreground=colors["ink_strong"], font=title_font)
         style.configure("AppSubtitle.TLabel", background=colors["surface"], foreground=colors["muted"])
-        style.configure("Section.TLabel", background=colors["surface"], foreground=colors["ink"], font=section_font)
-        style.configure("Muted.TLabel", background=colors["surface"], foreground=colors["muted"])
+        style.configure("Section.TLabel", background=colors["surface"], foreground=colors["ink_strong"], font=section_font)
+        style.configure("DialogTitle.TLabel", background=colors["bg"], foreground=colors["ink_strong"], font=("Segoe UI Semibold", 13))
+        style.configure("DialogCard.TFrame", background=colors["surface"], borderwidth=1, relief="flat")
+        style.configure("DialogHeader.TLabel", background=colors["surface"], foreground=colors["ink_strong"], font=("Segoe UI Semibold", 12))
+        style.configure("DialogBody.TLabel", background=colors["surface"], foreground=colors["ink"])
+        style.configure("AccentIcon.TLabel", background=colors["accent"], foreground=colors["ink_strong"], font=("Segoe UI Semibold", 12), padding=(8, 4))
+        style.configure("WarningIcon.TLabel", background=colors["warning"], foreground="#1e1e1e", font=("Segoe UI Semibold", 12), padding=(8, 4))
+        style.configure("DangerIcon.TLabel", background=colors["danger"], foreground=colors["ink_strong"], font=("Segoe UI Semibold", 12), padding=(8, 4))
+        style.configure("Muted.TLabel", background=colors["bg"], foreground=colors["muted"])
         style.configure("Status.TLabel", background=colors["surface_alt"], foreground=colors["muted"])
         style.configure("TLabel", background=colors["bg"], foreground=colors["ink"])
-        style.configure("TButton", padding=(10, 5), borderwidth=0)
-        style.configure("Accent.TButton", background=colors["button"], foreground=colors["ink"], padding=(12, 6))
-        style.map("Accent.TButton", background=[("active", colors["accent_hover"]), ("pressed", colors["accent_hover"])])
-        style.configure("Ghost.TButton", background=colors["button"], foreground=colors["ink"], padding=(12, 6))
+        style.configure(
+            "TButton",
+            background=colors["button"],
+            foreground=colors["ink"],
+            focuscolor=colors["accent"],
+            padding=(12, 7),
+            borderwidth=1,
+            bordercolor=colors["line"],
+            lightcolor=colors["line"],
+            darkcolor=colors["line"],
+            relief="flat",
+        )
+        style.map(
+            "TButton",
+            background=[("disabled", colors["surface_alt"]), ("active", colors["button_hover"]), ("pressed", colors["accent_soft"])],
+            bordercolor=[("focus", colors["accent"]), ("active", colors["line_strong"])],
+            foreground=[("disabled", "#6f6f6f")],
+        )
+        style.configure("Accent.TButton", background=colors["accent"], foreground=colors["ink_strong"], padding=(13, 7), bordercolor=colors["accent"])
+        style.map("Accent.TButton", background=[("active", colors["accent_hover"]), ("pressed", colors["accent"])])
+        style.configure("Ghost.TButton", background=colors["button"], foreground=colors["ink"], padding=(12, 7), bordercolor=colors["line"])
         style.map("Ghost.TButton", background=[("active", colors["button_hover"]), ("pressed", colors["accent"])])
-        style.configure("Danger.TButton", background=colors["surface_alt"], foreground=colors["danger"], padding=(10, 5))
-        style.map("Danger.TButton", background=[("active", "#ffe5e8"), ("pressed", "#ffe5e8")])
-        style.configure("TEntry", fieldbackground="#ffffff", bordercolor=colors["line"], padding=5)
-        style.configure("TCombobox", fieldbackground="#ffffff", bordercolor=colors["line"], padding=4)
+        style.configure("Danger.TButton", background=colors["danger_soft"], foreground=colors["danger"], padding=(12, 7), bordercolor="#6e2a2a")
+        style.map("Danger.TButton", background=[("active", "#44212a"), ("pressed", "#44212a")])
+        style.configure(
+            "TEntry",
+            fieldbackground=colors["field"],
+            background=colors["field"],
+            foreground=colors["ink"],
+            insertcolor=colors["ink"],
+            bordercolor=colors["line"],
+            lightcolor=colors["line"],
+            darkcolor=colors["line"],
+            padding=7,
+            borderwidth=1,
+        )
+        style.map(
+            "TEntry",
+            fieldbackground=[("disabled", colors["surface_alt"]), ("readonly", colors["field"])],
+            bordercolor=[("focus", colors["accent"]), ("active", colors["line_strong"])],
+        )
+        style.configure(
+            "TCombobox",
+            fieldbackground=colors["field"],
+            background=colors["button"],
+            foreground=colors["ink"],
+            arrowcolor=colors["ink"],
+            bordercolor=colors["line"],
+            lightcolor=colors["line"],
+            darkcolor=colors["line"],
+            padding=7,
+            borderwidth=1,
+        )
+        style.map(
+            "TCombobox",
+            fieldbackground=[("readonly", colors["field"]), ("disabled", colors["surface_alt"])],
+            background=[("active", colors["button_hover"]), ("pressed", colors["button_hover"])],
+            bordercolor=[("focus", colors["accent"]), ("active", colors["line_strong"])],
+            foreground=[("disabled", "#6f6f6f"), ("readonly", colors["ink"])],
+        )
+        style.configure(
+            "TSpinbox",
+            fieldbackground=colors["field"],
+            background=colors["field"],
+            foreground=colors["ink"],
+            insertcolor=colors["ink"],
+            bordercolor=colors["line"],
+            arrowcolor=colors["ink"],
+            padding=7,
+            borderwidth=1,
+        )
+        style.configure("TCheckbutton", background=colors["bg"], foreground=colors["ink"], focuscolor=colors["accent"])
+        style.map(
+            "TCheckbutton",
+            background=[("active", colors["bg"])],
+            foreground=[("disabled", "#6f6f6f"), ("active", colors["ink_strong"])],
+        )
+        style.configure("TLabelframe", background=colors["surface"], foreground=colors["ink"], bordercolor=colors["line"])
+        style.configure("TLabelframe.Label", background=colors["surface"], foreground=colors["muted"])
+        style.configure("TPanedwindow", background=colors["bg"])
+        style.configure(
+            "TScrollbar",
+            background=colors["button"],
+            troughcolor=colors["field"],
+            bordercolor=colors["bg"],
+            arrowcolor=colors["muted"],
+            relief="flat",
+        )
+        style.map("TScrollbar", background=[("active", colors["button_hover"])])
+        style.configure(
+            "TProgressbar",
+            background=colors["accent"],
+            troughcolor=colors["field"],
+            bordercolor=colors["line"],
+            lightcolor=colors["accent"],
+            darkcolor=colors["accent"],
+        )
         style.configure(
             "Vault.Treeview",
             background=colors["surface"],
             fieldbackground=colors["surface"],
             foreground=colors["ink"],
             bordercolor=colors["line"],
-            rowheight=32,
-            borderwidth=0,
+            rowheight=34,
+            borderwidth=1,
         )
         style.configure(
             "Vault.Treeview.Heading",
-            background=colors["surface"],
-            foreground=colors["muted"],
+            background=colors["surface_alt"],
+            foreground=colors["ink_strong"],
             font=("Segoe UI Semibold", 10),
             padding=(10, 8),
-            borderwidth=0,
+            borderwidth=1,
+            bordercolor=colors["line"],
         )
-        style.map("Vault.Treeview", background=[("selected", colors["selection"])], foreground=[("selected", colors["ink"])])
+        style.map(
+            "Vault.Treeview",
+            background=[
+                ("selected", colors["selection"]),
+                ("active", colors["surface_alt"]),
+                ("focus", colors["surface"]),
+            ],
+            foreground=[
+                ("selected", colors["ink_strong"]),
+                ("active", colors["ink"]),
+                ("focus", colors["ink"]),
+            ],
+        )
+        style.map(
+            "Vault.Treeview.Heading",
+            background=[
+                ("active", colors["button_hover"]),
+                ("pressed", colors["selection"]),
+            ],
+            foreground=[
+                ("active", colors["ink_strong"]),
+                ("pressed", colors["ink_strong"]),
+            ],
+        )
+
+    def _create_tk_menu(self, parent, **kwargs):
+        colors = self.UI_COLORS
+        menu = tk.Menu(
+            parent,
+            background=colors["surface"],
+            foreground=colors["ink"],
+            activebackground=colors["selection"],
+            activeforeground=colors["ink"],
+            disabledforeground="#5f6877",
+            borderwidth=0,
+            relief=tk.FLAT,
+            **kwargs,
+        )
+        return menu
 
     def _create_menu(self):
-        menubar = tk.Menu(self.root)
+        menubar = self._create_tk_menu(self.root)
         self.root.config(menu=menubar)
 
-        file_menu = tk.Menu(menubar, tearoff=0)
+        file_menu = self._create_tk_menu(menubar, tearoff=0)
         menubar.add_cascade(label="Файл", menu=file_menu)
         file_menu.add_command(label="Новый vault", command=self.new_database)
         file_menu.add_command(label="Открыть vault", command=self.open_database)
@@ -352,7 +645,7 @@ class MainWindow:
         file_menu.add_command(label="Разблокировать", command=self._unlock_vault)
         file_menu.add_command(label="Выход", command=self._on_close)
 
-        entry_menu = tk.Menu(menubar, tearoff=0)
+        entry_menu = self._create_tk_menu(menubar, tearoff=0)
         menubar.add_cascade(label="Записи", menu=entry_menu)
         entry_menu.add_command(label="Добавить", command=self.add_entry)
         entry_menu.add_command(label="Изменить", command=self.edit_entry)
@@ -365,7 +658,7 @@ class MainWindow:
         entry_menu.add_separator()
         entry_menu.add_command(label="Поделиться записью", command=self.show_share_dialog)
 
-        security_menu = tk.Menu(menubar, tearoff=0)
+        security_menu = self._create_tk_menu(menubar, tearoff=0)
         menubar.add_cascade(label="Безопасность", menu=security_menu)
         security_menu.add_command(label="Очистить буфер обмена", command=self.clear_clipboard_from_ui)
         security_menu.add_command(label="Просмотр буфера обмена", command=self.show_clipboard_preview_dialog)
@@ -376,7 +669,7 @@ class MainWindow:
         security_menu.add_command(label="Журнал аудита", command=self.show_logs)
         security_menu.add_command(label="Обмен ключами / QR", command=self.show_key_exchange_dialog)
 
-        help_menu = tk.Menu(menubar, tearoff=0)
+        help_menu = self._create_tk_menu(menubar, tearoff=0)
         menubar.add_cascade(label="Справка", menu=help_menu)
         help_menu.add_command(label="О программе", command=self.show_about)
 
@@ -500,7 +793,7 @@ class MainWindow:
         self._create_table_context_menu()
 
     def _create_table_context_menu(self):
-        self.table_menu = tk.Menu(self.root, tearoff=0)
+        self.table_menu = self._create_tk_menu(self.root, tearoff=0)
         self.table_menu.add_command(label="Изменить", command=self.edit_entry)
         self.table_menu.add_command(label="Удалить", command=self.delete_entry)
         self.table_menu.add_separator()
@@ -705,11 +998,18 @@ class MainWindow:
             grab_current = self.root.grab_current()
         except (AttributeError, tk.TclError):
             return False
+        except KeyError:
+            # ttk.Combobox creates an internal "popdown" window that Tkinter
+            # sometimes cannot map back to a Python widget. Treat it as an
+            # internal modal so focus-loss auto-lock does not crash callbacks.
+            return True
         return grab_current is not None
 
     def _show_messagebox(self, kind: str, title: str, message: str, **kwargs):
         kwargs.setdefault("parent", self.root)
         with self._suspend_focus_lock_for_internal_dialog():
+            if self._can_use_themed_dialogs():
+                return self._show_themed_messagebox(kind, title, message, **kwargs)
             return getattr(messagebox, kind)(title, message, **kwargs)
 
     def _show_warning(self, title: str, message: str, **kwargs):
@@ -727,7 +1027,131 @@ class MainWindow:
     def _ask_string(self, title: str, prompt: str, **kwargs):
         kwargs.setdefault("parent", self.root)
         with self._suspend_focus_lock_for_internal_dialog():
+            if self._can_use_themed_dialogs():
+                return self._show_themed_string_prompt(title, prompt, **kwargs)
             return simpledialog.askstring(title, prompt, **kwargs)
+
+    def _can_use_themed_dialogs(self) -> bool:
+        return hasattr(self.root, "tk") and hasattr(self.root, "wait_window")
+
+    def _center_dialog(self, dialog, parent=None):
+        try:
+            dialog.update_idletasks()
+            owner = parent if parent is not None else self.root
+            parent_x = owner.winfo_rootx()
+            parent_y = owner.winfo_rooty()
+            parent_width = owner.winfo_width()
+            parent_height = owner.winfo_height()
+            width = dialog.winfo_width()
+            height = dialog.winfo_height()
+            x = parent_x + max(0, (parent_width - width) // 2)
+            y = parent_y + max(0, (parent_height - height) // 2)
+            dialog.geometry(f"+{x}+{y}")
+        except tk.TclError:
+            pass
+
+    def _get_screen_limited_geometry(self, width: int, height: int, *, margin: int = 96) -> str:
+        try:
+            screen_width = int(self.root.winfo_screenwidth())
+            screen_height = int(self.root.winfo_screenheight())
+        except (AttributeError, tk.TclError, TypeError):
+            return f"{width}x{height}"
+        safe_width = max(420, min(width, screen_width - margin))
+        safe_height = max(360, min(height, screen_height - margin))
+        return f"{safe_width}x{safe_height}"
+
+    def _show_themed_messagebox(self, kind: str, title: str, message: str, **kwargs):
+        parent = kwargs.get("parent") or self.root
+        is_question = kind == "askyesno"
+        result = {"value": False if is_question else None}
+
+        dialog = tk.Toplevel(parent)
+        self._prepare_dialog(dialog)
+        dialog.title(title)
+        dialog.transient(parent)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+        dialog.minsize(420, 150)
+
+        card = ttk.Frame(dialog, style="DialogCard.TFrame", padding=(18, 16, 18, 14))
+        card.pack(fill=tk.BOTH, expand=True, padx=1, pady=1)
+
+        icon_text = {"showerror": "!", "showwarning": "!", "showinfo": "i", "askyesno": "?"}.get(kind, "i")
+        icon_style = "DangerIcon.TLabel" if kind == "showerror" else "WarningIcon.TLabel" if kind == "showwarning" else "AccentIcon.TLabel"
+
+        header = ttk.Frame(card, style="DialogCard.TFrame")
+        header.pack(fill=tk.X)
+        ttk.Label(header, text=icon_text, style=icon_style, anchor="center").pack(side=tk.LEFT, padx=(0, 12))
+        ttk.Label(header, text=title, style="DialogHeader.TLabel").pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        ttk.Label(
+            card,
+            text=str(message),
+            style="DialogBody.TLabel",
+            wraplength=460,
+            justify=tk.LEFT,
+        ).pack(fill=tk.X, pady=(14, 18))
+
+        buttons = ttk.Frame(card, style="DialogCard.TFrame")
+        buttons.pack(fill=tk.X)
+
+        def close(value):
+            result["value"] = value
+            dialog.destroy()
+
+        if is_question:
+            ttk.Button(buttons, text="Нет", style="Ghost.TButton", command=lambda: close(False)).pack(side=tk.RIGHT, padx=(8, 0))
+            ttk.Button(buttons, text="Да", style="Accent.TButton", command=lambda: close(True)).pack(side=tk.RIGHT)
+        else:
+            ttk.Button(buttons, text="OK", style="Accent.TButton", command=lambda: close(None)).pack(side=tk.RIGHT)
+
+        dialog.protocol("WM_DELETE_WINDOW", lambda: close(False if is_question else None))
+        self._center_dialog(dialog, parent)
+        dialog.wait_window()
+        return result["value"]
+
+    def _show_themed_string_prompt(self, title: str, prompt: str, **kwargs):
+        parent = kwargs.get("parent") or self.root
+        result = {"value": None}
+
+        dialog = tk.Toplevel(parent)
+        self._prepare_dialog(dialog)
+        dialog.title(title)
+        dialog.transient(parent)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+        dialog.minsize(460, 170)
+
+        card = ttk.Frame(dialog, style="DialogCard.TFrame", padding=(18, 16, 18, 14))
+        card.pack(fill=tk.BOTH, expand=True, padx=1, pady=1)
+        ttk.Label(card, text=title, style="DialogHeader.TLabel").pack(fill=tk.X)
+        ttk.Label(card, text=prompt, style="DialogBody.TLabel", wraplength=480, justify=tk.LEFT).pack(fill=tk.X, pady=(12, 8))
+
+        value_var = tk.StringVar(value=str(kwargs.get("initialvalue", "") or ""))
+        entry = ttk.Entry(card, textvariable=value_var, show=kwargs.get("show", ""), width=56)
+        entry.pack(fill=tk.X, pady=(0, 16))
+
+        buttons = ttk.Frame(card, style="DialogCard.TFrame")
+        buttons.pack(fill=tk.X)
+
+        def submit(_event=None):
+            result["value"] = value_var.get()
+            dialog.destroy()
+
+        def cancel(_event=None):
+            result["value"] = None
+            dialog.destroy()
+
+        ttk.Button(buttons, text="Отмена", style="Ghost.TButton", command=cancel).pack(side=tk.RIGHT, padx=(8, 0))
+        ttk.Button(buttons, text="OK", style="Accent.TButton", command=submit).pack(side=tk.RIGHT)
+        dialog.bind("<Return>", submit)
+        dialog.bind("<Escape>", cancel)
+        dialog.protocol("WM_DELETE_WINDOW", cancel)
+        self._center_dialog(dialog, parent)
+        entry.focus_set()
+        entry.selection_range(0, tk.END)
+        dialog.wait_window()
+        return result["value"]
 
     def _ask_saveas_filename(self, **kwargs):
         kwargs.setdefault("parent", self.root)
@@ -769,6 +1193,8 @@ class MainWindow:
                 highlightthickness=1,
                 highlightbackground=colors["line"],
                 highlightcolor=colors["accent"],
+                selectbackground=colors["selection"],
+                selectforeground=colors["ink"],
                 padx=8,
                 pady=8,
             )
@@ -797,8 +1223,39 @@ class MainWindow:
         def sync_body_width(event):
             canvas.itemconfigure(body_window, width=event.width)
 
+        def scroll_units_from_event(event):
+            if getattr(event, "num", None) == 4:
+                return -3
+            if getattr(event, "num", None) == 5:
+                return 3
+            delta = getattr(event, "delta", 0)
+            if delta == 0:
+                return 0
+            return -1 * max(-8, min(8, int(delta / 120) if abs(delta) >= 120 else (1 if delta > 0 else -1)))
+
+        def on_mousewheel(event):
+            units = scroll_units_from_event(event)
+            if units:
+                canvas.yview_scroll(units, "units")
+            return "break"
+
+        def bind_mousewheel(_event=None):
+            canvas.bind_all("<MouseWheel>", on_mousewheel, add="+")
+            canvas.bind_all("<Button-4>", on_mousewheel, add="+")
+            canvas.bind_all("<Button-5>", on_mousewheel, add="+")
+
+        def unbind_mousewheel(_event=None):
+            canvas.unbind_all("<MouseWheel>")
+            canvas.unbind_all("<Button-4>")
+            canvas.unbind_all("<Button-5>")
+
         body.bind("<Configure>", sync_scroll_region)
         canvas.bind("<Configure>", sync_body_width)
+        canvas.bind("<Enter>", bind_mousewheel)
+        canvas.bind("<Leave>", unbind_mousewheel)
+        body.bind("<Enter>", bind_mousewheel)
+        body.bind("<Leave>", unbind_mousewheel)
+        dialog.bind("<Destroy>", unbind_mousewheel, add="+")
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         return body
@@ -1317,7 +1774,9 @@ class MainWindow:
         dialog = tk.Toplevel(self.root)
         self._prepare_dialog(dialog)
         dialog.title("Просмотр буфера обмена")
-        dialog.geometry("460x260")
+        dialog.geometry("560x340")
+        if hasattr(dialog, "minsize"):
+            dialog.minsize(520, 320)
 
         ttk.Label(dialog, text=f"Тип данных: {self._format_clipboard_data_type(status.data_type)}").pack(
             anchor=tk.W, padx=10, pady=(12, 4)
@@ -1545,7 +2004,7 @@ class MainWindow:
         if not self.search_history or not hasattr(self, "search_history_button"):
             return
 
-        history_menu = tk.Menu(self.root, tearoff=0)
+        history_menu = self._create_tk_menu(self.root, tearoff=0)
         for query in self.search_history:
             history_menu.add_command(
                 label=query,
@@ -1609,7 +2068,9 @@ class MainWindow:
         dialog = tk.Toplevel(self.root)
         self._prepare_dialog(dialog)
         dialog.title(title)
-        dialog.geometry("520x560")
+        dialog.geometry(self._get_screen_limited_geometry(920, 900))
+        if hasattr(dialog, "minsize"):
+            dialog.minsize(860, 820)
         dialog.transient(self.root)
         dialog.grab_set()
 
@@ -1995,7 +2456,9 @@ class MainWindow:
         dialog = tk.Toplevel(self.root)
         self._prepare_dialog(dialog)
         dialog.title("Параметры генерации пароля")
-        dialog.geometry("360x320")
+        dialog.geometry("460x420")
+        if hasattr(dialog, "minsize"):
+            dialog.minsize(420, 380)
         dialog.transient(parent_dialog)
         dialog.grab_set()
         dialog.resizable(False, False)
@@ -2081,7 +2544,9 @@ class MainWindow:
         progress_dialog = tk.Toplevel(self.root)
         self._prepare_dialog(progress_dialog)
         progress_dialog.title("Смена мастер-пароля")
-        progress_dialog.geometry("420x180")
+        progress_dialog.geometry("560x240")
+        if hasattr(progress_dialog, "minsize"):
+            progress_dialog.minsize(520, 220)
         progress_dialog.transient(self.root)
         progress_dialog.grab_set()
         progress_dialog.resizable(False, False)
@@ -2193,9 +2658,6 @@ class MainWindow:
             raise RuntimeError(state["error"])
 
     def new_database(self):
-        if not self._ask_yes_no("Подтверждение", "Создать новую базу vault? Данные в выбранном файле будут потеряны."):
-            return
-
         new_path = self._ask_saveas_filename(
             title="Создать новый vault",
             defaultextension=".db",
@@ -2205,8 +2667,12 @@ class MainWindow:
             return
 
         if os.path.exists(new_path):
-            os.remove(new_path)
-        self.config.set("database.path", new_path)
+            self._show_warning(
+                "Создать новый vault",
+                "Такой файл уже существует. Чтобы не потерять данные, выберите другое имя или откройте существующий vault.",
+            )
+            return
+        self._remember_vault_path(new_path)
         if self.audit_logger:
             self.audit_logger.close()
         self.db.close()
@@ -2236,7 +2702,7 @@ class MainWindow:
         if not path:
             return
 
-        self.config.set("database.path", path)
+        self._remember_vault_path(path)
         if self.audit_logger:
             self.audit_logger.close()
         self.db.close()
@@ -2451,8 +2917,21 @@ class MainWindow:
     def _build_sharing_service(self) -> SharingService:
         return SharingService(self.entry_manager, database=self.db, event_bus=event_bus)
 
-    def build_vault_export_preview(self, *, selected_only: bool = False, excluded_fields: Optional[list[str]] = None) -> dict:
-        entry_ids = [entry["id"] for entry in self._get_selected_entries()] if selected_only else None
+    def _resolve_selected_export_entry_ids(self, selected_only: bool, selected_entry_ids: Optional[list[int]] = None) -> Optional[list[int]]:
+        if not selected_only:
+            return None
+        if selected_entry_ids is not None:
+            return [int(entry_id) for entry_id in selected_entry_ids]
+        return [entry["id"] for entry in self._get_selected_entries()]
+
+    def build_vault_export_preview(
+        self,
+        *,
+        selected_only: bool = False,
+        excluded_fields: Optional[list[str]] = None,
+        selected_entry_ids: Optional[list[int]] = None,
+    ) -> dict:
+        entry_ids = self._resolve_selected_export_entry_ids(selected_only, selected_entry_ids)
         entries = self._build_vault_exporter().get_entries_for_export(ExportOptions(entry_ids=entry_ids))
         fields = {"title", "username", "password", "url", "notes", "category", "tags"}
         excluded = {str(field).strip() for field in (excluded_fields or []) if str(field).strip()}
@@ -2464,11 +2943,16 @@ class MainWindow:
             "titles": [str(entry.get("title", "")) for entry in entries[:10]],
         }
 
+    def _build_export_include_fields(self, excluded_fields: Optional[list[str]] = None) -> list[str]:
+        fields = ["title", "username", "password", "url", "notes", "category", "tags"]
+        excluded = {str(field).strip() for field in (excluded_fields or []) if str(field).strip()}
+        return [field for field in fields if field not in excluded]
+
     def preview_vault_import_file(self, source_path: str, *, import_format: str, password: str = "") -> dict:
         with open(source_path, "rb") as handle:
             payload = handle.read()
         importer = self._build_vault_importer()
-        normalized_format = str(import_format or "encrypted_json").strip().lower()
+        normalized_format = self.detect_vault_import_format(source_path, payload) if str(import_format or "auto").strip().lower() == "auto" else str(import_format or "encrypted_json").strip().lower()
         options = ImportOptions(format=normalized_format, mode="dry-run", duplicate_strategy="skip")
         if normalized_format in {"encrypted_json", "json"}:
             if not password:
@@ -2482,6 +2966,29 @@ class MainWindow:
             "format": normalized_format,
             "titles": [str(entry.get("title", "")) for entry in entries[:10]],
         }
+
+    def detect_vault_import_format(self, source_path: str = "", payload: bytes | str = b"") -> str:
+        raw = payload if isinstance(payload, bytes) else str(payload).encode("utf-8", errors="ignore")
+        text = raw[:4096].decode("utf-8-sig", errors="ignore").strip()
+        lowered_path = str(source_path or "").lower()
+        if text.startswith("{"):
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                parsed = {}
+            if isinstance(parsed, dict):
+                if parsed.get("cryptosafe_export"):
+                    return "encrypted_json"
+                if isinstance(parsed.get("items"), list):
+                    return "bitwarden_json"
+        first_line = text.splitlines()[0].strip().lower() if text.splitlines() else ""
+        if {"url", "username", "password", "extra", "name", "grouping"}.issubset(set(item.strip() for item in first_line.split(","))):
+            return "lastpass_csv"
+        if lowered_path.endswith(".json"):
+            return "encrypted_json"
+        if lowered_path.endswith(".csv"):
+            return "csv"
+        raise ImportValidationError("Не удалось определить формат импорта. Выберите формат вручную.")
 
     def get_share_history_status(self, *, limit: int = 20) -> list[dict]:
         if not hasattr(self, "db") or not hasattr(self.db, "get_shared_entries"):
@@ -2511,61 +3018,92 @@ class MainWindow:
         password: str,
         *,
         selected_only: bool = False,
+        selected_entry_ids: Optional[list[int]] = None,
         compression: bool = True,
+        include_fields: Optional[list[str]] = None,
+        encryption_strength: int = 256,
     ) -> bool:
-        entry_ids = [entry["id"] for entry in self._get_selected_entries()] if selected_only else None
+        entry_ids = self._resolve_selected_export_entry_ids(selected_only, selected_entry_ids)
         if selected_only and not entry_ids:
             self._show_warning("Экспорт vault", "Выберите записи для выборочного экспорта.")
             return False
         payload = self._build_vault_exporter().export_encrypted_json(
             password,
-            ExportOptions(entry_ids=entry_ids, compression=compression),
+            ExportOptions(
+                entry_ids=entry_ids,
+                include_fields=include_fields,
+                encryption_strength=encryption_strength,
+                compression=compression,
+            ),
         )
         self._write_audit_export_file(target_path, payload)
         self._show_info("Экспорт vault", "Зашифрованный экспорт vault успешно сохранён.")
         return True
 
-    def export_vault_csv_to_path(self, target_path: str, *, selected_only: bool = False) -> bool:
+    def export_vault_csv_to_path(
+        self,
+        target_path: str,
+        *,
+        selected_only: bool = False,
+        selected_entry_ids: Optional[list[int]] = None,
+        include_fields: Optional[list[str]] = None,
+    ) -> bool:
         if not self._ask_yes_no(
             "Экспорт CSV",
             "CSV сохраняет данные в открытом виде. Продолжить только если файл будет защищён отдельно?",
         ):
             return False
-        entry_ids = [entry["id"] for entry in self._get_selected_entries()] if selected_only else None
+        entry_ids = self._resolve_selected_export_entry_ids(selected_only, selected_entry_ids)
         if selected_only and not entry_ids:
             self._show_warning("Экспорт CSV", "Выберите записи для выборочного экспорта.")
             return False
         payload = self._build_vault_exporter().export_csv(
-            ExportOptions(format="csv", entry_ids=entry_ids, plaintext_allowed=True),
+            ExportOptions(format="csv", entry_ids=entry_ids, include_fields=include_fields, plaintext_allowed=True),
         )
         self._write_audit_export_file(target_path, payload)
         self._show_info("Экспорт CSV", "CSV экспорт vault сохранён.")
         return True
 
-    def export_vault_public_key_json_to_path(self, target_path: str, public_key: str, *, selected_only: bool = False) -> bool:
-        entry_ids = [entry["id"] for entry in self._get_selected_entries()] if selected_only else None
+    def export_vault_public_key_json_to_path(
+        self,
+        target_path: str,
+        public_key: str,
+        *,
+        selected_only: bool = False,
+        selected_entry_ids: Optional[list[int]] = None,
+        include_fields: Optional[list[str]] = None,
+    ) -> bool:
+        entry_ids = self._resolve_selected_export_entry_ids(selected_only, selected_entry_ids)
         if selected_only and not entry_ids:
             self._show_warning("Экспорт vault", "Выберите записи для выборочного экспорта.")
             return False
         payload = self._build_vault_exporter().export_encrypted_json_for_public_key(
             public_key,
-            ExportOptions(entry_ids=entry_ids, compression=True),
+            ExportOptions(entry_ids=entry_ids, include_fields=include_fields, compression=True),
         )
         self._write_audit_export_file(target_path, payload)
         self._show_info("Экспорт vault", "Public-key экспорт vault успешно сохранён.")
         return True
 
-    def export_vault_password_manager_to_path(self, target_path: str, *, export_format: str, selected_only: bool = False) -> bool:
+    def export_vault_password_manager_to_path(
+        self,
+        target_path: str,
+        *,
+        export_format: str,
+        selected_only: bool = False,
+        selected_entry_ids: Optional[list[int]] = None,
+        include_fields: Optional[list[str]] = None,
+    ) -> bool:
         if not self._ask_yes_no(
             "Экспорт менеджера паролей",
             "Формат Bitwarden/LastPass сохраняет миграционный файл в открытом виде. Продолжить?",
         ):
             return False
-        entry_ids = [entry["id"] for entry in self._get_selected_entries()] if selected_only else None
+        entry_ids = self._resolve_selected_export_entry_ids(selected_only, selected_entry_ids)
         if selected_only and not entry_ids:
             self._show_warning("Экспорт vault", "Выберите записи для выборочного экспорта.")
             return False
-        options = ExportOptions(format=export_format, entry_ids=entry_ids, plaintext_allowed=True)
+        options = ExportOptions(format=export_format, entry_ids=entry_ids, include_fields=include_fields, plaintext_allowed=True)
         if export_format == "bitwarden_json":
             payload = self._build_vault_exporter().export_bitwarden_json(options)
         elif export_format == "lastpass_csv":
@@ -2576,12 +3114,20 @@ class MainWindow:
         self._show_info("Экспорт менеджера паролей", "Миграционный экспорт сохранён.")
         return True
 
-    def import_vault_file(self, source_path: str, *, import_format: str, password: str = "", mode: str = "dry-run") -> dict:
+    def import_vault_file(
+        self,
+        source_path: str,
+        *,
+        import_format: str,
+        password: str = "",
+        mode: str = "dry-run",
+        duplicate_strategy: str = "skip",
+    ) -> dict:
         with open(source_path, "rb") as handle:
             payload = handle.read()
         importer = self._build_vault_importer()
-        normalized_format = str(import_format or "encrypted_json").strip().lower()
-        options = ImportOptions(format=normalized_format, mode=mode, duplicate_strategy="skip")
+        normalized_format = self.detect_vault_import_format(source_path, payload) if str(import_format or "auto").strip().lower() == "auto" else str(import_format or "encrypted_json").strip().lower()
+        options = ImportOptions(format=normalized_format, mode=mode, duplicate_strategy=duplicate_strategy)
         if normalized_format in {"encrypted_json", "json"}:
             if not password:
                 raise ImportValidationError("Для encrypted JSON нужен пароль экспорта")
@@ -2601,7 +3147,16 @@ class MainWindow:
         )
         return result
 
-    def share_selected_entry_to_path(self, target_path: str, *, recipient: str, password: str, expires_in_days: int = 7) -> bool:
+    def share_selected_entry_to_path(
+        self,
+        target_path: str,
+        *,
+        recipient: str,
+        password: str,
+        expires_in_days: int = 7,
+        read: bool = True,
+        edit: bool = False,
+    ) -> bool:
         entry = self._get_single_selected_entry("Поделиться записью")
         if not entry:
             return False
@@ -2609,13 +3164,22 @@ class MainWindow:
             entry_id=entry["id"],
             recipient=recipient,
             password=password,
-            permissions=SharePermissions(read=True, edit=False, expires_in_days=expires_in_days),
+            permissions=SharePermissions(read=read, edit=edit, expires_in_days=expires_in_days),
         )
         self._write_audit_export_file(target_path, package)
         self._show_info("Поделиться записью", "Зашифрованный share package сохранён.")
         return True
 
-    def share_selected_entry_public_key_to_path(self, target_path: str, *, recipient: str, public_key: str, expires_in_days: int = 7) -> bool:
+    def share_selected_entry_public_key_to_path(
+        self,
+        target_path: str,
+        *,
+        recipient: str,
+        public_key: str,
+        expires_in_days: int = 7,
+        read: bool = True,
+        edit: bool = False,
+    ) -> bool:
         entry = self._get_single_selected_entry("Поделиться записью")
         if not entry:
             return False
@@ -2623,7 +3187,7 @@ class MainWindow:
             entry_id=entry["id"],
             recipient=recipient,
             public_key=public_key,
-            permissions=SharePermissions(read=True, edit=False, expires_in_days=expires_in_days),
+            permissions=SharePermissions(read=read, edit=edit, expires_in_days=expires_in_days),
         )
         self._write_audit_export_file(target_path, package)
         self._show_info("Поделиться записью", "Public-key share package сохранён.")
@@ -2642,6 +3206,25 @@ class MainWindow:
         qr_service = QRCodeService(service)
         return "\n\n".join(qr_service.generate_key_exchange_svgs(identifier=identifier, public_key=public_key))
 
+    def generate_key_exchange_qr_pngs(self, *, identifier: str, public_key: str) -> list[bytes]:
+        service = KeyExchangeService(database=self.db, event_bus=event_bus)
+        qr_service = QRCodeService(service)
+        return qr_service.generate_key_exchange_pngs(identifier=identifier, public_key=public_key)
+
+    def scan_key_exchange_payload_from_camera(self) -> str:
+        service = KeyExchangeService(database=self.db, event_bus=event_bus)
+        camera_scanner = getattr(self, "qr_camera_scanner", None)
+        return QRCodeService(service, camera_scanner=camera_scanner).scan_from_camera()
+
+    def generate_share_package_qr_pngs(self, *, package_payload: str, label: str = "share-package") -> list[bytes]:
+        service = KeyExchangeService(database=self.db, event_bus=event_bus)
+        qr_service = QRCodeService(service)
+        return qr_service.generate_data_payload_pngs(
+            payload_type="cryptosafe_share_package",
+            label=label or "share-package",
+            data=str(package_payload or ""),
+        )
+
     def generate_key_exchange_file_bundle(self, *, identifier: str, output_dir: str) -> dict:
         safe_identifier = "".join(character if character.isalnum() or character in {"-", "_"} else "-" for character in identifier).strip("-")
         safe_identifier = safe_identifier or "local-user"
@@ -2654,7 +3237,9 @@ class MainWindow:
         payload = service.serialize_qr_payload(
             service.build_qr_payload(identifier=identifier, public_key=key_pair["public_key"])
         )
-        qr_svgs = QRCodeService(service).generate_qr_svgs(payload)
+        qr_service = QRCodeService(service)
+        qr_svgs = qr_service.generate_qr_svgs(payload)
+        qr_pngs = qr_service.generate_qr_pngs(payload)
 
         private_key_path = os.path.join(output_dir, f"{base_name}-private-key.pem")
         payload_path = os.path.join(output_dir, f"{base_name}-public-payload.json")
@@ -2671,6 +3256,7 @@ class MainWindow:
             "private_key_path": private_key_path,
             "payload_path": payload_path,
             "qr_paths": qr_paths,
+            "qr_pngs": qr_pngs,
             "expires_at": json.loads(payload)["expires_at"],
         }
 
@@ -2681,9 +3267,303 @@ class MainWindow:
         self._show_info("Обмен ключами", "Контакт и публичный ключ сохранены.")
         return contact_id
 
+    def _get_export_format_descriptions(self) -> dict[str, dict[str, str]]:
+        return {
+            "encrypted_json": {
+                "label": "Encrypted JSON",
+                "description": "Основной безопасный формат CryptoSafe: AES-GCM, metadata, integrity, пароль экспорта.",
+                "extension": ".json",
+            },
+            "public_key_json": {
+                "label": "Public-key JSON",
+                "description": "Гибридное шифрование RSA-OAEP/AES-GCM для получателя с публичным ключом.",
+                "extension": ".json",
+            },
+            "csv": {
+                "label": "CSV migration",
+                "description": "Открытый CSV для миграции. Требует явного подтверждения, потому что содержит plaintext.",
+                "extension": ".csv",
+            },
+            "bitwarden_json": {
+                "label": "Bitwarden JSON",
+                "description": "Открытый миграционный JSON, совместимый с импортом Bitwarden.",
+                "extension": ".json",
+            },
+            "lastpass_csv": {
+                "label": "LastPass CSV",
+                "description": "Открытый миграционный CSV, совместимый с импортом LastPass.",
+                "extension": ".csv",
+            },
+        }
+
     def show_export_dialog(self):
         if not self._reauthenticate_for_sensitive_action("Экспорт vault"):
             return False
+        if not self._can_use_themed_dialogs():
+            return self._show_export_dialog_fallback()
+
+        formats = self._get_export_format_descriptions()
+        result = {"value": False}
+        dialog = tk.Toplevel(self.root)
+        self._prepare_dialog(dialog)
+        dialog.title("Экспорт vault")
+        dialog.geometry(self._get_screen_limited_geometry(1040, 780))
+        if hasattr(dialog, "minsize"):
+            dialog.minsize(940, 700)
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        body = self._create_scrollable_dialog_body(dialog)
+        content = ttk.Frame(body, style="App.TFrame", padding=16)
+        content.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(content, text="Экспорт vault", style="DialogTitle.TLabel").pack(anchor=tk.W)
+        ttk.Label(
+            content,
+            text="Настройте формат, состав данных и параметры шифрования. Перед сохранением проверьте preview.",
+            style="Muted.TLabel",
+            wraplength=920,
+        ).pack(anchor=tk.W, pady=(6, 14))
+
+        left = ttk.Frame(content, style="App.TFrame")
+        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 12))
+        right = ttk.Frame(content, style="App.TFrame")
+        right.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+
+        format_var = tk.StringVar(value="encrypted_json")
+        selected_only_var = tk.BooleanVar(value=False)
+        compression_var = tk.BooleanVar(value=True)
+        strength_var = tk.StringVar(value="256")
+        password_var = tk.StringVar()
+        public_key_var = tk.StringVar()
+        field_vars = {
+            "title": tk.BooleanVar(value=True),
+            "username": tk.BooleanVar(value=True),
+            "password": tk.BooleanVar(value=True),
+            "url": tk.BooleanVar(value=True),
+            "notes": tk.BooleanVar(value=True),
+            "category": tk.BooleanVar(value=True),
+            "tags": tk.BooleanVar(value=True),
+        }
+        export_entries = self._build_vault_exporter().get_entries_for_export(ExportOptions())
+        selected_entry_ids = {int(entry.get("id")) for entry in self._get_selected_entries()}
+        if not selected_entry_ids:
+            selected_entry_ids = {int(entry.get("id")) for entry in export_entries}
+
+        ttk.Label(left, text="Формат", style="DialogHeader.TLabel").pack(anchor=tk.W, pady=(0, 6))
+        format_box = ttk.Combobox(
+            left,
+            textvariable=format_var,
+            state="readonly",
+            values=list(formats.keys()),
+            width=34,
+        )
+        format_box.pack(fill=tk.X, pady=(0, 8))
+        description_var = tk.StringVar()
+        ttk.Label(left, textvariable=description_var, style="DialogBody.TLabel", wraplength=420, justify=tk.LEFT).pack(
+            fill=tk.X, pady=(0, 14)
+        )
+
+        ttk.Label(left, text="Состав экспорта", style="DialogHeader.TLabel").pack(anchor=tk.W, pady=(0, 6))
+        ttk.Checkbutton(left, text="Только выбранные записи", variable=selected_only_var).pack(anchor=tk.W, pady=2)
+        ttk.Label(left, text="Записи для selected export", style="TLabel").pack(anchor=tk.W, pady=(8, 4))
+        entry_tree = ttk.Treeview(
+            left,
+            columns=("checked", "title", "username"),
+            show="headings",
+            height=7,
+            selectmode="browse",
+            style="Vault.Treeview",
+        )
+        entry_tree.heading("checked", text="✓")
+        entry_tree.heading("title", text="Название")
+        entry_tree.heading("username", text="Логин")
+        entry_tree.column("checked", width=44, anchor=tk.CENTER, stretch=False)
+        entry_tree.column("title", width=190)
+        entry_tree.column("username", width=160)
+        for entry in export_entries:
+            entry_id = int(entry.get("id"))
+            entry_tree.insert(
+                "",
+                tk.END,
+                iid=str(entry_id),
+                values=("☑" if entry_id in selected_entry_ids else "☐", entry.get("title", ""), entry.get("username", "")),
+            )
+        entry_tree.pack(fill=tk.X, pady=(0, 4))
+        ttk.Label(left, text="Клик по строке переключает чекбокс.", style="Muted.TLabel").pack(anchor=tk.W, pady=(0, 8))
+        fields_frame = ttk.Frame(left, style="App.TFrame")
+        fields_frame.pack(fill=tk.X, pady=(8, 14))
+        for index, (field, variable) in enumerate(field_vars.items()):
+            ttk.Checkbutton(fields_frame, text=field, variable=variable).grid(
+                row=index // 2,
+                column=index % 2,
+                sticky="w",
+                padx=(0, 18),
+                pady=2,
+            )
+
+        ttk.Label(left, text="Шифрование", style="DialogHeader.TLabel").pack(anchor=tk.W, pady=(0, 6))
+        ttk.Label(left, text="Пароль экспорта", style="TLabel").pack(anchor=tk.W)
+        password_entry = ttk.Entry(left, textvariable=password_var, show="*")
+        password_entry.pack(fill=tk.X, pady=(2, 8))
+        ttk.Label(left, text="Публичный ключ получателя", style="TLabel").pack(anchor=tk.W)
+        public_key_entry = ttk.Entry(left, textvariable=public_key_var)
+        public_key_entry.pack(fill=tk.X, pady=(2, 8))
+        ttk.Label(left, text="Strength", style="TLabel").pack(anchor=tk.W)
+        strength_box = ttk.Combobox(left, textvariable=strength_var, state="readonly", values=["256", "128"], width=10)
+        strength_box.pack(anchor=tk.W, pady=(2, 8))
+        ttk.Checkbutton(left, text="GZIP compression", variable=compression_var).pack(anchor=tk.W, pady=(2, 8))
+
+        ttk.Label(right, text="Preview", style="DialogHeader.TLabel").pack(anchor=tk.W, pady=(0, 6))
+        preview_text = self._style_text_widget(tk.Text(right, wrap=tk.WORD, height=22))
+        preview_text.pack(fill=tk.BOTH, expand=True)
+
+        button_bar = ttk.Frame(dialog, style="App.TFrame")
+        button_bar.pack(fill=tk.X, padx=16, pady=(0, 16))
+
+        def selected_include_fields() -> list[str]:
+            return [field for field, variable in field_vars.items() if variable.get()]
+
+        def selected_excluded_fields() -> list[str]:
+            return [field for field, variable in field_vars.items() if not variable.get()]
+
+        def selected_dialog_entry_ids() -> list[int]:
+            return sorted(selected_entry_ids)
+
+        def toggle_export_entry(item_id: str):
+            try:
+                entry_id = int(item_id)
+            except (TypeError, ValueError):
+                return
+            if entry_id in selected_entry_ids:
+                selected_entry_ids.remove(entry_id)
+                checked = "☐"
+            else:
+                selected_entry_ids.add(entry_id)
+                checked = "☑"
+            values = list(entry_tree.item(str(entry_id), "values"))
+            if values:
+                values[0] = checked
+                entry_tree.item(str(entry_id), values=values)
+            refresh_preview()
+
+        def toggle_export_entry_from_event(event):
+            item_id = entry_tree.identify_row(event.y)
+            if item_id:
+                toggle_export_entry(item_id)
+            return "break"
+
+        def refresh_preview(*_args):
+            normalized = format_var.get()
+            info = formats.get(normalized, formats["encrypted_json"])
+            description_var.set(info["description"])
+            secure_format = normalized in {"encrypted_json", "public_key_json"}
+            password_entry.state(["!disabled"] if normalized == "encrypted_json" else ["disabled"])
+            public_key_entry.state(["!disabled"] if normalized == "public_key_json" else ["disabled"])
+            strength_box.state(["!disabled"] if normalized == "encrypted_json" else ["disabled"])
+
+            try:
+                preview = self.build_vault_export_preview(
+                    selected_only=selected_only_var.get(),
+                    excluded_fields=selected_excluded_fields(),
+                    selected_entry_ids=selected_dialog_entry_ids(),
+                )
+                lines = [
+                    f"Формат: {info['label']}",
+                    f"Безопасность: {'encrypted by default' if secure_format else 'plaintext migration file'}",
+                    f"Режим: {preview['mode']}",
+                    f"Записей: {preview['entry_count']}",
+                    f"Отмечено в списке: {len(selected_entry_ids)}",
+                    f"Поля: {', '.join(preview['included_fields'])}",
+                    f"Исключено: {', '.join(preview['excluded_fields']) or 'нет'}",
+                    f"Strength: {strength_var.get()}-bit" if normalized == "encrypted_json" else "Strength: не применяется",
+                    f"Compression: {'да' if compression_var.get() and secure_format else 'нет'}",
+                    "",
+                    "Первые записи:",
+                    *[f"- {title}" for title in preview["titles"]],
+                ]
+            except Exception as error:
+                lines = [f"Preview недоступен: {error}"]
+            preview_text.config(state=tk.NORMAL)
+            preview_text.delete("1.0", tk.END)
+            preview_text.insert("1.0", "\n".join(lines))
+            preview_text.config(state=tk.DISABLED)
+
+        def choose_target_and_export():
+            normalized = format_var.get()
+            if not selected_include_fields():
+                self._show_warning("Экспорт vault", "Выберите хотя бы одно поле для экспорта.", parent=dialog)
+                return
+            if normalized == "encrypted_json" and not password_var.get():
+                self._show_warning("Экспорт vault", "Введите пароль экспорта.", parent=dialog)
+                return
+            if normalized == "public_key_json" and not public_key_var.get().strip():
+                self._show_warning("Экспорт vault", "Вставьте публичный ключ получателя.", parent=dialog)
+                return
+            extension = formats[normalized]["extension"]
+            target_path = self._ask_saveas_filename(
+                title="Экспорт vault",
+                defaultextension=extension,
+                filetypes=[("Поддерживаемые файлы", "*.json *.csv"), ("Все файлы", "*.*")],
+                parent=dialog,
+            )
+            if not target_path:
+                return
+            include_fields = selected_include_fields()
+            selected_only = selected_only_var.get()
+            selected_ids = selected_dialog_entry_ids()
+            try:
+                if normalized == "encrypted_json":
+                    result["value"] = self.export_vault_encrypted_json_to_path(
+                        target_path,
+                        password_var.get(),
+                        selected_only=selected_only,
+                        selected_entry_ids=selected_ids,
+                        compression=compression_var.get(),
+                        include_fields=include_fields,
+                        encryption_strength=int(strength_var.get()),
+                    )
+                elif normalized == "public_key_json":
+                    result["value"] = self.export_vault_public_key_json_to_path(
+                        target_path,
+                        public_key_var.get().strip(),
+                        selected_only=selected_only,
+                        selected_entry_ids=selected_ids,
+                        include_fields=include_fields,
+                    )
+                elif normalized == "csv":
+                    result["value"] = self.export_vault_csv_to_path(
+                        target_path,
+                        selected_only=selected_only,
+                        selected_entry_ids=selected_ids,
+                        include_fields=include_fields,
+                    )
+                else:
+                    result["value"] = self.export_vault_password_manager_to_path(
+                        target_path,
+                        export_format=normalized,
+                        selected_only=selected_only,
+                        selected_entry_ids=selected_ids,
+                        include_fields=include_fields,
+                    )
+            except Exception as error:
+                self._show_error("Экспорт vault", str(error), parent=dialog)
+                return
+            if result["value"]:
+                dialog.destroy()
+
+        for variable in [format_var, selected_only_var, compression_var, strength_var, password_var, public_key_var, *field_vars.values()]:
+            variable.trace_add("write", refresh_preview)
+        format_box.bind("<<ComboboxSelected>>", refresh_preview)
+        entry_tree.bind("<ButtonRelease-1>", toggle_export_entry_from_event)
+        ttk.Button(button_bar, text="Обновить preview", style="Ghost.TButton", command=refresh_preview).pack(side=tk.LEFT)
+        ttk.Button(button_bar, text="Отмена", style="Ghost.TButton", command=dialog.destroy).pack(side=tk.RIGHT, padx=(8, 0))
+        ttk.Button(button_bar, text="Экспортировать", style="Accent.TButton", command=choose_target_and_export).pack(side=tk.RIGHT)
+
+        refresh_preview()
+        dialog.wait_window()
+        return result["value"]
+
+    def _show_export_dialog_fallback(self):
         export_format = self._ask_string(
             "Экспорт vault",
             "Формат: encrypted_json, public_key_json, csv, bitwarden_json или lastpass_csv",
@@ -2693,6 +3573,7 @@ class MainWindow:
             return False
         normalized_format = str(export_format).strip().lower()
         selected_only = self._ask_yes_no("Экспорт vault", "Экспортировать только выбранные записи?")
+        include_fields = self._build_export_include_fields([])
         if normalized_format in {"encrypted_json", "json"}:
             password = self._ask_string("Пароль экспорта", "Введите пароль для файла экспорта:", show="*")
             if not password:
@@ -2704,7 +3585,7 @@ class MainWindow:
             )
             if not target_path:
                 return False
-            return self.export_vault_encrypted_json_to_path(target_path, password, selected_only=selected_only)
+            return self.export_vault_encrypted_json_to_path(target_path, password, selected_only=selected_only, include_fields=include_fields)
         if normalized_format == "public_key_json":
             public_key = self._ask_string("Публичный ключ", "Вставьте публичный RSA-ключ получателя:")
             if not public_key:
@@ -2716,7 +3597,7 @@ class MainWindow:
             )
             if not target_path:
                 return False
-            return self.export_vault_public_key_json_to_path(target_path, public_key, selected_only=selected_only)
+            return self.export_vault_public_key_json_to_path(target_path, public_key, selected_only=selected_only, include_fields=include_fields)
         if normalized_format == "csv":
             target_path = self._ask_saveas_filename(
                 title="Экспорт vault CSV",
@@ -2725,7 +3606,7 @@ class MainWindow:
             )
             if not target_path:
                 return False
-            return self.export_vault_csv_to_path(target_path, selected_only=selected_only)
+            return self.export_vault_csv_to_path(target_path, selected_only=selected_only, include_fields=include_fields)
         if normalized_format in {"bitwarden_json", "lastpass_csv"}:
             extension = ".json" if normalized_format == "bitwarden_json" else ".csv"
             target_path = self._ask_saveas_filename(
@@ -2739,6 +3620,7 @@ class MainWindow:
                 target_path,
                 export_format=normalized_format,
                 selected_only=selected_only,
+                include_fields=include_fields,
             )
         self._show_error("Экспорт vault", "Поддерживаются encrypted_json, public_key_json, csv, bitwarden_json и lastpass_csv.")
         return False
@@ -2746,10 +3628,185 @@ class MainWindow:
     def show_import_dialog(self):
         if not self._reauthenticate_for_sensitive_action("Импорт vault"):
             return False
+        if not self._can_use_themed_dialogs():
+            return self._show_import_dialog_fallback()
+
+        result = {"value": False}
+        dialog = tk.Toplevel(self.root)
+        self._prepare_dialog(dialog)
+        dialog.title("Импорт vault")
+        dialog.geometry(self._get_screen_limited_geometry(1040, 760))
+        if hasattr(dialog, "minsize"):
+            dialog.minsize(940, 680)
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        body = self._create_scrollable_dialog_body(dialog)
+        content = ttk.Frame(body, style="App.TFrame", padding=16)
+        content.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(content, text="Импорт vault", style="DialogTitle.TLabel").pack(anchor=tk.W)
+        ttk.Label(
+            content,
+            text="Выберите файл, проверьте auto-detect и preview. По умолчанию импорт не применяется, пока вы явно не выберете режим.",
+            style="Muted.TLabel",
+            wraplength=920,
+        ).pack(anchor=tk.W, pady=(6, 14))
+
+        top = ttk.Frame(content, style="App.TFrame")
+        top.pack(fill=tk.X, pady=(0, 12))
+        source_var = tk.StringVar()
+        format_var = tk.StringVar(value="auto")
+        mode_var = tk.StringVar(value="dry-run")
+        duplicate_var = tk.StringVar(value="skip")
+        password_var = tk.StringVar()
+        detected_var = tk.StringVar(value="Формат ещё не определён")
+
+        ttk.Label(top, text="Файл", style="TLabel").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=4)
+        source_entry = ttk.Entry(top, textvariable=source_var)
+        source_entry.grid(row=0, column=1, sticky="we", pady=4)
+        top.grid_columnconfigure(1, weight=1)
+
+        def browse_file():
+            path = self._ask_open_filename(
+                title="Импорт vault",
+                filetypes=[("Поддерживаемые файлы", "*.json *.csv"), ("Все файлы", "*.*")],
+                parent=dialog,
+            )
+            if path:
+                source_var.set(path)
+                refresh_detected_format()
+                refresh_preview()
+
+        ttk.Button(top, text="Выбрать...", style="Ghost.TButton", command=browse_file).grid(row=0, column=2, padx=(8, 0), pady=4)
+
+        ttk.Label(top, text="Формат", style="TLabel").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Combobox(
+            top,
+            textvariable=format_var,
+            state="readonly",
+            values=["auto", "encrypted_json", "csv", "lastpass_csv", "bitwarden_json"],
+            width=24,
+        ).grid(row=1, column=1, sticky="w", pady=4)
+        ttk.Label(top, textvariable=detected_var, style="Muted.TLabel").grid(row=1, column=2, sticky="w", padx=(8, 0), pady=4)
+
+        ttk.Label(top, text="Режим", style="TLabel").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Combobox(
+            top,
+            textvariable=mode_var,
+            state="readonly",
+            values=["dry-run", "merge", "replace"],
+            width=24,
+        ).grid(row=2, column=1, sticky="w", pady=4)
+
+        ttk.Label(top, text="Дубликаты", style="TLabel").grid(row=2, column=2, sticky="w", padx=(8, 8), pady=4)
+        ttk.Combobox(
+            top,
+            textvariable=duplicate_var,
+            state="readonly",
+            values=["skip", "replace"],
+            width=14,
+        ).grid(row=2, column=3, sticky="w", pady=4)
+
+        ttk.Label(top, text="Пароль", style="TLabel").grid(row=3, column=0, sticky="w", padx=(0, 8), pady=4)
+        password_entry = ttk.Entry(top, textvariable=password_var, show="*")
+        password_entry.grid(row=3, column=1, sticky="we", pady=4)
+
+        preview_text = self._style_text_widget(tk.Text(content, wrap=tk.WORD, height=18))
+        preview_text.pack(fill=tk.BOTH, expand=True, pady=(6, 12))
+
+        def selected_format() -> str:
+            chosen = str(format_var.get() or "auto").strip().lower()
+            if chosen != "auto":
+                return chosen
+            path = source_var.get().strip()
+            if not path:
+                return "auto"
+            with open(path, "rb") as handle:
+                return self.detect_vault_import_format(path, handle.read())
+
+        def refresh_detected_format(*_args):
+            path = source_var.get().strip()
+            if not path:
+                detected_var.set("Формат ещё не определён")
+                return
+            try:
+                with open(path, "rb") as handle:
+                    detected = self.detect_vault_import_format(path, handle.read())
+                detected_var.set(f"Auto-detect: {detected}")
+            except Exception as error:
+                detected_var.set(f"Auto-detect: {error}")
+
+        def refresh_preview(*_args):
+            path = source_var.get().strip()
+            lines = []
+            if not path:
+                lines = ["Выберите файл для preview."]
+            elif not os.path.exists(path):
+                lines = ["Файл не найден."]
+            else:
+                try:
+                    fmt = selected_format()
+                    if fmt in {"encrypted_json", "json"} and not password_var.get():
+                        lines = ["Encrypted JSON определён. Введите пароль, чтобы показать preview."]
+                    else:
+                        preview = self.preview_vault_import_file(
+                            path,
+                            import_format=fmt,
+                            password=password_var.get(),
+                        )
+                        lines = [
+                            f"Формат: {preview['format']}",
+                            f"Режим: {mode_var.get()}",
+                            f"Дубликаты: {duplicate_var.get()}",
+                            f"Проверено записей: {preview['validated']}",
+                            "",
+                            "Первые записи:",
+                            *[f"- {title}" for title in preview["titles"]],
+                        ]
+                except Exception as error:
+                    lines = [f"Preview недоступен: {error}"]
+            preview_text.config(state=tk.NORMAL)
+            preview_text.delete("1.0", tk.END)
+            preview_text.insert("1.0", "\n".join(lines))
+            preview_text.config(state=tk.DISABLED)
+
+        def apply_import():
+            path = source_var.get().strip()
+            if not path:
+                self._show_warning("Импорт vault", "Выберите файл импорта.", parent=dialog)
+                return
+            try:
+                fmt = selected_format()
+                result["value"] = self.import_vault_file(
+                    path,
+                    import_format=fmt,
+                    password=password_var.get(),
+                    mode=mode_var.get(),
+                    duplicate_strategy=duplicate_var.get(),
+                )
+            except Exception as error:
+                self._show_error("Импорт vault", str(error), parent=dialog)
+                return
+            dialog.destroy()
+
+        button_bar = ttk.Frame(dialog, style="App.TFrame")
+        button_bar.pack(fill=tk.X, padx=16, pady=(0, 16))
+        ttk.Button(button_bar, text="Preview", style="Ghost.TButton", command=refresh_preview).pack(side=tk.LEFT)
+        ttk.Button(button_bar, text="Отмена", style="Ghost.TButton", command=dialog.destroy).pack(side=tk.RIGHT, padx=(8, 0))
+        ttk.Button(button_bar, text="Импортировать", style="Accent.TButton", command=apply_import).pack(side=tk.RIGHT)
+
+        for variable in (source_var, format_var, mode_var, duplicate_var, password_var):
+            variable.trace_add("write", refresh_preview)
+        source_var.trace_add("write", refresh_detected_format)
+        refresh_preview()
+        dialog.wait_window()
+        return result["value"]
+
+    def _show_import_dialog_fallback(self):
         import_format = self._ask_string(
             "Импорт vault",
-            "Формат: encrypted_json, csv, lastpass_csv или bitwarden_json",
-            initialvalue="encrypted_json",
+            "Формат: auto, encrypted_json, csv, lastpass_csv или bitwarden_json",
+            initialvalue="auto",
         )
         if not import_format:
             return False
@@ -2761,8 +3818,8 @@ class MainWindow:
             return False
         mode = "merge" if self._ask_yes_no("Импорт vault", "Применить импорт сейчас? Нет = dry-run preview.") else "dry-run"
         password = ""
-        if str(import_format).strip().lower() in {"encrypted_json", "json"}:
-            password = self._ask_string("Пароль импорта", "Введите пароль файла экспорта:", show="*") or ""
+        if str(import_format).strip().lower() in {"encrypted_json", "json", "auto"}:
+            password = self._ask_string("Пароль импорта", "Введите пароль файла экспорта, если он нужен:", show="*") or ""
         try:
             return self.import_vault_file(source_path, import_format=import_format, password=password, mode=mode)
         except ImportExportError as error:
@@ -2775,6 +3832,157 @@ class MainWindow:
         entry = self._get_single_selected_entry("Поделиться записью")
         if not entry:
             return False
+        if not self._can_use_themed_dialogs():
+            return self._show_share_dialog_fallback(entry)
+
+        result = {"value": False}
+        dialog = tk.Toplevel(self.root)
+        self._prepare_dialog(dialog)
+        dialog.title("Поделиться записью")
+        dialog.geometry(self._get_screen_limited_geometry(980, 720))
+        if hasattr(dialog, "minsize"):
+            dialog.minsize(880, 640)
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        body = self._create_scrollable_dialog_body(dialog)
+        content = ttk.Frame(body, style="App.TFrame", padding=16)
+        content.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(content, text="Поделиться записью", style="DialogTitle.TLabel").pack(anchor=tk.W)
+        ttk.Label(
+            content,
+            text=f"Запись: {entry.get('title', '')}. Настройте получателя, права, срок и способ доставки.",
+            style="Muted.TLabel",
+            wraplength=880,
+        ).pack(anchor=tk.W, pady=(6, 14))
+
+        left = ttk.Frame(content, style="App.TFrame")
+        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 12))
+        right = ttk.Frame(content, style="App.TFrame")
+        right.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+
+        recipient_var = tk.StringVar()
+        method_var = tk.StringVar(value="password")
+        delivery_var = tk.StringVar(value="file")
+        expiration_var = tk.IntVar(value=7)
+        read_var = tk.BooleanVar(value=True)
+        edit_var = tk.BooleanVar(value=False)
+        password_var = tk.StringVar()
+        public_key_var = tk.StringVar()
+
+        ttk.Label(left, text="Получатель", style="DialogHeader.TLabel").pack(anchor=tk.W, pady=(0, 6))
+        ttk.Entry(left, textvariable=recipient_var).pack(fill=tk.X, pady=(0, 10))
+        ttk.Label(left, text="Метод шифрования", style="TLabel").pack(anchor=tk.W)
+        ttk.Combobox(left, textvariable=method_var, state="readonly", values=["password", "public_key"], width=24).pack(anchor=tk.W, pady=(2, 10))
+        ttk.Label(left, text="Доставка", style="TLabel").pack(anchor=tk.W)
+        ttk.Combobox(left, textvariable=delivery_var, state="readonly", values=["file", "qr"], width=24).pack(anchor=tk.W, pady=(2, 10))
+        ttk.Label(left, text="Срок действия, дней (1-30)", style="TLabel").pack(anchor=tk.W)
+        ttk.Spinbox(left, from_=1, to=30, textvariable=expiration_var, width=8).pack(anchor=tk.W, pady=(2, 10))
+        ttk.Checkbutton(left, text="Read permission", variable=read_var).pack(anchor=tk.W, pady=2)
+        ttk.Checkbutton(left, text="Edit permission", variable=edit_var).pack(anchor=tk.W, pady=2)
+
+        ttk.Label(left, text="Пароль share package", style="TLabel").pack(anchor=tk.W, pady=(12, 2))
+        password_entry = ttk.Entry(left, textvariable=password_var, show="*")
+        password_entry.pack(fill=tk.X, pady=(0, 8))
+        ttk.Label(left, text="Публичный ключ получателя", style="TLabel").pack(anchor=tk.W, pady=(8, 2))
+        public_key_entry = ttk.Entry(left, textvariable=public_key_var)
+        public_key_entry.pack(fill=tk.X, pady=(0, 8))
+
+        ttk.Label(right, text="Share history", style="DialogHeader.TLabel").pack(anchor=tk.W, pady=(0, 6))
+        history_text = self._style_text_widget(tk.Text(right, wrap=tk.WORD, height=18))
+        history_text.pack(fill=tk.BOTH, expand=True)
+
+        def refresh_controls(*_args):
+            if method_var.get() == "password":
+                password_entry.state(["!disabled"])
+                public_key_entry.state(["disabled"])
+            else:
+                password_entry.state(["disabled"])
+                public_key_entry.state(["!disabled"])
+            lines = []
+            for item in self.get_share_history_status(limit=8):
+                lines.append(
+                    f"- {item.get('recipient_info', '')} | {item.get('encryption_method', '')} | "
+                    f"{item.get('computed_status', item.get('status', ''))} | до {item.get('expires_at', '')}"
+                )
+            if not lines:
+                lines = ["История share пока пустая."]
+            history_text.config(state=tk.NORMAL)
+            history_text.delete("1.0", tk.END)
+            history_text.insert("1.0", "\n".join(lines))
+            history_text.config(state=tk.DISABLED)
+
+        def create_share():
+            recipient = recipient_var.get().strip()
+            if not recipient:
+                self._show_warning("Поделиться записью", "Укажите получателя.", parent=dialog)
+                return
+            if not read_var.get() and not edit_var.get():
+                self._show_warning("Поделиться записью", "Выберите хотя бы одно право доступа.", parent=dialog)
+                return
+            target_path = self._ask_saveas_filename(
+                title="Сохранить share package",
+                defaultextension=".cs-share.json",
+                filetypes=[("CryptoSafe Share", "*.json"), ("Все файлы", "*.*")],
+                parent=dialog,
+            )
+            if not target_path:
+                return
+            try:
+                if method_var.get() == "public_key":
+                    public_key = public_key_var.get().strip()
+                    if not public_key:
+                        self._show_warning("Поделиться записью", "Вставьте публичный ключ получателя.", parent=dialog)
+                        return
+                    result["value"] = self.share_selected_entry_public_key_to_path(
+                        target_path,
+                        recipient=recipient,
+                        public_key=public_key,
+                        expires_in_days=expiration_var.get(),
+                        read=read_var.get(),
+                        edit=edit_var.get(),
+                    )
+                else:
+                    password = password_var.get()
+                    if not password:
+                        self._show_warning("Поделиться записью", "Введите пароль share package.", parent=dialog)
+                        return
+                    result["value"] = self.share_selected_entry_to_path(
+                        target_path,
+                        recipient=recipient,
+                        password=password,
+                        expires_in_days=expiration_var.get(),
+                        read=read_var.get(),
+                        edit=edit_var.get(),
+                    )
+            except Exception as error:
+                self._show_error("Поделиться записью", str(error), parent=dialog)
+                return
+            if result["value"]:
+                if delivery_var.get() == "qr":
+                    try:
+                        with open(target_path, "r", encoding="utf-8") as handle:
+                            package_payload = handle.read()
+                        pngs = self.generate_share_package_qr_pngs(package_payload=package_payload, label=recipient)
+                        self._show_qr_png_preview("QR share package", pngs, parent=dialog)
+                        return
+                    except Exception as error:
+                        self._show_error("Поделиться записью", f"Package сохранён, но QR не создан: {error}", parent=dialog)
+                        return
+                dialog.destroy()
+
+        for variable in (method_var, delivery_var, expiration_var, read_var, edit_var):
+            variable.trace_add("write", refresh_controls)
+        refresh_controls()
+        button_bar = ttk.Frame(dialog, style="App.TFrame")
+        button_bar.pack(fill=tk.X, padx=16, pady=(0, 16))
+        ttk.Button(button_bar, text="Обновить историю", style="Ghost.TButton", command=refresh_controls).pack(side=tk.LEFT)
+        ttk.Button(button_bar, text="Отмена", style="Ghost.TButton", command=dialog.destroy).pack(side=tk.RIGHT, padx=(8, 0))
+        ttk.Button(button_bar, text="Создать package", style="Accent.TButton", command=create_share).pack(side=tk.RIGHT)
+        dialog.wait_window()
+        return result["value"]
+
+    def _show_share_dialog_fallback(self, entry):
         recipient = self._ask_string("Поделиться записью", "Получатель:")
         if not recipient:
             return False
@@ -2792,37 +4000,116 @@ class MainWindow:
             public_key = self._ask_string("Публичный ключ", "Вставьте публичный RSA-ключ получателя:")
             if not public_key:
                 return False
-            package = self._build_sharing_service().create_public_key_share_package(
-                entry_id=entry["id"],
+            return self.share_selected_entry_public_key_to_path(
+                target_path,
                 recipient=recipient,
                 public_key=public_key,
-                permissions=SharePermissions(read=True, edit=False, expires_in_days=7),
+                expires_in_days=7,
             )
-            self._write_audit_export_file(target_path, package)
-            self._show_info("Поделиться записью", "Public-key share package сохранён.")
-            return True
         password = self._ask_string("Пароль share package", "Пароль для получателя:", show="*")
         if not password:
             return False
-        package = self._build_sharing_service().create_password_share_package(
-            entry_id=entry["id"],
+        return self.share_selected_entry_to_path(
+            target_path,
             recipient=recipient,
             password=password,
-            permissions=SharePermissions(read=True, edit=False, expires_in_days=7),
+            expires_in_days=7,
         )
-        self._write_audit_export_file(target_path, package)
-        self._show_info("Поделиться записью", "Зашифрованный share package сохранён.")
-        return True
+
+    def _show_qr_png_preview(self, title: str, pngs: list[bytes], *, parent=None):
+        if not pngs:
+            self._show_warning(title, "QR не создан.", parent=parent)
+            return None
+        preview = tk.Toplevel(parent or self.root)
+        self._prepare_dialog(preview)
+        preview.title(title)
+        preview.geometry(self._get_screen_limited_geometry(620, 720))
+        if hasattr(preview, "minsize"):
+            preview.minsize(560, 620)
+        if parent is not None:
+            preview.transient(parent)
+
+        content = ttk.Frame(preview, style="App.TFrame", padding=16)
+        content.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(content, text=title, style="DialogTitle.TLabel").pack(anchor=tk.W)
+        ttk.Label(
+            content,
+            text=f"Показан QR 1 из {len(pngs)}. Полный share package уже сохранён в файл.",
+            style="Muted.TLabel",
+            wraplength=540,
+        ).pack(anchor=tk.W, pady=(6, 14))
+        image = tk.PhotoImage(data=b64encode(pngs[0]).decode("ascii"))
+        qr_label = ttk.Label(content, image=image, anchor="center")
+        qr_label.image = image
+        qr_label.pack(fill=tk.BOTH, expand=True, pady=(0, 12))
+        ttk.Button(content, text="Закрыть", style="Ghost.TButton", command=preview.destroy).pack(anchor=tk.E)
+        return preview
 
     def show_key_exchange_dialog(self):
         dialog = tk.Toplevel(self.root)
         self._prepare_dialog(dialog)
         dialog.title("Обмен ключами / QR")
-        dialog.geometry("720x520")
-        text = self._style_text_widget(tk.Text(dialog, wrap=tk.WORD, height=18))
-        text.pack(fill=tk.BOTH, expand=True, padx=14, pady=14)
+        dialog.geometry(self._get_screen_limited_geometry(980, 760))
+        if hasattr(dialog, "minsize"):
+            dialog.minsize(900, 680)
+        body = self._create_scrollable_dialog_body(dialog)
+        content = ttk.Frame(body, style="App.TFrame")
+        content.pack(fill=tk.BOTH, expand=True, padx=14, pady=14)
+        auto_refresh_var = tk.BooleanVar(value=True)
+        last_bundle = {"identifier": "", "output_dir": "", "after_id": None}
+        qr_preview = ttk.Label(content, text="QR появится здесь после генерации", anchor="center", style="Muted.TLabel")
+        qr_preview.pack(fill=tk.X, pady=(0, 10))
+        qr_status = ttk.Label(content, text="", style="Muted.TLabel")
+        qr_status.pack(fill=tk.X, pady=(0, 8))
+        text = self._style_text_widget(tk.Text(content, wrap=tk.WORD, height=12))
+        text.pack(fill=tk.BOTH, expand=True)
         controls = ttk.Frame(dialog, style="App.TFrame")
         controls.pack(fill=tk.X, padx=14, pady=(0, 14))
+
+        def show_qr_preview(pngs: list[bytes]):
+            if not pngs:
+                qr_preview.configure(text="QR не создан", image="")
+                qr_preview.image = None
+                qr_status.configure(text="")
+                return
+            image = tk.PhotoImage(data=b64encode(pngs[0]).decode("ascii"))
+            qr_preview.configure(image=image, text="")
+            qr_preview.image = image
+            qr_status.configure(text=f"Показан QR 1 из {len(pngs)}. QR действителен 5 минут; auto-refresh обновит payload.")
+
+        def cancel_auto_refresh():
+            after_id = last_bundle.get("after_id")
+            if after_id:
+                try:
+                    self.root.after_cancel(after_id)
+                except Exception:
+                    pass
+                last_bundle["after_id"] = None
+
+        def schedule_auto_refresh():
+            cancel_auto_refresh()
+            if not auto_refresh_var.get() or not last_bundle.get("identifier") or not last_bundle.get("output_dir"):
+                return
+            try:
+                last_bundle["after_id"] = self.root.after(240000, refresh_generated_qr)
+            except Exception:
+                last_bundle["after_id"] = None
+
+        def refresh_generated_qr():
+            if not last_bundle.get("identifier") or not last_bundle.get("output_dir"):
+                return
+            try:
+                bundle = self.generate_key_exchange_file_bundle(
+                    identifier=last_bundle["identifier"],
+                    output_dir=last_bundle["output_dir"],
+                )
+                show_qr_preview(bundle.get("qr_pngs", []))
+                text.delete("1.0", tk.END)
+                text.insert("1.0", self._format_key_exchange_bundle_summary(bundle))
+            except ImportExportError as error:
+                self._show_error("Обмен ключами", str(error), parent=dialog)
+                return
+            schedule_auto_refresh()
 
         def generate():
             identifier = self._ask_string("Обмен ключами", "Identifier контакта:", initialvalue="local-user")
@@ -2833,11 +4120,15 @@ class MainWindow:
                 return
             try:
                 bundle = self.generate_key_exchange_file_bundle(identifier=identifier, output_dir=output_dir)
+                show_qr_preview(bundle.get("qr_pngs", []))
             except ImportExportError as error:
                 self._show_error("Обмен ключами", str(error), parent=dialog)
                 return
+            last_bundle["identifier"] = identifier
+            last_bundle["output_dir"] = output_dir
             text.delete("1.0", tk.END)
             text.insert("1.0", self._format_key_exchange_bundle_summary(bundle))
+            schedule_auto_refresh()
 
         def import_payload():
             payload_text = text.get("1.0", tk.END).strip()
@@ -2846,6 +4137,33 @@ class MainWindow:
                 self.import_key_exchange_payload_text(payload_text, contact_name=contact_name or "")
             except ImportExportError as error:
                 self._show_error("Обмен ключами", str(error), parent=dialog)
+
+        def scan_camera():
+            try:
+                payload_text = self.scan_key_exchange_payload_from_camera()
+            except ImportExportError as error:
+                self._show_error("QR camera", str(error), parent=dialog)
+                return
+            text.delete("1.0", tk.END)
+            text.insert("1.0", payload_text)
+            qr_status.configure(text="Payload получен с camera scanner. Проверьте fingerprint и импортируйте.")
+
+        def copy_payload():
+            payload_text = text.get("1.0", tk.END).strip()
+            if not payload_text:
+                self._show_warning("Обмен ключами", "Нет payload для копирования.", parent=dialog)
+                return
+            try:
+                self.clipboard_service.copy_text(
+                    payload_text,
+                    data_type="qr_payload",
+                    source_label="key-exchange",
+                    application_name=self._get_clipboard_application_name(),
+                )
+            except ClipboardAccessError as error:
+                self._show_error("Буфер обмена", str(error), parent=dialog)
+                return
+            self._show_info("Обмен ключами", "Payload скопирован в буфер с автоочисткой.", parent=dialog)
 
         def import_qr_svg():
             file_paths = self._ask_open_filenames(
@@ -2862,10 +4180,14 @@ class MainWindow:
             except ImportExportError as error:
                 self._show_error("Обмен ключами", str(error), parent=dialog)
 
+        dialog.protocol("WM_DELETE_WINDOW", lambda: (cancel_auto_refresh(), dialog.destroy()))
+        ttk.Checkbutton(controls, text="Auto-refresh QR каждые 4 минуты", variable=auto_refresh_var, command=schedule_auto_refresh).pack(side=tk.LEFT, padx=3)
         ttk.Button(controls, text="Сгенерировать payload", style="Ghost.TButton", command=generate).pack(side=tk.LEFT, padx=3)
+        ttk.Button(controls, text="Сканировать камерой", style="Ghost.TButton", command=scan_camera).pack(side=tk.LEFT, padx=3)
         ttk.Button(controls, text="Импортировать payload", style="Ghost.TButton", command=import_payload).pack(side=tk.LEFT, padx=3)
         ttk.Button(controls, text="Импортировать QR SVG", style="Ghost.TButton", command=import_qr_svg).pack(side=tk.LEFT, padx=3)
-        ttk.Button(controls, text="Закрыть", style="Ghost.TButton", command=dialog.destroy).pack(side=tk.RIGHT, padx=3)
+        ttk.Button(controls, text="Копировать payload", style="Ghost.TButton", command=copy_payload).pack(side=tk.LEFT, padx=3)
+        ttk.Button(controls, text="Закрыть", style="Ghost.TButton", command=lambda: (cancel_auto_refresh(), dialog.destroy())).pack(side=tk.RIGHT, padx=3)
         return dialog
 
     def _format_key_exchange_bundle_summary(self, bundle: dict) -> str:
@@ -3290,10 +4612,10 @@ class MainWindow:
             y2 = y1 + bar_height
             width = int((item["count"] / max_count) * usable_width)
             if hasattr(canvas, "create_text"):
-                canvas.create_text(8, y1 + bar_height / 2, anchor="w", text=item["label"][:24], fill="#1f2937")
-            canvas.create_rectangle(left, y1, left + width, y2, fill="#2f6fed", outline="")
+                canvas.create_text(8, y1 + bar_height / 2, anchor="w", text=item["label"][:24], fill=self.UI_COLORS["muted"])
+            canvas.create_rectangle(left, y1, left + width, y2, fill=self.UI_COLORS["accent"], outline="")
             if hasattr(canvas, "create_text"):
-                canvas.create_text(left + width + 8, y1 + bar_height / 2, anchor="w", text=str(item["count"]), fill="#111827")
+                canvas.create_text(left + width + 8, y1 + bar_height / 2, anchor="w", text=str(item["count"]), fill=self.UI_COLORS["ink"])
 
     def _build_audit_log_detail_lines(self, log) -> list[str]:
         parsed_details = self._parse_audit_details(getattr(log, "details", ""))
@@ -3952,7 +5274,9 @@ class MainWindow:
         dialog = tk.Toplevel(self.root)
         self._prepare_dialog(dialog)
         dialog.title("Журнал аудита")
-        dialog.geometry("980x620")
+        dialog.geometry("1180x760")
+        if hasattr(dialog, "minsize"):
+            dialog.minsize(1040, 680)
 
         filter_frame = ttk.Frame(dialog, style="App.TFrame")
         filter_frame.pack(fill=tk.X, padx=8, pady=8)
@@ -4050,7 +5374,7 @@ class MainWindow:
             summary_frame,
             width=520,
             height=200,
-            bg="#ffffff",
+            bg=self.UI_COLORS["surface"],
             highlightthickness=1,
             highlightbackground=self.UI_COLORS["line"],
         )
@@ -4158,7 +5482,7 @@ class MainWindow:
             actions = self._get_audit_log_context_actions(log)
             if not actions:
                 return
-            menu = tk.Menu(dialog, tearoff=0)
+            menu = self._create_tk_menu(dialog, tearoff=0)
             for action in actions:
                 menu.add_command(
                     label=action["label"],
@@ -4244,7 +5568,9 @@ class MainWindow:
         dialog = tk.Toplevel(self.root)
         self._prepare_dialog(dialog)
         dialog.title("Диагностика буфера обмена")
-        dialog.geometry("720x420")
+        dialog.geometry("880x560")
+        if hasattr(dialog, "minsize"):
+            dialog.minsize(760, 480)
         text = self._style_text_widget(tk.Text(dialog, wrap=tk.WORD))
         text.pack(fill=tk.BOTH, expand=True)
         text.insert("1.0", "\n".join(self._build_clipboard_diagnostics_lines()))
@@ -4254,7 +5580,9 @@ class MainWindow:
         dialog = tk.Toplevel(self.root)
         self._prepare_dialog(dialog)
         dialog.title("Настройки")
-        dialog.geometry("460x620")
+        dialog.geometry("620x760")
+        if hasattr(dialog, "minsize"):
+            dialog.minsize(560, 680)
 
         clipboard_settings = (
             self.clipboard_service.get_settings()
