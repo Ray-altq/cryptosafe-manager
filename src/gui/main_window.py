@@ -45,6 +45,7 @@ from ..core.import_export.exporter import VaultExporter
 from ..core.import_export.importer import VaultImporter
 from ..core.import_export.sharing_service import SharingService
 from ..core.key_manager import KeyManager
+from ..core.security import SECURITY_PROFILES, explain_security_profile, validate_security_settings
 from ..core.state_manager import StateManager
 from ..core.vault import (
     AESGCMEncryptionService,
@@ -5623,11 +5624,25 @@ class MainWindow:
         )
         clipboard_preset = tk.StringVar(value=self._get_clipboard_preset_label(initial_clipboard_preset))
         clipboard_summary = tk.StringVar()
+        security_profile = tk.StringVar(value=self.config.get("security.security_profile", "standard"))
+        security_profile_summary = tk.StringVar(value=explain_security_profile(security_profile.get()))
         auto_lock_minutes = tk.IntVar(value=self.config.get("security.auto_lock_minutes", 5))
         min_password_length = tk.IntVar(value=self.config.get("security.min_password_length", 12))
         key_cache_timeout_minutes = tk.IntVar(value=self.config.get("security.key_cache_timeout_minutes", 60))
         lock_on_focus_loss = tk.BooleanVar(value=self.config.get("security.lock_on_focus_loss", True))
         lock_on_minimize = tk.BooleanVar(value=self.config.get("security.lock_on_minimize", True))
+
+        ttk.Label(dialog, text="Профиль безопасности").pack(anchor=tk.W, padx=10, pady=(12, 2))
+        security_profile_box = ttk.Combobox(
+            dialog,
+            textvariable=security_profile,
+            state="readonly",
+            values=list(SECURITY_PROFILES.keys()),
+        )
+        security_profile_box.pack(fill=tk.X, padx=10, pady=2)
+        ttk.Label(dialog, textvariable=security_profile_summary, wraplength=420, justify=tk.LEFT).pack(
+            anchor=tk.W, padx=10, pady=(2, 8)
+        )
 
         ttk.Label(dialog, text="Профиль буфера обмена").pack(anchor=tk.W, padx=10, pady=(12, 2))
         clipboard_preset_box = ttk.Combobox(
@@ -5743,6 +5758,21 @@ class MainWindow:
                 clipboard_preset.set(self._get_clipboard_preset_label(selected_preset))
             refresh_clipboard_summary()
 
+        def apply_selected_security_profile(_event=None):
+            selected_profile = security_profile.get()
+            profile_settings = SECURITY_PROFILES.get(selected_profile, SECURITY_PROFILES["standard"])
+            security_profile_summary.set(explain_security_profile(selected_profile))
+            auto_lock_minutes.set(int(profile_settings["auto_lock_minutes"]))
+            key_cache_timeout_minutes.set(int(profile_settings["key_cache_timeout_minutes"]))
+            lock_on_focus_loss.set(bool(profile_settings["lock_on_focus_loss"]))
+            lock_on_minimize.set(bool(profile_settings["lock_on_minimize"]))
+            clipboard_timeout.set(int(profile_settings["clipboard_timeout"]))
+            clipboard_security_level.set(str(profile_settings["clipboard_security_level"]))
+            clipboard_delivery_mode.set(str(profile_settings["clipboard_delivery_mode"]))
+            clipboard_blocked_on_suspicious.set(bool(profile_settings["clipboard_blocked_on_suspicious"]))
+            refresh_clipboard_summary()
+
+        security_profile_box.bind("<<ComboboxSelected>>", apply_selected_security_profile)
         clipboard_preset_box.bind("<<ComboboxSelected>>", apply_selected_clipboard_preset)
         for variable in (
             clipboard_timeout,
@@ -5756,6 +5786,34 @@ class MainWindow:
         refresh_clipboard_summary()
 
         def save():
+            selected_security_settings = dict(self.config.get("security", {}))
+            selected_security_settings.update(
+                {
+                    "security_profile": security_profile.get(),
+                    "clipboard_timeout": clipboard_timeout.get(),
+                    "clipboard_security_level": clipboard_security_level.get(),
+                    "clipboard_delivery_mode": clipboard_delivery_mode.get(),
+                    "clipboard_blocked_on_suspicious": clipboard_blocked_on_suspicious.get(),
+                    "auto_lock_minutes": auto_lock_minutes.get(),
+                    "min_password_length": min_password_length.get(),
+                    "key_cache_timeout_minutes": key_cache_timeout_minutes.get(),
+                    "lock_on_focus_loss": lock_on_focus_loss.get(),
+                    "lock_on_minimize": lock_on_minimize.get(),
+                }
+            )
+            validation = validate_security_settings(selected_security_settings)
+            if not validation.valid:
+                self._show_error("Настройки", "\n".join(validation.errors), parent=dialog)
+                return
+            if validation.warnings and not self._ask_yes_no(
+                "Настройки",
+                "Есть предупреждения по безопасности:\n\n"
+                + "\n".join(f"- {warning}" for warning in validation.warnings)
+                + "\n\nПродолжить?",
+                parent=dialog,
+            ):
+                return
+            self.config.set("security.security_profile", validation.settings["security_profile"])
             self.config.set("security.clipboard_timeout", clipboard_timeout.get())
             self.config.set("security.clipboard_notifications", clipboard_notifications_enabled.get())
             self.config.set("security.clipboard_security_level", clipboard_security_level.get())
@@ -5818,6 +5876,7 @@ class MainWindow:
                             "key_cache_timeout_minutes",
                             "lock_on_focus_loss",
                             "lock_on_minimize",
+                            "security_profile",
                         ],
                     },
                 )
