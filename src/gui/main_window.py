@@ -45,7 +45,7 @@ from ..core.import_export.exporter import VaultExporter
 from ..core.import_export.importer import VaultImporter
 from ..core.import_export.sharing_service import SharingService
 from ..core.key_manager import KeyManager
-from ..core.security import SECURITY_PROFILES, explain_security_profile, validate_security_settings
+from ..core.security import ActivityMonitor, ActivityMonitorConfig, SECURITY_PROFILES, explain_security_profile, validate_security_settings
 from ..core.state_manager import StateManager
 from ..core.vault import (
     AESGCMEncryptionService,
@@ -109,6 +109,7 @@ class MainWindow:
         self.state = StateManager()
         self.state.set_inactivity_timeout(self.config.get("security.auto_lock_minutes", 5) * 60)
         self.state.set_key_cache_timeout(self.config.get("security.key_cache_timeout_minutes", 60) * 60)
+        self.activity_monitor = self._create_activity_monitor()
 
         self.db = Database(selected_vault_path)
         self.key_manager = KeyManager()
@@ -860,6 +861,17 @@ class MainWindow:
         self.root.bind_all("<Control-Shift-P>", self._toggle_password_visibility, add="+")
         self.root.bind_all("<Control-Shift-p>", self._toggle_password_visibility, add="+")
 
+    def _create_activity_monitor(self) -> ActivityMonitor:
+        return ActivityMonitor(
+            lambda: self._lock_vault(show_dialog=False),
+            ActivityMonitorConfig(
+                timeout_seconds=self.config.get("security.auto_lock_minutes", 5) * 60,
+                check_interval_seconds=1.0,
+                sensitivity=self.config.get("security.activity_sensitivity", "medium"),
+                device_profile=self.config.get("security.device_profile", "desktop"),
+            ),
+        )
+
     def _schedule_security_tasks(self):
         self._check_security_timers()
         self._run_periodic_audit_verification_if_due()
@@ -867,6 +879,11 @@ class MainWindow:
         self.root.after(1000, self._schedule_security_tasks)
 
     def _check_security_timers(self):
+        activity_should_lock = False
+        if hasattr(self, "activity_monitor") and self.auth_service.is_authenticated():
+            activity_should_lock = self.activity_monitor.tick()
+        if activity_should_lock:
+            return
         if self.state.should_auto_lock() or self.state.should_expire_key_cache() or self.key_storage.is_cache_expired():
             self._lock_vault(show_dialog=False)
         clipboard_tick_result = None
@@ -904,7 +921,20 @@ class MainWindow:
     def _on_activity(self, _event=None):
         if self.state.is_unlocked():
             self.state.update_activity()
+            if hasattr(self, "activity_monitor"):
+                source = self._activity_source_from_event(_event)
+                self.activity_monitor.record_activity(source)
             self.key_storage.touch_cached_key(self.state.key_cache_timeout)
+
+    def _activity_source_from_event(self, event=None) -> str:
+        event_type = str(getattr(event, "type", "") or "")
+        if "Key" in event_type:
+            return "keyboard"
+        if "Button" in event_type or "Motion" in event_type:
+            return "mouse"
+        if "Focus" in event_type:
+            return "focus"
+        return "user"
 
     def _initialize_system_tray(self):
         try:
@@ -5858,6 +5888,13 @@ class MainWindow:
             )
             self.state.set_inactivity_timeout(auto_lock_minutes.get() * 60)
             self.state.set_key_cache_timeout(key_cache_timeout_minutes.get() * 60)
+            self.config.set("security.activity_sensitivity", validation.settings["activity_sensitivity"])
+            self.config.set("security.device_profile", validation.settings["device_profile"])
+            self.config.set("security.memory_locking_enabled", validation.settings["memory_locking_enabled"])
+            self.config.set("security.panic_hotkey", validation.settings["panic_hotkey"])
+            self.config.set("security.panic_close_application", validation.settings["panic_close_application"])
+            self.config.set("security.panic_stealth_mode", validation.settings["panic_stealth_mode"])
+            self.activity_monitor = self._create_activity_monitor()
             self._persist_runtime_settings()
             event_bus.publish(
                 Event(

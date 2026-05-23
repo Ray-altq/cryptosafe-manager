@@ -366,6 +366,20 @@ class FakeRoot:
         pass
 
 
+class FakeActivityMonitor:
+    def __init__(self, should_lock=False):
+        self.should_lock = should_lock
+        self.recorded_sources = []
+        self.tick_calls = 0
+
+    def record_activity(self, source="user"):
+        self.recorded_sources.append(source)
+
+    def tick(self):
+        self.tick_calls += 1
+        return self.should_lock
+
+
 class IntegrationTestCase(unittest.TestCase):
     def setUp(self):
         self.temp_home = tempfile.TemporaryDirectory()
@@ -2163,6 +2177,44 @@ class TestMainWindowSecurityState(IntegrationTestCase):
 
         self.assertFalse(window.state.application_active)
         self.assertEqual(window._locked_with, False)
+
+    def test_activity_monitor_tick_locks_authenticated_session(self):
+        window = MainWindow.__new__(MainWindow)
+        window.auth_service = FakeAuthService()
+        window.auth_service.authenticated = True
+        window.state = FakeStateManager()
+        window.key_storage = FakeKeyStorage()
+        def fake_lock(show_dialog=True):
+            setattr(window, "_locked_with", show_dialog)
+        window._lock_vault = fake_lock
+        window.activity_monitor = type(
+            "Monitor",
+            (),
+            {"tick_calls": 0, "tick": lambda monitor: setattr(monitor, "tick_calls", monitor.tick_calls + 1) or fake_lock(False) or True},
+        )()
+        window._refresh_clipboard_status = lambda: None
+        window.clipboard_service = None
+        window.clipboard_monitor = None
+
+        window._check_security_timers()
+
+        self.assertEqual(window.activity_monitor.tick_calls, 1)
+        self.assertEqual(window._locked_with, False)
+
+    def test_on_activity_records_source_in_activity_monitor(self):
+        window = MainWindow.__new__(MainWindow)
+        window.state = FakeStateManager()
+        window.state.is_unlocked = lambda: True
+        window.state.key_cache_timeout = 3600
+        window.state.update_activity = lambda: setattr(window, "_state_activity_updated", True)
+        window.key_storage = FakeKeyStorage()
+        window.activity_monitor = FakeActivityMonitor()
+        event = type("FakeEvent", (), {"type": "KeyPress"})()
+
+        window._on_activity(event)
+
+        self.assertTrue(window._state_activity_updated)
+        self.assertEqual(window.activity_monitor.recorded_sources, ["keyboard"])
 
     def test_prompt_unlock_if_needed_reloads_entries_after_restore(self):
         window = MainWindow.__new__(MainWindow)
