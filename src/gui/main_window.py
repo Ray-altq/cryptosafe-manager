@@ -3085,6 +3085,27 @@ class MainWindow:
         self._show_info("Экспорт vault", "Public-key экспорт vault успешно сохранён.")
         return True
 
+    def export_vault_bitwarden_encrypted_json_to_path(
+        self,
+        target_path: str,
+        password: str,
+        *,
+        selected_only: bool = False,
+        selected_entry_ids: Optional[list[int]] = None,
+        include_fields: Optional[list[str]] = None,
+    ) -> bool:
+        entry_ids = self._resolve_selected_export_entry_ids(selected_only, selected_entry_ids)
+        if selected_only and not entry_ids:
+            self._show_warning("Экспорт Bitwarden", "Выберите записи для выборочного экспорта.")
+            return False
+        payload = self._build_vault_exporter().export_bitwarden_encrypted_json(
+            password,
+            ExportOptions(format="bitwarden_encrypted_json", entry_ids=entry_ids, include_fields=include_fields),
+        )
+        self._write_audit_export_file(target_path, payload)
+        self._show_info("Экспорт Bitwarden", "Зашифрованный Bitwarden JSON успешно сохранён.")
+        return True
+
     def export_vault_password_manager_to_path(
         self,
         target_path: str,
@@ -3279,20 +3300,10 @@ class MainWindow:
                 "description": "Гибридное шифрование RSA-OAEP/AES-GCM для получателя с публичным ключом.",
                 "extension": ".json",
             },
-            "csv": {
-                "label": "CSV migration",
-                "description": "Открытый CSV для миграции. Требует явного подтверждения, потому что содержит plaintext.",
-                "extension": ".csv",
-            },
-            "bitwarden_json": {
-                "label": "Bitwarden JSON",
-                "description": "Открытый миграционный JSON, совместимый с импортом Bitwarden.",
+            "bitwarden_encrypted_json": {
+                "label": "Bitwarden Encrypted JSON",
+                "description": "Password-protected JSON для импорта в Bitwarden: данные зашифрованы, plaintext не пишется в файл.",
                 "extension": ".json",
-            },
-            "lastpass_csv": {
-                "label": "LastPass CSV",
-                "description": "Открытый миграционный CSV, совместимый с импортом LastPass.",
-                "extension": ".csv",
             },
         }
 
@@ -3456,8 +3467,7 @@ class MainWindow:
             normalized = format_var.get()
             info = formats.get(normalized, formats["encrypted_json"])
             description_var.set(info["description"])
-            secure_format = normalized in {"encrypted_json", "public_key_json"}
-            password_entry.state(["!disabled"] if normalized == "encrypted_json" else ["disabled"])
+            password_entry.state(["!disabled"] if normalized in {"encrypted_json", "bitwarden_encrypted_json"} else ["disabled"])
             public_key_entry.state(["!disabled"] if normalized == "public_key_json" else ["disabled"])
             strength_box.state(["!disabled"] if normalized == "encrypted_json" else ["disabled"])
 
@@ -3469,14 +3479,14 @@ class MainWindow:
                 )
                 lines = [
                     f"Формат: {info['label']}",
-                    f"Безопасность: {'encrypted by default' if secure_format else 'plaintext migration file'}",
+                    "Безопасность: encrypted by default",
                     f"Режим: {preview['mode']}",
                     f"Записей: {preview['entry_count']}",
                     f"Отмечено в списке: {len(selected_entry_ids)}",
                     f"Поля: {', '.join(preview['included_fields'])}",
                     f"Исключено: {', '.join(preview['excluded_fields']) or 'нет'}",
                     f"Strength: {strength_var.get()}-bit" if normalized == "encrypted_json" else "Strength: не применяется",
-                    f"Compression: {'да' if compression_var.get() and secure_format else 'нет'}",
+                    f"Compression: {'да' if compression_var.get() and normalized == 'encrypted_json' else 'нет'}",
                     "",
                     "Первые записи:",
                     *[f"- {title}" for title in preview["titles"]],
@@ -3493,7 +3503,7 @@ class MainWindow:
             if not selected_include_fields():
                 self._show_warning("Экспорт vault", "Выберите хотя бы одно поле для экспорта.", parent=dialog)
                 return
-            if normalized == "encrypted_json" and not password_var.get():
+            if normalized in {"encrypted_json", "bitwarden_encrypted_json"} and not password_var.get():
                 self._show_warning("Экспорт vault", "Введите пароль экспорта.", parent=dialog)
                 return
             if normalized == "public_key_json" and not public_key_var.get().strip():
@@ -3503,7 +3513,7 @@ class MainWindow:
             target_path = self._ask_saveas_filename(
                 title="Экспорт vault",
                 defaultextension=extension,
-                filetypes=[("Поддерживаемые файлы", "*.json *.csv"), ("Все файлы", "*.*")],
+                filetypes=[("JSON", "*.json"), ("Все файлы", "*.*")],
                 parent=dialog,
             )
             if not target_path:
@@ -3530,21 +3540,16 @@ class MainWindow:
                         selected_entry_ids=selected_ids,
                         include_fields=include_fields,
                     )
-                elif normalized == "csv":
-                    result["value"] = self.export_vault_csv_to_path(
+                elif normalized == "bitwarden_encrypted_json":
+                    result["value"] = self.export_vault_bitwarden_encrypted_json_to_path(
                         target_path,
+                        password_var.get(),
                         selected_only=selected_only,
                         selected_entry_ids=selected_ids,
                         include_fields=include_fields,
                     )
                 else:
-                    result["value"] = self.export_vault_password_manager_to_path(
-                        target_path,
-                        export_format=normalized,
-                        selected_only=selected_only,
-                        selected_entry_ids=selected_ids,
-                        include_fields=include_fields,
-                    )
+                    raise ValueError("Unsupported safe export format")
             except Exception as error:
                 self._show_error("Экспорт vault", str(error), parent=dialog)
                 return
@@ -3566,7 +3571,7 @@ class MainWindow:
     def _show_export_dialog_fallback(self):
         export_format = self._ask_string(
             "Экспорт vault",
-            "Формат: encrypted_json, public_key_json, csv, bitwarden_json или lastpass_csv",
+            "Формат: encrypted_json, public_key_json или bitwarden_encrypted_json",
             initialvalue="encrypted_json",
         )
         if not export_format:
@@ -3598,31 +3603,24 @@ class MainWindow:
             if not target_path:
                 return False
             return self.export_vault_public_key_json_to_path(target_path, public_key, selected_only=selected_only, include_fields=include_fields)
-        if normalized_format == "csv":
+        if normalized_format in {"bitwarden_encrypted_json", "bitwarden"}:
+            password = self._ask_string("Пароль экспорта", "Введите пароль для Bitwarden encrypted JSON:", show="*")
+            if not password:
+                return False
             target_path = self._ask_saveas_filename(
-                title="Экспорт vault CSV",
-                defaultextension=".csv",
-                filetypes=[("CSV", "*.csv"), ("Все файлы", "*.*")],
+                title="Экспорт Bitwarden encrypted JSON",
+                defaultextension=".json",
+                filetypes=[("Bitwarden JSON", "*.json"), ("Все файлы", "*.*")],
             )
             if not target_path:
                 return False
-            return self.export_vault_csv_to_path(target_path, selected_only=selected_only, include_fields=include_fields)
-        if normalized_format in {"bitwarden_json", "lastpass_csv"}:
-            extension = ".json" if normalized_format == "bitwarden_json" else ".csv"
-            target_path = self._ask_saveas_filename(
-                title="Экспорт менеджера паролей",
-                defaultextension=extension,
-                filetypes=[("Поддерживаемые файлы", "*.json *.csv"), ("Все файлы", "*.*")],
-            )
-            if not target_path:
-                return False
-            return self.export_vault_password_manager_to_path(
+            return self.export_vault_bitwarden_encrypted_json_to_path(
                 target_path,
-                export_format=normalized_format,
+                password,
                 selected_only=selected_only,
                 include_fields=include_fields,
             )
-        self._show_error("Экспорт vault", "Поддерживаются encrypted_json, public_key_json, csv, bitwarden_json и lastpass_csv.")
+        self._show_error("Экспорт vault", "Поддерживаются encrypted_json, public_key_json и bitwarden_encrypted_json.")
         return False
 
     def show_import_dialog(self):

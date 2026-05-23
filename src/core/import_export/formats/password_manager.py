@@ -1,14 +1,98 @@
+import base64
 import json
+import os
 import uuid
 from typing import Any, Dict, List
 
+from cryptography.hazmat.primitives import hashes, hmac, padding
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives.kdf.hkdf import HKDFExpand
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+
 from ..exceptions import ImportValidationError
+
+
+BITWARDEN_PASSWORD_PROTECTED_ITERATIONS = 600_000
+
+
+def _b64(data: bytes) -> str:
+    return base64.b64encode(bytes(data)).decode("ascii")
+
+
+def _derive_bitwarden_pin_key(password: str, salt_text: str, iterations: int) -> bytes:
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=str(salt_text).encode("utf-8"),
+        iterations=max(BITWARDEN_PASSWORD_PROTECTED_ITERATIONS, int(iterations)),
+    )
+    return kdf.derive(str(password).encode("utf-8"))
+
+
+def _stretch_bitwarden_key(pin_key: bytes) -> tuple[bytes, bytes]:
+    enc_key = HKDFExpand(algorithm=hashes.SHA256(), length=32, info=b"enc").derive(bytes(pin_key))
+    mac_key = HKDFExpand(algorithm=hashes.SHA256(), length=32, info=b"mac").derive(bytes(pin_key))
+    return enc_key, mac_key
+
+
+def _encrypt_bitwarden_enc_string(value: str, enc_key: bytes, mac_key: bytes) -> str:
+    iv = os.urandom(16)
+    padder = padding.PKCS7(128).padder()
+    padded = padder.update(str(value).encode("utf-8")) + padder.finalize()
+    encryptor = Cipher(algorithms.AES(bytes(enc_key)), modes.CBC(iv)).encryptor()
+    ciphertext = encryptor.update(padded) + encryptor.finalize()
+    signer = hmac.HMAC(bytes(mac_key), hashes.SHA256())
+    signer.update(iv)
+    signer.update(ciphertext)
+    mac = signer.finalize()
+    return f"2.{_b64(iv)}|{_b64(ciphertext)}|{_b64(mac)}"
+
+
+def decrypt_bitwarden_password_protected_export(payload: str | bytes, password: str) -> Dict[str, Any]:
+    try:
+        package = json.loads(payload.decode("utf-8") if isinstance(payload, bytes) else payload)
+        enc_string = str(package["data"])
+        enc_type, encoded_parts = enc_string.split(".", 1)
+        iv_text, ciphertext_text, mac_text = encoded_parts.split("|", 2)
+    except Exception as exc:
+        raise ImportValidationError("Bitwarden encrypted JSON is invalid") from exc
+    if enc_type != "2":
+        raise ImportValidationError("Bitwarden encrypted JSON uses unsupported encryption type")
+
+    pin_key = _derive_bitwarden_pin_key(
+        password,
+        str(package.get("salt", "")),
+        int(package.get("kdfIterations", BITWARDEN_PASSWORD_PROTECTED_ITERATIONS)),
+    )
+    enc_key, mac_key = _stretch_bitwarden_key(pin_key)
+    iv = base64.b64decode(iv_text)
+    ciphertext = base64.b64decode(ciphertext_text)
+    expected_mac = base64.b64decode(mac_text)
+    signer = hmac.HMAC(mac_key, hashes.SHA256())
+    signer.update(iv)
+    signer.update(ciphertext)
+    try:
+        signer.verify(expected_mac)
+    except Exception as exc:
+        raise ImportValidationError("Bitwarden encrypted JSON failed authentication") from exc
+
+    decryptor = Cipher(algorithms.AES(enc_key), modes.CBC(iv)).decryptor()
+    padded = decryptor.update(ciphertext) + decryptor.finalize()
+    unpadder = padding.PKCS7(128).unpadder()
+    plaintext = unpadder.update(padded) + unpadder.finalize()
+    try:
+        return json.loads(plaintext.decode("utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ImportValidationError("Bitwarden encrypted JSON plaintext is invalid") from exc
 
 
 class BitwardenJSONFormat:
     name = "bitwarden_json"
 
     def serialize_entries(self, entries: List[Dict[str, Any]]) -> str:
+        return json.dumps(self.build_plain_export(entries), ensure_ascii=False, sort_keys=True)
+
+    def build_plain_export(self, entries: List[Dict[str, Any]]) -> Dict[str, Any]:
         folder_ids: Dict[str, str] = {}
         for entry in entries:
             category = str(entry.get("category", "") or "").strip()
@@ -51,7 +135,7 @@ class BitwardenJSONFormat:
                     "fields": tags,
                 }
             )
-        return json.dumps({"encrypted": False, "folders": folders, "items": items}, ensure_ascii=False, sort_keys=True)
+        return {"encrypted": False, "folders": folders, "items": items}
 
     def parse_entries(self, payload: str) -> List[Dict[str, str]]:
         try:
@@ -122,3 +206,28 @@ class LastPassCSVFormat:
         from .csv_format import CSVVaultFormat
 
         return CSVVaultFormat().parse_rows(payload)
+
+
+class BitwardenEncryptedJSONFormat:
+    name = "bitwarden_encrypted_json"
+
+    def serialize_entries(self, entries: List[Dict[str, Any]], password: str) -> str:
+        if not password:
+            raise ValueError("Bitwarden encrypted JSON export requires a password")
+        plain_export = BitwardenJSONFormat().build_plain_export(entries)
+        plain_payload = json.dumps(plain_export, ensure_ascii=False, sort_keys=True)
+        salt = _b64(os.urandom(16))
+        pin_key = _derive_bitwarden_pin_key(password, salt, BITWARDEN_PASSWORD_PROTECTED_ITERATIONS)
+        enc_key, mac_key = _stretch_bitwarden_key(pin_key)
+        package = {
+            "encrypted": True,
+            "passwordProtected": True,
+            "salt": salt,
+            "kdfType": 0,
+            "kdfIterations": BITWARDEN_PASSWORD_PROTECTED_ITERATIONS,
+            "kdfMemory": None,
+            "kdfParallelism": None,
+            "encKeyValidation_DO_NOT_EDIT": _encrypt_bitwarden_enc_string(str(uuid.uuid4()), enc_key, mac_key),
+            "data": _encrypt_bitwarden_enc_string(plain_payload, enc_key, mac_key),
+        }
+        return json.dumps(package, ensure_ascii=False, indent=2, sort_keys=True)

@@ -8,7 +8,7 @@ from typing import Any, Dict, Iterable, Optional
 from ..events import Event, EventType
 from .crypto import checksum, derive_password_key, encrypt_aes_gcm, encrypt_with_public_key, new_salt_and_nonce, wipe_bytes
 from .models import ExportOptions
-from .formats import BitwardenJSONFormat, CSVVaultFormat, LastPassCSVFormat, NativeJSONFormat
+from .formats import BitwardenEncryptedJSONFormat, BitwardenJSONFormat, CSVVaultFormat, LastPassCSVFormat, NativeJSONFormat
 
 
 class VaultExporter:
@@ -197,6 +197,29 @@ class VaultExporter:
             details={"plaintext": True, "target": "bitwarden"},
         )
         self._publish(EventType.EXPORT_OPERATION_COMPLETED, {"format": "bitwarden_json", "entry_count": len(entries)})
+        return output
+
+    def export_bitwarden_encrypted_json(self, password: str, options: Optional[ExportOptions] = None) -> str:
+        selected_options = options or ExportOptions(format="bitwarden_encrypted_json")
+        entries = self.filter_entry_fields(
+            self.get_entries_for_export(selected_options),
+            selected_options.include_fields,
+        )
+        output = BitwardenEncryptedJSONFormat().serialize_entries(
+            [self._serialize_entry(entry) for entry in entries],
+            password,
+        )
+        self._record_history(
+            operation_type="export",
+            format="bitwarden_encrypted_json",
+            encryption_used="Bitwarden password-protected JSON",
+            entry_count=len(entries),
+            file_size=len(output.encode("utf-8")),
+            package_checksum=checksum(output.encode("utf-8")),
+            verification_status="created",
+            details={"plaintext": False, "target": "bitwarden"},
+        )
+        self._publish(EventType.EXPORT_OPERATION_COMPLETED, {"format": "bitwarden_encrypted_json", "entry_count": len(entries)})
         return output
 
     def export_lastpass_csv(self, options: Optional[ExportOptions] = None) -> str:

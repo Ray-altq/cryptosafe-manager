@@ -2576,23 +2576,29 @@ class TestMainWindowSecurityState(IntegrationTestCase):
 
         self.assertIn("Выберите формат вручную", str(context.exception))
 
-    def test_vault_csv_export_gui_helper_requires_confirmation(self):
+    def test_vault_bitwarden_encrypted_export_gui_helper_never_writes_plaintext(self):
         window = MainWindow.__new__(MainWindow)
-        temp_dir = Path(self.make_db_path("vault-csv-export-gui")).parent
-        export_path = temp_dir / "vault-export.csv"
+        temp_dir = Path(self.make_db_path("vault-bitwarden-encrypted-export-gui")).parent
+        export_path = temp_dir / "bitwarden-export.json"
         window.db = Database(str(temp_dir / "vault.db"))
         self.addCleanup(window.db.close)
         window.entry_manager = FakeVaultEntryManager()
         window._get_selected_entries = lambda: []
-        window._ask_yes_no = lambda *args, **kwargs: True
         window._show_info = lambda *args, **kwargs: None
         window._show_warning = lambda *args, **kwargs: None
 
-        result = window.export_vault_csv_to_path(str(export_path))
+        result = window.export_vault_bitwarden_encrypted_json_to_path(str(export_path), "BitwardenExport!123")
+        exported = export_path.read_text(encoding="utf-8")
+        formats = window._get_export_format_descriptions()
 
         self.assertTrue(result)
-        self.assertIn("GitHub", export_path.read_text(encoding="utf-8"))
-        self.assertIn("Secret!123", export_path.read_text(encoding="utf-8"))
+        self.assertIn('"passwordProtected": true', exported)
+        self.assertNotIn("GitHub", exported)
+        self.assertNotIn("Secret!123", exported)
+        self.assertIn("bitwarden_encrypted_json", formats)
+        self.assertNotIn("csv", formats)
+        self.assertNotIn("lastpass_csv", formats)
+        self.assertNotIn("bitwarden_json", formats)
 
     def test_share_selected_entry_gui_helper_writes_package_and_db_record(self):
         window = MainWindow.__new__(MainWindow)

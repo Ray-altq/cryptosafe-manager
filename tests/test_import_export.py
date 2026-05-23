@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from src.core.import_export import ExportOptions, ImportOptions, ImportValidationError, KeyExchangeService, QRCodeService, SharePermissions
 from src.core.import_export.crypto import EXPORT_KEY_CONTEXT, SHARE_KEY_CONTEXT, derive_separated_key, wipe_bytes
 from src.core.import_export.exporter import VaultExporter
+from src.core.import_export.formats.password_manager import decrypt_bitwarden_password_protected_export
 from src.core.import_export.importer import VaultImporter
 from src.core.import_export.sharing_service import SharingService
 from src.database.db import Database
@@ -465,29 +466,25 @@ class TestImportExportFoundation(unittest.TestCase):
         self.assertEqual(preview[0]["title"], "GitHub")
         self.assertEqual(preview[0]["password"], "Secret!123")
 
-    def test_bitwarden_and_lastpass_exports_are_compatible_with_importers(self):
+    def test_bitwarden_encrypted_export_has_no_plaintext_and_can_be_decrypted(self):
         exporter = VaultExporter(FakeEntryManager(), database=self.db)
 
-        bitwarden = exporter.export_bitwarden_json(ExportOptions(format="bitwarden_json", plaintext_allowed=True))
-        lastpass = exporter.export_lastpass_csv(ExportOptions(format="lastpass_csv", plaintext_allowed=True))
-        bitwarden_preview = VaultImporter(FakeEntryManager(), database=self.db).preview_plaintext(
-            bitwarden,
-            ImportOptions(format="bitwarden_json"),
-        )
-        lastpass_preview = VaultImporter(FakeEntryManager(), database=self.db).preview_plaintext(
-            lastpass,
-            ImportOptions(format="lastpass_csv"),
-        )
+        exported = exporter.export_bitwarden_encrypted_json("BitwardenExport!123")
+        parsed = json.loads(exported)
+        decrypted = decrypt_bitwarden_password_protected_export(exported, "BitwardenExport!123")
 
-        self.assertIn('"items"', bitwarden)
-        self.assertIn("url,username,password,extra,name,grouping", lastpass)
-        self.assertEqual(bitwarden_preview[0]["title"], "GitHub")
-        self.assertEqual(bitwarden_preview[0]["password"], "Secret!123")
-        self.assertEqual(bitwarden_preview[0]["category"], "Dev")
-        self.assertEqual(lastpass_preview[0]["title"], "GitHub")
-        self.assertEqual(lastpass_preview[0]["category"], "Dev")
+        self.assertTrue(parsed["encrypted"])
+        self.assertTrue(parsed["passwordProtected"])
+        self.assertEqual(parsed["kdfIterations"], 600000)
+        self.assertIn("encKeyValidation_DO_NOT_EDIT", parsed)
+        self.assertIn("data", parsed)
+        self.assertNotIn("Secret!123", exported)
+        self.assertNotIn("GitHub", exported)
+        self.assertNotIn("ray@example.test", exported)
+        self.assertEqual(decrypted["items"][0]["name"], "GitHub")
+        self.assertEqual(decrypted["items"][0]["login"]["password"], "Secret!123")
 
-    def test_bitwarden_export_uses_folder_objects_and_uuid_folder_ids(self):
+    def test_legacy_plaintext_bitwarden_export_still_uses_real_import_shape(self):
         exported = VaultExporter(FakeEntryManager(), database=self.db).export_bitwarden_json(
             ExportOptions(format="bitwarden_json", plaintext_allowed=True)
         )
