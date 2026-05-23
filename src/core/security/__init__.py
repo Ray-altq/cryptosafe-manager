@@ -8,7 +8,7 @@ from .security_profiles import (
     get_security_profile,
     validate_security_settings,
 )
-from .side_channel_protection import constant_time_compare, normalize_secret, secure_string_compare
+from .side_channel_protection import ProtectedKeyOperation, constant_time_compare, normalize_secret, secure_string_compare
 
 __all__ = [
     "ActivityMonitor",
@@ -17,6 +17,7 @@ __all__ = [
     "PanicMode",
     "PanicModeConfig",
     "PanicModeResult",
+    "ProtectedKeyOperation",
     "SECURITY_PROFILES",
     "SecureBuffer",
     "SecureMemoryStatus",

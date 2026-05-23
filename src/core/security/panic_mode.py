@@ -1,8 +1,7 @@
 import threading
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Any, Callable
 
-from ..events import Event, EventBus, EventType
 from .side_channel_protection import sanitize_security_metadata
 
 
@@ -24,7 +23,7 @@ class PanicModeResult:
 
 
 class PanicMode:
-    def __init__(self, config: PanicModeConfig | None = None, event_bus: EventBus | None = None):
+    def __init__(self, config: PanicModeConfig | None = None, event_bus: Any | None = None):
         self.config = config or PanicModeConfig()
         self.event_bus = event_bus
         self.activated = False
@@ -56,11 +55,15 @@ class PanicMode:
         with self._lock:
             self.activated = False
         if self.event_bus is not None:
+            from ..events import Event, EventType
+
             self.event_bus.publish(Event(EventType.PANIC_MODE_DEACTIVATED, {"status": "recovered"}))
 
     def _publish_activation(self, method: str, details: dict, result: PanicModeResult) -> None:
         if self.event_bus is None:
             return
+        from ..events import Event, EventType
+
         payload = {
             "method": method,
             "hotkey": self.config.hotkey,

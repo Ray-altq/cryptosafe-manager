@@ -4,6 +4,8 @@ import os
 import time
 from typing import Any
 
+from .memory_guard import MemoryGuard
+
 
 def normalize_secret(value: str | bytes | bytearray | memoryview | None) -> bytes:
     if value is None:
@@ -60,3 +62,26 @@ def sanitize_security_metadata(data: dict[str, Any]) -> dict[str, Any]:
         else:
             sanitized[key] = value
     return sanitized
+
+
+class ProtectedKeyOperation:
+    def __init__(self, key: bytes | bytearray | memoryview):
+        self._guard = MemoryGuard()
+        self._key_buffer = bytearray(normalize_secret(key))
+
+    @property
+    def key(self) -> bytes:
+        return bytes(self._key_buffer)
+
+    @property
+    def mutable_key(self) -> bytearray:
+        return self._key_buffer
+
+    def wipe(self) -> None:
+        self._guard.wipe_bytearray(self._key_buffer)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, _exc_type, _exc, _tb):
+        self.wipe()

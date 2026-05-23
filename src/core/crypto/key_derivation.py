@@ -1,12 +1,14 @@
 import base64
+import os
 import re
-import secrets
 from typing import Dict, Optional
 
 from argon2 import PasswordHasher, Type
 from argon2.low_level import hash_secret_raw
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+
+from ..security.side_channel_protection import constant_time_compare
 
 
 class KeyDerivation:  #класс для управления процессом создания и проверки хэшей паролей
@@ -89,7 +91,7 @@ class KeyDerivation:  #класс для управления процессом
                 type=Type.ID,
                 version=int(match.group("version")),
             )
-            return secrets.compare_digest(derived_hash, expected_hash)
+            return constant_time_compare(derived_hash, expected_hash)
         except Exception:
             self._dummy_verify()
             return False
@@ -102,7 +104,7 @@ class KeyDerivation:  #класс для управления процессом
 
     def derive_encryption_key(self, password: str, salt: Optional[bytes] = None) -> tuple[bytes, bytes]:  #метод для получения ключа шифрования из пароля
         if salt is None:
-            salt = secrets.token_bytes(self.pbkdf2_salt_len)
+            salt = os.urandom(self.pbkdf2_salt_len)
 
         kdf = PBKDF2HMAC(
             algorithm=hashes.SHA256(),
@@ -118,7 +120,7 @@ class KeyDerivation:  #класс для управления процессом
         return key
 
     def _dummy_verify(self):  #метод для выполнения фиктивной проверки пароля
-        secrets.compare_digest(b"dummy_constant_time_string", b"dummy_constant_time_string")
+        constant_time_compare(b"dummy_constant_time_string", b"dummy_constant_time_string")
 
     def _validated_int(self, value, minimum: int, maximum: int, default: int) -> int:  #метод для проверки и ограничения целочисленных параметров конфигурации
         try:

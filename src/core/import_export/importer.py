@@ -7,6 +7,7 @@ import time
 from typing import Any, Dict, Iterable, List
 
 from ..events import Event, EventType
+from ..security.side_channel_protection import constant_time_compare
 from .crypto import checksum, decrypt_aes_gcm, decrypt_with_private_key, derive_password_key, wipe_bytes
 from .exceptions import ImportValidationError
 from .formats import BitwardenJSONFormat, CSVVaultFormat, LastPassCSVFormat, NativeJSONFormat
@@ -170,7 +171,7 @@ class VaultImporter:
         key_buffer = bytearray(key)
         try:
             expected_hmac = str(package["integrity"].get("hmac", ""))
-            if expected_hmac and not hmac.compare_digest(hmac.new(bytes(key_buffer), ciphertext, "sha256").hexdigest(), expected_hmac):
+            if expected_hmac and not constant_time_compare(hmac.new(bytes(key_buffer), ciphertext, "sha256").hexdigest(), expected_hmac):
                 raise ImportValidationError("Native export HMAC does not match")
             plaintext = decrypt_aes_gcm(ciphertext, key_buffer, nonce)
         finally:

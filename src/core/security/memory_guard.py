@@ -74,6 +74,13 @@ class MemoryGuard:
         for _ in range(selected_passes):
             ctypes.memset(ctypes.byref(buffer), 0, selected_size)
 
+    def wipe_bytearray(self, buffer: bytearray | memoryview, *, passes: int = 1) -> None:
+        view = memoryview(buffer)
+        selected_passes = max(1, int(passes))
+        for _ in range(selected_passes):
+            for index in range(len(view)):
+                view[index] = 0
+
     def copy_into(self, buffer: Any, data: bytes | bytearray | memoryview) -> int:
         payload = bytes(data)
         size = min(len(payload), ctypes.sizeof(buffer))

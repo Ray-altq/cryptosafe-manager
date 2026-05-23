@@ -10,6 +10,7 @@ from src.core.security import (
     ActivityMonitorConfig,
     MemoryGuard,
     PanicMode,
+    ProtectedKeyOperation,
     SecureBuffer,
     constant_time_compare,
     secure_string_compare,
@@ -45,6 +46,15 @@ class TestSecurityHardeningCore(unittest.TestCase):
 
         self.assertEqual(payload, bytearray(b"\0" * len(payload)))
         self.assertEqual(protected_copy, b"TopSecret!456")
+
+    def test_protected_key_operation_wipes_temporary_key_copy(self):
+        key = b"k" * 32
+
+        with ProtectedKeyOperation(key) as protected:
+            mutable_key = protected.mutable_key
+            self.assertEqual(protected.key, key)
+
+        self.assertEqual(mutable_key, bytearray(b"\0" * 32))
 
     def test_activity_monitor_locks_after_configured_timeout(self):
         calls = []

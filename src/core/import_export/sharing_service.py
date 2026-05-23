@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict
 
 from ..events import Event, EventType
+from ..security.side_channel_protection import constant_time_compare
 from .crypto import (
     checksum,
     decrypt_aes_gcm,
@@ -289,7 +290,7 @@ class SharingService:
         associated_data = str(package["metadata"].get("share_id", "")).encode("utf-8")
         try:
             expected_hmac = str(package["integrity"].get("hmac", ""))
-            if expected_hmac and not hmac.compare_digest(hmac.new(bytes(key_buffer), ciphertext, "sha256").hexdigest(), expected_hmac):
+            if expected_hmac and not constant_time_compare(hmac.new(bytes(key_buffer), ciphertext, "sha256").hexdigest(), expected_hmac):
                 raise ImportValidationError("Share package HMAC does not match")
             plaintext = decrypt_aes_gcm(ciphertext, key_buffer, nonce, associated_data=associated_data)
         finally:

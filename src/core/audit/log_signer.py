@@ -8,6 +8,8 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
+from ..security.side_channel_protection import constant_time_compare
+
 
 class AuditLogSigner:
     CONTEXT = b"audit-signing"
@@ -76,7 +78,7 @@ class AuditLogSigner:
         if public_key_hex:
             verification_key = bytes.fromhex(public_key_hex)
         expected = hmac.new(verification_key, data, hashlib.sha256).hexdigest()
-        return hmac.compare_digest(expected, signature_hex)
+        return constant_time_compare(expected, signature_hex)
 
     def clear(self):
         self._clear_cached_material()

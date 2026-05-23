@@ -16,12 +16,15 @@ class TestVaultEncryption(unittest.TestCase):
         self.plaintext = b'{"title":"Example","password":"secret"}'
 
     def test_encrypt_decrypt_roundtrip_with_explicit_key(self):
-        encrypted = self.service.encrypt(self.plaintext, self.key)
-        decrypted = self.service.decrypt(encrypted, self.key)
+        mutable_key = bytearray(self.key)
+
+        encrypted = self.service.encrypt(self.plaintext, mutable_key)
+        decrypted = self.service.decrypt(encrypted, mutable_key)
 
         self.assertEqual(decrypted, self.plaintext)
         self.assertNotEqual(encrypted, self.plaintext)
         self.assertEqual(len(encrypted[:12]), 12)
+        self.assertEqual(mutable_key, bytearray(self.key))
 
     def test_encrypt_decrypt_uses_active_key_from_key_manager(self):
         self.key_manager.store_key("active", self.key)

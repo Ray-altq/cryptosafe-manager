@@ -5,6 +5,7 @@ from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from ..crypto.abstract import EncryptionService
+from ..security.side_channel_protection import ProtectedKeyOperation
 
 
 class VaultEncryptionError(Exception):
@@ -19,7 +20,8 @@ class AESGCMEncryptionService(EncryptionService):
         self._validate_key(resolved_key)
 
         nonce = os.urandom(self.NONCE_LENGTH)
-        ciphertext = AESGCM(resolved_key).encrypt(nonce, data, None)
+        with ProtectedKeyOperation(resolved_key) as protected_key:
+            ciphertext = AESGCM(protected_key.key).encrypt(nonce, data, None)
         return nonce + ciphertext
 
     def decrypt(self, ciphertext: bytes, key: Optional[bytes] = None) -> bytes:
@@ -33,7 +35,8 @@ class AESGCMEncryptionService(EncryptionService):
         encrypted_payload = ciphertext[self.NONCE_LENGTH :]
 
         try:
-            return AESGCM(resolved_key).decrypt(nonce, encrypted_payload, None)
+            with ProtectedKeyOperation(resolved_key) as protected_key:
+                return AESGCM(protected_key.key).decrypt(nonce, encrypted_payload, None)
         except InvalidTag as error:
             raise VaultEncryptionError("Encrypted payload failed authentication") from error
 

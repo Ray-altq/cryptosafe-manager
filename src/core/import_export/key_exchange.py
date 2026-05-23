@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
 
 from ..events import Event, EventType
+from ..security.side_channel_protection import constant_time_compare
 from .crypto import generate_ec_key_pair, generate_rsa_key_pair, public_key_fingerprint
 from .exceptions import ImportValidationError
 
@@ -197,7 +198,7 @@ class KeyExchangeService:
             except Exception as exc:
                 raise ImportValidationError("QR chunk compressed payload is invalid") from exc
         expected_checksum = checksums.pop()
-        if not hmac.compare_digest(hashlib.sha256(payload.encode("utf-8")).hexdigest(), str(expected_checksum)):
+        if not constant_time_compare(hashlib.sha256(payload.encode("utf-8")).hexdigest(), str(expected_checksum)):
             raise ImportValidationError("QR chunk checksum does not match")
         return payload
 
@@ -271,7 +272,7 @@ class KeyExchangeService:
 
 
 def hmac_compare(left: str, right: str) -> bool:
-    return hmac.compare_digest(str(left), str(right))
+    return constant_time_compare(str(left), str(right))
 
 
 class QRCodeService:
