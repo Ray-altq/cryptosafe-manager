@@ -20,6 +20,7 @@ from src.core.crypto.key_storage import KeyStorage
 from src.core.crypto.placeholder import AES256Placeholder
 from src.core.crypto.password_validator import PasswordValidator
 from src.core.audit import AuditLogger as RealAuditLogger
+from src.core.events import EventType
 from src.core.import_export import ImportValidationError
 from src.core.key_manager import KeyManager
 from src.core.vault import AESGCMEncryptionService, EntryManager
@@ -1101,6 +1102,33 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
         self.assertEqual(window.root.window_state, "normal")
         self.assertFalse(window._system_tray_visible)
         self.assertTrue(window._tray_status_updated)
+
+    def test_system_tray_menu_labels_cover_security_actions(self):
+        window = MainWindow.__new__(MainWindow)
+
+        labels = window._get_system_tray_menu_labels()
+
+        self.assertIn("Показать окно", labels)
+        self.assertIn("Заблокировать vault", labels)
+        self.assertIn("Разблокировать vault", labels)
+        self.assertIn("Очистить clipboard", labels)
+        self.assertIn("Panic mode", labels)
+        self.assertIn("Настройки", labels)
+        self.assertIn("Выход", labels)
+
+    def test_system_tray_title_includes_vault_and_clipboard_state(self):
+        window = MainWindow.__new__(MainWindow)
+        window.auth_service = FakeAuthService()
+        window.auth_service.authenticated = True
+
+        title = window._build_system_tray_title(
+            ClipboardStatus(active=True, data_type="password", delivery_mode="memory_only", remaining_seconds=12)
+        )
+
+        self.assertIn("vault разблокирован", title)
+        self.assertIn("пароль", title)
+        self.assertIn("внутренняя память", title)
+        self.assertIn("12 сек", title)
 
     def test_update_clipboard_notification_area_shows_failed_clear_message_when_window_unfocused(self):
         window = MainWindow.__new__(MainWindow)
@@ -2215,6 +2243,45 @@ class TestMainWindowSecurityState(IntegrationTestCase):
 
         self.assertTrue(window._state_activity_updated)
         self.assertEqual(window.activity_monitor.recorded_sources, ["keyboard"])
+
+    def test_activate_panic_mode_locks_clears_hides_and_logs_event(self):
+        window = MainWindow.__new__(MainWindow)
+        window.auth_service = FakeAuthService()
+        window.auth_service.authenticated = True
+        window.config = Config()
+        window.root = FakeRoot()
+        window._clear_system_clipboard = lambda sync_service=True: setattr(window, "_clipboard_cleared", sync_service) or True
+        window._lock_vault = lambda show_dialog=True: setattr(window, "_locked_with", show_dialog)
+        window._clear_sensitive_view_state = lambda: setattr(window, "_view_cleared", True)
+        window._flush_audit_logger = lambda: setattr(window, "_audit_flushed", True)
+        window.panic_mode = window._create_panic_mode()
+        events = []
+
+        with patch("src.gui.main_window.event_bus.publish", lambda event: events.append(event)):
+            result = window.activate_panic_mode("hotkey")
+
+        self.assertTrue(result.activated)
+        self.assertTrue(window._clipboard_cleared)
+        self.assertEqual(window._locked_with, False)
+        self.assertTrue(window._view_cleared)
+        self.assertEqual(window.root.window_state, "withdrawn")
+        self.assertEqual(events[-1].type, EventType.PANIC_MODE_ACTIVATED)
+        self.assertNotIn("Secret!123", str(events[-1].data))
+
+    def test_recover_from_panic_mode_restores_window_and_unlock_flow(self):
+        window = MainWindow.__new__(MainWindow)
+        window.config = Config()
+        window.root = FakeRoot()
+        window.root.window_state = "withdrawn"
+        window.panic_mode = window._create_panic_mode()
+        window._unlock_vault = lambda: setattr(window, "_unlock_called", True) or True
+
+        recovered = window.recover_from_panic_mode()
+
+        self.assertTrue(recovered)
+        self.assertTrue(window._unlock_called)
+        self.assertEqual(window.root.window_state, "normal")
+        self.assertFalse(window.panic_mode.activated)
 
     def test_prompt_unlock_if_needed_reloads_entries_after_restore(self):
         window = MainWindow.__new__(MainWindow)

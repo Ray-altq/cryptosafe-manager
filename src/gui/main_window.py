@@ -45,7 +45,15 @@ from ..core.import_export.exporter import VaultExporter
 from ..core.import_export.importer import VaultImporter
 from ..core.import_export.sharing_service import SharingService
 from ..core.key_manager import KeyManager
-from ..core.security import ActivityMonitor, ActivityMonitorConfig, SECURITY_PROFILES, explain_security_profile, validate_security_settings
+from ..core.security import (
+    ActivityMonitor,
+    ActivityMonitorConfig,
+    PanicMode,
+    PanicModeConfig,
+    SECURITY_PROFILES,
+    explain_security_profile,
+    validate_security_settings,
+)
 from ..core.state_manager import StateManager
 from ..core.vault import (
     AESGCMEncryptionService,
@@ -110,6 +118,7 @@ class MainWindow:
         self.state.set_inactivity_timeout(self.config.get("security.auto_lock_minutes", 5) * 60)
         self.state.set_key_cache_timeout(self.config.get("security.key_cache_timeout_minutes", 60) * 60)
         self.activity_monitor = self._create_activity_monitor()
+        self.panic_mode = self._create_panic_mode()
 
         self.db = Database(selected_vault_path)
         self.key_manager = KeyManager()
@@ -666,6 +675,8 @@ class MainWindow:
         security_menu.add_command(label="Просмотр буфера обмена", command=self.show_clipboard_preview_dialog)
         security_menu.add_command(label="Диагностика буфера обмена", command=self.show_clipboard_diagnostics)
         security_menu.add_separator()
+        security_menu.add_command(label="Panic mode", command=lambda: self.activate_panic_mode("menu"))
+        security_menu.add_separator()
         security_menu.add_command(label="Сменить мастер-пароль", command=self.change_master_password)
         security_menu.add_command(label="Настройки", command=self.show_settings)
         security_menu.add_command(label="Журнал аудита", command=self.show_logs)
@@ -860,6 +871,7 @@ class MainWindow:
         self.root.bind_all("<Control-F>", self._focus_search, add="+")
         self.root.bind_all("<Control-Shift-P>", self._toggle_password_visibility, add="+")
         self.root.bind_all("<Control-Shift-p>", self._toggle_password_visibility, add="+")
+        self.root.bind_all("<Control-Shift-Escape>", lambda _event: self.activate_panic_mode("hotkey"), add="+")
 
     def _create_activity_monitor(self) -> ActivityMonitor:
         return ActivityMonitor(
@@ -871,6 +883,59 @@ class MainWindow:
                 device_profile=self.config.get("security.device_profile", "desktop"),
             ),
         )
+
+    def _create_panic_mode(self) -> PanicMode:
+        panic = PanicMode(
+            PanicModeConfig(
+                hotkey=self.config.get("security.panic_hotkey", "Ctrl+Shift+Esc"),
+                close_application=bool(self.config.get("security.panic_close_application", False)),
+                hide_windows=True,
+                clear_clipboard=True,
+                stealth_mode=bool(self.config.get("security.panic_stealth_mode", False)),
+            ),
+            event_bus=event_bus,
+        )
+        panic.register_handler("clear_clipboard", lambda: self._clear_system_clipboard(sync_service=True))
+        panic.register_handler("lock_vault", lambda: self._lock_vault(show_dialog=False))
+        panic.register_handler("hide_window", self._hide_windows_for_panic)
+        panic.register_handler("wipe_view_state", self._clear_sensitive_view_state)
+        return panic
+
+    def _hide_windows_for_panic(self):
+        try:
+            self.root.withdraw()
+        except tk.TclError:
+            pass
+
+    def activate_panic_mode(self, method: str = "manual"):
+        if not hasattr(self, "panic_mode"):
+            self.panic_mode = self._create_panic_mode()
+        result = self.panic_mode.activate(
+            method=method,
+            details={
+                "authenticated": bool(self.auth_service.is_authenticated()),
+                "window_state": self._safe_root_state(),
+            },
+        )
+        self._flush_audit_logger()
+        if self.config.get("security.panic_close_application", False):
+            self._on_close()
+        return result
+
+    def recover_from_panic_mode(self):
+        if hasattr(self, "panic_mode"):
+            self.panic_mode.reset_for_recovery()
+        try:
+            self.root.deiconify()
+        except tk.TclError:
+            pass
+        return self._unlock_vault()
+
+    def _safe_root_state(self) -> str:
+        try:
+            return str(self.root.state())
+        except Exception:
+            return "unknown"
 
     def _schedule_security_tasks(self):
         self._check_security_timers()
@@ -950,25 +1015,45 @@ class MainWindow:
         draw.rectangle((5, 6, 11, 12), fill="#f8fafc")
         draw.arc((4, 2, 12, 8), start=0, end=180, fill="#f8fafc", width=2)
 
-        menu = pystray.Menu(
-            pystray.MenuItem("Развернуть", lambda icon, item: self._restore_from_system_tray()),
-            pystray.MenuItem("Выход", lambda icon, item: self._on_close()),
-        )
+        menu = self._build_system_tray_menu(pystray)
         try:
             self._system_tray_icon = pystray.Icon("cryptosafe-manager", image, "CryptoSafe Manager", menu)
             self._system_tray_icon.run_detached()
         except Exception:
             self._system_tray_icon = None
 
+    def _build_system_tray_menu(self, pystray_module):
+        return pystray_module.Menu(
+            pystray_module.MenuItem("Показать окно", lambda icon, item: self._restore_from_system_tray()),
+            pystray_module.MenuItem("Заблокировать vault", lambda icon, item: self._lock_vault(show_dialog=False)),
+            pystray_module.MenuItem("Разблокировать vault", lambda icon, item: self._unlock_vault()),
+            pystray_module.MenuItem("Очистить clipboard", lambda icon, item: self.clear_clipboard_from_ui()),
+            pystray_module.MenuItem("Panic mode", lambda icon, item: self.activate_panic_mode("tray")),
+            pystray_module.MenuItem("Настройки", lambda icon, item: self.show_settings()),
+            pystray_module.MenuItem("Выход", lambda icon, item: self._on_close()),
+        )
+
+    def _get_system_tray_menu_labels(self) -> list[str]:
+        return [
+            "Показать окно",
+            "Заблокировать vault",
+            "Разблокировать vault",
+            "Очистить clipboard",
+            "Panic mode",
+            "Настройки",
+            "Выход",
+        ]
+
     def _build_system_tray_title(self, status: Optional[ClipboardStatus] = None) -> str:
         status = status or self._get_clipboard_status()
+        vault_state = "разблокирован" if self.auth_service.is_authenticated() else "заблокирован"
         if not status.active:
-            return "CryptoSafe Manager: буфер обмена пуст"
+            return f"CryptoSafe Manager: vault {vault_state}, clipboard пуст"
         data_type_label = self._format_clipboard_data_type(status.data_type)
         delivery_text = self._format_clipboard_delivery_mode(status.delivery_mode)
         if status.remaining_seconds > 0:
-            return f"CryptoSafe Manager: {data_type_label}, {delivery_text}, осталось {status.remaining_seconds} сек"
-        return f"CryptoSafe Manager: {data_type_label}, {delivery_text}"
+            return f"CryptoSafe Manager: vault {vault_state}, {data_type_label}, {delivery_text}, осталось {status.remaining_seconds} сек"
+        return f"CryptoSafe Manager: vault {vault_state}, {data_type_label}, {delivery_text}"
 
     def _update_system_tray_status(self, status: Optional[ClipboardStatus] = None):
         tray_icon = getattr(self, "_system_tray_icon", None)
@@ -5895,6 +5980,7 @@ class MainWindow:
             self.config.set("security.panic_close_application", validation.settings["panic_close_application"])
             self.config.set("security.panic_stealth_mode", validation.settings["panic_stealth_mode"])
             self.activity_monitor = self._create_activity_monitor()
+            self.panic_mode = self._create_panic_mode()
             self._persist_runtime_settings()
             event_bus.publish(
                 Event(
