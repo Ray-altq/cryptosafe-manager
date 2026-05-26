@@ -1,8 +1,12 @@
 import os
+import json
+import subprocess
 import sys
 import time
 import unittest
+import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -12,12 +16,16 @@ from src.core.security import (
     ActivityMonitorConfig,
     MemoryGuard,
     PanicMode,
+    PlatformSecurityManager,
     ProtectedKeyOperation,
     SecureBuffer,
+    StackFrameGuard,
     constant_time_compare,
     get_platform_security_report,
     secure_string_compare,
 )
+from src.core.security.memory_dump_probe import derive_security_dump_secret
+from tests.test_clipboard import _contains_secret_in_process_memory
 
 
 class TestSecurityHardeningCore(unittest.TestCase):
@@ -209,6 +217,16 @@ class TestSecurityHardeningCore(unittest.TestCase):
         self.assertIn("kernel_keyring", {feature["name"] for feature in linux_report["features"]})
         self.assertIn("degraded", windows_report)
 
+    def test_platform_security_manager_selects_fail_secure_backends(self):
+        windows_summary = PlatformSecurityManager("Windows").hardening_summary()
+        macos_summary = PlatformSecurityManager("Darwin").hardening_summary()
+        linux_summary = PlatformSecurityManager("Linux").hardening_summary()
+
+        self.assertIn(windows_summary["secure_prompt"], {"windows_secure_desktop", "application_modal_prompt"})
+        self.assertIn(macos_summary["secure_storage"], {"macos_keychain", "memory_only_fail_secure"})
+        self.assertIn(linux_summary["secure_storage"], {"linux_kernel_keyring", "memory_only_fail_secure"})
+        self.assertIn("service_integration", linux_summary)
+
     def test_startup_with_security_features_completes_under_three_seconds(self):
         started = time.perf_counter()
         for system_name in ("Windows", "Darwin", "Linux"):
@@ -226,6 +244,61 @@ class TestSecurityHardeningCore(unittest.TestCase):
         overhead_ratio = guard.managed_overhead_ratio(4096)
 
         self.assertLessEqual(overhead_ratio, 0.05)
+
+    def test_stack_frame_guard_wipes_registered_secrets_and_checks_canary(self):
+        secret = bytearray(b"StackSecret!123")
+
+        with StackFrameGuard() as guard:
+            protected = guard.protect(secret)
+            self.assertEqual(protected, bytearray(b"StackSecret!123"))
+            self.assertTrue(guard.verify_canary())
+
+        self.assertEqual(secret, bytearray(b"\0" * len(secret)))
+
+    def test_security_memory_dump_process_does_not_contain_plaintext_after_wipe(self):
+        run_path = Path(__file__).resolve().parents[1] / "run.py"
+        seed = f"sprint7-security-dump-{uuid.uuid4().hex}-{time.time_ns()}".encode("utf-8")
+        expected_secret = derive_security_dump_secret(seed)
+        env = os.environ.copy()
+        env["CRYPTOSAFE_SECURITY_MEMORY_DUMP_TEST"] = "1"
+
+        process = subprocess.Popen(
+            [sys.executable, "-u", str(run_path)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+        )
+
+        try:
+            process.stdin.write(seed + b"\n")
+            process.stdin.flush()
+            process.stdin.close()
+
+            ready_line = process.stdout.readline().decode("utf-8", errors="replace").strip()
+            if not ready_line:
+                stderr_output = process.stderr.read().decode("utf-8", errors="replace")
+                self.fail(f"run.py did not start Sprint 7 memory dump mode: {stderr_output}")
+
+            ready = json.loads(ready_line)
+            self.assertEqual(ready.get("status"), "ready")
+            self.assertEqual(ready.get("scenario"), "sprint7-security-memory-dump")
+            self.assertFalse(
+                _contains_secret_in_process_memory(int(ready["pid"]), expected_secret),
+                "Sprint 7 secret was found in run.py process memory dump",
+            )
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+            if process.stdout is not None:
+                process.stdout.close()
+            if process.stderr is not None:
+                process.stderr.close()
 
 
 if __name__ == "__main__":

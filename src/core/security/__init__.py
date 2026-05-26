@@ -1,7 +1,7 @@
 from .activity_monitor import ActivityMonitor, ActivityMonitorConfig
-from .memory_guard import MemoryGuard, SecureBuffer, SecureMemoryStatus
+from .memory_guard import MemoryGuard, SecureBuffer, SecureMemoryStatus, StackFrameGuard
 from .panic_mode import PanicMode, PanicModeConfig, PanicModeResult
-from .platform_security import PlatformSecurityFeature, PlatformSecurityReport, get_platform_security_report
+from .platform_security import PlatformSecurityFeature, PlatformSecurityManager, PlatformSecurityReport, get_platform_security_report
 from .security_profiles import (
     SECURITY_PROFILES,
     apply_security_profile,
@@ -19,11 +19,13 @@ __all__ = [
     "PanicModeConfig",
     "PanicModeResult",
     "PlatformSecurityFeature",
+    "PlatformSecurityManager",
     "PlatformSecurityReport",
     "ProtectedKeyOperation",
     "SECURITY_PROFILES",
     "SecureBuffer",
     "SecureMemoryStatus",
+    "StackFrameGuard",
     "apply_security_profile",
     "constant_time_compare",
     "get_platform_security_report",

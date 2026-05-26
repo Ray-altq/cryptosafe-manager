@@ -44,6 +44,18 @@ class FakeVar:
 class FakeDialog:
     def __init__(self):
         self.destroyed = False
+        self.configured = {}
+        self.options = {}
+        self.bindings = []
+
+    def configure(self, **kwargs):
+        self.configured.update(kwargs)
+
+    def option_add(self, key, value):
+        self.options[key] = value
+
+    def bind(self, sequence, callback, add=None):
+        self.bindings.append((sequence, callback, add))
 
     def destroy(self):
         self.destroyed = True
@@ -2324,6 +2336,18 @@ class TestMainWindowSecurityState(IntegrationTestCase):
         self.assertEqual(summary["shortcuts"]["Ctrl+F"], "focus_search")
         self.assertEqual(summary["shortcuts"]["Ctrl+Shift+Esc"], "panic_mode")
 
+    def test_prepare_dialog_applies_accessibility_metadata(self):
+        window = MainWindow.__new__(MainWindow)
+        dialog = FakeDialog()
+
+        prepared = window._prepare_dialog(dialog)
+
+        self.assertIs(prepared, dialog)
+        self.assertTrue(dialog.configured["takefocus"])
+        self.assertEqual(dialog.options["*TakeFocus"], 1)
+        self.assertTrue(dialog._cryptosafe_keyboard_navigation)
+        self.assertEqual(dialog._cryptosafe_accessibility_role, "dialog")
+
     def test_activate_panic_mode_locks_clears_hides_and_logs_event(self):
         window = MainWindow.__new__(MainWindow)
         window.auth_service = FakeAuthService()
@@ -2799,6 +2823,27 @@ class TestMainWindowSecurityState(IntegrationTestCase):
         self.assertEqual(window.detect_vault_import_format(str(native_path), native_path.read_bytes()), "encrypted_json")
         self.assertEqual(window.detect_vault_import_format(str(bitwarden_path), bitwarden_path.read_bytes()), "bitwarden_json")
         self.assertEqual(window.detect_vault_import_format(str(lastpass_path), lastpass_path.read_bytes()), "lastpass_csv")
+
+    def test_vault_encrypted_export_toggles_tray_crypto_operation_status(self):
+        window = MainWindow.__new__(MainWindow)
+        temp_dir = Path(self.make_db_path("vault-export-crypto-status")).parent
+        export_path = temp_dir / "vault-export.json"
+        window.db = Database(str(temp_dir / "vault.db"))
+        self.addCleanup(window.db.close)
+        window.entry_manager = FakeVaultEntryManager()
+        window._get_selected_entries = lambda: []
+        window._show_info = lambda *args, **kwargs: None
+        status_changes = []
+        original_set_status = MainWindow._set_crypto_operation_active.__get__(window, MainWindow)
+        def record_status(active):
+            status_changes.append(active)
+            original_set_status(active)
+        window._set_crypto_operation_active = record_status
+
+        window.export_vault_encrypted_json_to_path(str(export_path), "ExportPassword!123")
+
+        self.assertEqual(status_changes, [True, False])
+        self.assertFalse(window._tray_crypto_operation_active)
 
     def test_vault_import_auto_detect_failure_requires_manual_format(self):
         window = MainWindow.__new__(MainWindow)

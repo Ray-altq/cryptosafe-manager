@@ -1,6 +1,7 @@
 import ctypes
+import secrets
 import platform
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -82,6 +83,18 @@ class MemoryGuard:
                 view[index] = 0
 
     def copy_into(self, buffer: Any, data: bytes | bytearray | memoryview) -> int:
+        if isinstance(data, bytearray):
+            size = min(len(data), ctypes.sizeof(buffer))
+            if size:
+                source = (ctypes.c_ubyte * len(data)).from_buffer(data)
+                ctypes.memmove(ctypes.byref(buffer), ctypes.byref(source), size)
+            return size
+        if isinstance(data, memoryview) and not data.readonly and data.contiguous:
+            size = min(len(data), ctypes.sizeof(buffer))
+            if size:
+                source = (ctypes.c_ubyte * len(data)).from_buffer(data)
+                ctypes.memmove(ctypes.byref(buffer), ctypes.byref(source), size)
+            return size
         payload = bytes(data)
         size = min(len(payload), ctypes.sizeof(buffer))
         if size:
@@ -99,10 +112,45 @@ class MemoryGuard:
             self.unlock(buffer, selected_size)
 
 
+@dataclass
+class StackFrameGuard:
+    secrets_to_wipe: list[bytearray] = field(default_factory=list)
+    canary: bytes = field(default_factory=lambda: secrets.token_bytes(16))
+    _volatile_sink: int = 0
+
+    def protect(self, buffer: bytearray) -> bytearray:
+        self.secrets_to_wipe.append(buffer)
+        self._volatile_sink ^= len(buffer)
+        return buffer
+
+    def verify_canary(self) -> bool:
+        return len(self.canary) == 16 and any(self.canary)
+
+    def wipe(self) -> None:
+        for buffer in self.secrets_to_wipe:
+            view = memoryview(buffer)
+            for index in range(len(view)):
+                view[index] = 0
+            self._volatile_sink ^= len(view)
+        self.secrets_to_wipe.clear()
+
+    def __enter__(self):
+        if not self.verify_canary():
+            raise RuntimeError("Stack frame canary check failed")
+        return self
+
+    def __exit__(self, _exc_type, _exc, _tb):
+        try:
+            if not self.verify_canary():
+                raise RuntimeError("Stack frame canary check failed")
+        finally:
+            self.wipe()
+
+
 class SecureBuffer:
     def __init__(self, data: bytes | bytearray | memoryview, guard: MemoryGuard | None = None):
         self.guard = guard or MemoryGuard()
-        self.size = max(1, len(bytes(data)))
+        self.size = max(1, len(data))
         self.buffer, self.status = self.guard.allocate(self.size)
         self.guard.copy_into(self.buffer, data)
         if isinstance(data, bytearray):

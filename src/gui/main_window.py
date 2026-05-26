@@ -1194,6 +1194,14 @@ class MainWindow:
         self._tray_crypto_operation_active = bool(active)
         self._update_system_tray_status()
 
+    @contextmanager
+    def _crypto_operation_status(self):
+        self._set_crypto_operation_active(True)
+        try:
+            yield
+        finally:
+            self._set_crypto_operation_active(False)
+
     def _show_tray_quick_search(self):
         if not self.auth_service.is_authenticated():
             self._restore_from_system_tray()
@@ -1443,7 +1451,28 @@ class MainWindow:
             dialog.configure(bg=colors["bg"])
         except tk.TclError:
             pass
+        self._apply_accessibility_metadata(dialog)
         return dialog
+
+    def _apply_accessibility_metadata(self, widget, *, role: str = "dialog"):
+        try:
+            widget.configure(takefocus=True)
+        except Exception:
+            pass
+        try:
+            widget.option_add("*TakeFocus", 1)
+        except Exception:
+            pass
+        try:
+            widget.bind("<Alt-F4>", lambda _event: None, add="+")
+        except Exception:
+            pass
+        try:
+            setattr(widget, "_cryptosafe_accessibility_role", role)
+            setattr(widget, "_cryptosafe_keyboard_navigation", True)
+        except Exception:
+            pass
+        return widget
 
     def _style_text_widget(self, widget):
         colors = self.UI_COLORS
@@ -3291,16 +3320,17 @@ class MainWindow:
         if selected_only and not entry_ids:
             self._show_warning("Экспорт vault", "Выберите записи для выборочного экспорта.")
             return False
-        payload = self._build_vault_exporter().export_encrypted_json(
-            password,
-            ExportOptions(
-                entry_ids=entry_ids,
-                include_fields=include_fields,
-                encryption_strength=encryption_strength,
-                compression=compression,
-            ),
-        )
-        self._write_audit_export_file(target_path, payload)
+        with self._crypto_operation_status():
+            payload = self._build_vault_exporter().export_encrypted_json(
+                password,
+                ExportOptions(
+                    entry_ids=entry_ids,
+                    include_fields=include_fields,
+                    encryption_strength=encryption_strength,
+                    compression=compression,
+                ),
+            )
+            self._write_audit_export_file(target_path, payload)
         self._show_info("Экспорт vault", "Зашифрованный экспорт vault успешно сохранён.")
         return True
 
@@ -3341,11 +3371,12 @@ class MainWindow:
         if selected_only and not entry_ids:
             self._show_warning("Экспорт vault", "Выберите записи для выборочного экспорта.")
             return False
-        payload = self._build_vault_exporter().export_encrypted_json_for_public_key(
-            public_key,
-            ExportOptions(entry_ids=entry_ids, include_fields=include_fields, compression=True),
-        )
-        self._write_audit_export_file(target_path, payload)
+        with self._crypto_operation_status():
+            payload = self._build_vault_exporter().export_encrypted_json_for_public_key(
+                public_key,
+                ExportOptions(entry_ids=entry_ids, include_fields=include_fields, compression=True),
+            )
+            self._write_audit_export_file(target_path, payload)
         self._show_info("Экспорт vault", "Public-key экспорт vault успешно сохранён.")
         return True
 
@@ -3362,11 +3393,12 @@ class MainWindow:
         if selected_only and not entry_ids:
             self._show_warning("Экспорт Bitwarden", "Выберите записи для выборочного экспорта.")
             return False
-        payload = self._build_vault_exporter().export_bitwarden_encrypted_json(
-            password,
-            ExportOptions(format="bitwarden_encrypted_json", entry_ids=entry_ids, include_fields=include_fields),
-        )
-        self._write_audit_export_file(target_path, payload)
+        with self._crypto_operation_status():
+            payload = self._build_vault_exporter().export_bitwarden_encrypted_json(
+                password,
+                ExportOptions(format="bitwarden_encrypted_json", entry_ids=entry_ids, include_fields=include_fields),
+            )
+            self._write_audit_export_file(target_path, payload)
         self._show_info("Экспорт Bitwarden", "Зашифрованный Bitwarden JSON успешно сохранён.")
         return True
 
@@ -3388,14 +3420,15 @@ class MainWindow:
         if selected_only and not entry_ids:
             self._show_warning("Экспорт vault", "Выберите записи для выборочного экспорта.")
             return False
-        options = ExportOptions(format=export_format, entry_ids=entry_ids, include_fields=include_fields, plaintext_allowed=True)
-        if export_format == "bitwarden_json":
-            payload = self._build_vault_exporter().export_bitwarden_json(options)
-        elif export_format == "lastpass_csv":
-            payload = self._build_vault_exporter().export_lastpass_csv(options)
-        else:
-            raise ValueError("Unsupported password-manager export format")
-        self._write_audit_export_file(target_path, payload)
+        with self._crypto_operation_status():
+            options = ExportOptions(format=export_format, entry_ids=entry_ids, include_fields=include_fields, plaintext_allowed=True)
+            if export_format == "bitwarden_json":
+                payload = self._build_vault_exporter().export_bitwarden_json(options)
+            elif export_format == "lastpass_csv":
+                payload = self._build_vault_exporter().export_lastpass_csv(options)
+            else:
+                raise ValueError("Unsupported password-manager export format")
+            self._write_audit_export_file(target_path, payload)
         self._show_info("Экспорт менеджера паролей", "Миграционный экспорт сохранён.")
         return True
 
@@ -3413,12 +3446,13 @@ class MainWindow:
         importer = self._build_vault_importer()
         normalized_format = self.detect_vault_import_format(source_path, payload) if str(import_format or "auto").strip().lower() == "auto" else str(import_format or "encrypted_json").strip().lower()
         options = ImportOptions(format=normalized_format, mode=mode, duplicate_strategy=duplicate_strategy)
-        if normalized_format in {"encrypted_json", "json"}:
-            if not password:
-                raise ImportValidationError("Для encrypted JSON нужен пароль экспорта")
-            result = importer.import_encrypted_json(payload, password, options)
-        else:
-            result = importer.import_plaintext(payload, options)
+        with self._crypto_operation_status():
+            if normalized_format in {"encrypted_json", "json"}:
+                if not password:
+                    raise ImportValidationError("Для encrypted JSON нужен пароль экспорта")
+                result = importer.import_encrypted_json(payload, password, options)
+            else:
+                result = importer.import_plaintext(payload, options)
         if mode != "dry-run":
             self._load_entries()
         self._show_info(

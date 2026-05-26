@@ -20,6 +20,11 @@ if __name__ == "__main__":
 
         run_memory_dump_mode()
         sys.exit(0)
+    if os.environ.get("CRYPTOSAFE_SECURITY_MEMORY_DUMP_TEST") == "1":
+        from src.core.security.memory_dump_probe import run_security_memory_dump_mode
+
+        run_security_memory_dump_mode()
+        sys.exit(0)
 
     print("=" * 50)
     print("CryptoSafe Manager")
