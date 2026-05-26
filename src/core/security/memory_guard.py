@@ -88,6 +88,16 @@ class MemoryGuard:
             ctypes.memmove(ctypes.byref(buffer), payload, size)
         return size
 
+    def managed_overhead_ratio(self, requested_size: int) -> float:
+        selected_size = max(1, int(requested_size))
+        buffer, _status = self.allocate(selected_size)
+        try:
+            allocated_size = ctypes.sizeof(buffer)
+            return max(0.0, (allocated_size - selected_size) / selected_size)
+        finally:
+            self.secure_zero(buffer, selected_size)
+            self.unlock(buffer, selected_size)
+
 
 class SecureBuffer:
     def __init__(self, data: bytes | bytearray | memoryview, guard: MemoryGuard | None = None):

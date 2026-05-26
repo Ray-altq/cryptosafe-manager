@@ -23,6 +23,10 @@ SECURITY_PROFILES: dict[str, dict[str, Any]] = {
         "panic_hotkey": "Ctrl+Shift+Esc",
         "panic_close_application": False,
         "panic_stealth_mode": False,
+        "panic_gesture_enabled": True,
+        "panic_fake_error": True,
+        "panic_decoy_command": "",
+        "panic_redirect_url": "",
     },
     "enhanced": {
         "security_profile": "enhanced",
@@ -40,6 +44,10 @@ SECURITY_PROFILES: dict[str, dict[str, Any]] = {
         "panic_hotkey": "Ctrl+Shift+Esc",
         "panic_close_application": False,
         "panic_stealth_mode": False,
+        "panic_gesture_enabled": True,
+        "panic_fake_error": True,
+        "panic_decoy_command": "",
+        "panic_redirect_url": "",
     },
     "paranoid": {
         "security_profile": "paranoid",
@@ -57,6 +65,10 @@ SECURITY_PROFILES: dict[str, dict[str, Any]] = {
         "panic_hotkey": "Ctrl+Shift+Esc",
         "panic_close_application": False,
         "panic_stealth_mode": True,
+        "panic_gesture_enabled": True,
+        "panic_fake_error": True,
+        "panic_decoy_command": "",
+        "panic_redirect_url": "",
     },
 }
 
@@ -140,8 +152,13 @@ def validate_security_settings(settings: dict[str, Any]) -> SecuritySettingsVali
         "memory_locking_enabled",
         "panic_close_application",
         "panic_stealth_mode",
+        "panic_gesture_enabled",
+        "panic_fake_error",
     ):
         normalized[key] = bool(normalized.get(key, False))
+
+    normalized["panic_decoy_command"] = str(normalized.get("panic_decoy_command", "") or "").strip()
+    normalized["panic_redirect_url"] = str(normalized.get("panic_redirect_url", "") or "").strip()
 
     if clipboard_level == "paranoid" and delivery_mode != "memory_only":
         errors.append("Paranoid clipboard requires memory_only delivery")

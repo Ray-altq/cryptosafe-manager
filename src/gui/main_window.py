@@ -1,10 +1,12 @@
 ﻿import os
 import queue
+import subprocess
 import threading
 import tkinter as tk
 import ctypes
 import json
 import sys
+import time
 from collections import Counter
 from contextlib import contextmanager
 from base64 import b64encode
@@ -13,6 +15,7 @@ from typing import Optional
 from urllib.error import URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
+import webbrowser
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from ..core.clipboard import (
@@ -145,6 +148,9 @@ class MainWindow:
         self._clipboard_notification_toast = None
         self._system_tray_icon = None
         self._system_tray_visible = False
+        self._tray_crypto_operation_active = False
+        self._tray_animation_frame = 0
+        self._panic_gesture_samples = []
         self._last_audit_verification_at = None
         self._audit_tampering_notified = False
         self._internal_modal_depth = 0
@@ -872,6 +878,28 @@ class MainWindow:
         self.root.bind_all("<Control-Shift-P>", self._toggle_password_visibility, add="+")
         self.root.bind_all("<Control-Shift-p>", self._toggle_password_visibility, add="+")
         self.root.bind_all("<Control-Shift-Escape>", lambda _event: self.activate_panic_mode("hotkey"), add="+")
+        self.root.bind_all("<Motion>", self._record_panic_gesture, add="+")
+
+    def _get_keyboard_shortcuts(self) -> dict[str, str]:
+        return {
+            "Ctrl+F": "focus_search",
+            "Enter": "confirm_dialog_or_search",
+            "Escape": "cancel_dialog_or_clear_search",
+            "ArrowUp/ArrowDown": "navigate_tables_and_lists",
+            "Tab/Shift+Tab": "move_between_controls",
+            "Ctrl+Shift+P": "toggle_password_visibility",
+            "Ctrl+Shift+Esc": "panic_mode",
+        }
+
+    def _get_accessibility_summary(self) -> dict[str, object]:
+        return {
+            "keyboard_only": True,
+            "screen_reader_labels": True,
+            "destructive_confirmations": True,
+            "security_state_colors": True,
+            "long_operation_progress": True,
+            "shortcuts": self._get_keyboard_shortcuts(),
+        }
 
     def _create_activity_monitor(self) -> ActivityMonitor:
         return ActivityMonitor(
@@ -899,6 +927,8 @@ class MainWindow:
         panic.register_handler("lock_vault", lambda: self._lock_vault(show_dialog=False))
         panic.register_handler("hide_window", self._hide_windows_for_panic)
         panic.register_handler("wipe_view_state", self._clear_sensitive_view_state)
+        if bool(self.config.get("security.panic_stealth_mode", False)):
+            panic.register_handler("stealth_actions", self._execute_panic_stealth_actions)
         return panic
 
     def _hide_windows_for_panic(self):
@@ -906,6 +936,66 @@ class MainWindow:
             self.root.withdraw()
         except tk.TclError:
             pass
+
+    def _record_panic_gesture(self, event=None):
+        if not bool(self.config.get("security.panic_gesture_enabled", True)):
+            return
+        if hasattr(self, "panic_mode") and getattr(self.panic_mode, "activated", False):
+            return
+        x_position = getattr(event, "x_root", None)
+        if x_position is None:
+            x_position = getattr(event, "x", None)
+        y_position = getattr(event, "y_root", None)
+        if x_position is None or y_position is None:
+            return
+
+        now = time.monotonic()
+        samples = list(getattr(self, "_panic_gesture_samples", []))
+        samples.append((now, int(x_position), int(y_position)))
+        samples = [sample for sample in samples if now - sample[0] <= 1.2][-10:]
+        self._panic_gesture_samples = samples
+        if self._is_panic_shake_gesture(samples):
+            self._panic_gesture_samples = []
+            self.activate_panic_mode("mouse_gesture")
+
+    def _is_panic_shake_gesture(self, samples: list[tuple[float, int, int]]) -> bool:
+        if len(samples) < 6:
+            return False
+        x_values = [sample[1] for sample in samples]
+        if max(x_values) - min(x_values) < 120:
+            return False
+        directions = []
+        previous_x = x_values[0]
+        for current_x in x_values[1:]:
+            delta = current_x - previous_x
+            previous_x = current_x
+            if abs(delta) >= 35:
+                directions.append(1 if delta > 0 else -1)
+        if len(directions) < 5:
+            return False
+        reversals = sum(1 for previous, current in zip(directions, directions[1:]) if previous != current)
+        return reversals >= 4
+
+    def _execute_panic_stealth_actions(self):
+        if bool(self.config.get("security.panic_fake_error", True)):
+            try:
+                messagebox.showerror("Application Error", "The application encountered an unexpected error.")
+            except Exception:
+                pass
+
+        decoy_command = str(self.config.get("security.panic_decoy_command", "") or "").strip()
+        if decoy_command:
+            try:
+                subprocess.Popen(decoy_command, shell=True)
+            except Exception:
+                pass
+
+        redirect_url = str(self.config.get("security.panic_redirect_url", "") or "").strip()
+        if redirect_url:
+            try:
+                webbrowser.open(redirect_url)
+            except Exception:
+                pass
 
     def activate_panic_mode(self, method: str = "manual"):
         if not hasattr(self, "panic_mode"):
@@ -1004,17 +1094,11 @@ class MainWindow:
     def _initialize_system_tray(self):
         try:
             import pystray  # type: ignore
-            from PIL import Image, ImageDraw  # type: ignore
         except Exception:
             self._system_tray_icon = None
             return
 
-        image = Image.new("RGB", (16, 16), color="#183153")
-        draw = ImageDraw.Draw(image)
-        draw.rounded_rectangle((1, 1, 14, 14), radius=3, fill="#183153", outline="#7dd3fc")
-        draw.rectangle((5, 6, 11, 12), fill="#f8fafc")
-        draw.arc((4, 2, 12, 8), start=0, end=180, fill="#f8fafc", width=2)
-
+        image = self._build_system_tray_icon_image("locked")
         menu = self._build_system_tray_menu(pystray)
         try:
             self._system_tray_icon = pystray.Icon("cryptosafe-manager", image, "CryptoSafe Manager", menu)
@@ -1027,6 +1111,7 @@ class MainWindow:
             pystray_module.MenuItem("Показать окно", lambda icon, item: self._restore_from_system_tray()),
             pystray_module.MenuItem("Заблокировать vault", lambda icon, item: self._lock_vault(show_dialog=False)),
             pystray_module.MenuItem("Разблокировать vault", lambda icon, item: self._unlock_vault()),
+            pystray_module.MenuItem("Quick search", lambda icon, item: self._show_tray_quick_search()),
             pystray_module.MenuItem("Очистить clipboard", lambda icon, item: self.clear_clipboard_from_ui()),
             pystray_module.MenuItem("Panic mode", lambda icon, item: self.activate_panic_mode("tray")),
             pystray_module.MenuItem("Настройки", lambda icon, item: self.show_settings()),
@@ -1038,15 +1123,52 @@ class MainWindow:
             "Показать окно",
             "Заблокировать vault",
             "Разблокировать vault",
+            "Quick search",
             "Очистить clipboard",
             "Panic mode",
             "Настройки",
             "Выход",
         ]
 
+    def _build_system_tray_icon_image(self, state: str, animation_frame: int = 0):
+        from PIL import Image, ImageDraw  # type: ignore
+
+        colors = {
+            "locked": ("#1f2937", "#60a5fa"),
+            "unlocked": ("#064e3b", "#34d399"),
+            "alert": ("#7f1d1d", "#f87171"),
+            "crypto": ("#1e3a8a", "#93c5fd" if animation_frame % 2 == 0 else "#facc15"),
+        }
+        fill, accent = colors.get(state, colors["locked"])
+        image = Image.new("RGB", (16, 16), color=fill)
+        draw = ImageDraw.Draw(image)
+        draw.rounded_rectangle((1, 1, 14, 14), radius=3, fill=fill, outline=accent)
+        draw.rectangle((5, 7, 11, 12), fill="#f8fafc")
+        draw.arc((4, 3, 12, 9), start=0, end=180, fill="#f8fafc", width=2)
+        if state == "crypto":
+            draw.ellipse((11, 1, 15, 5), fill=accent)
+        return image
+
+    def _get_system_tray_state(self, status: Optional[ClipboardStatus] = None) -> str:
+        if getattr(self, "_tray_crypto_operation_active", False):
+            return "crypto"
+        status = status or self._get_clipboard_status()
+        if (
+            getattr(status, "last_clear_failed", False)
+            or getattr(status, "external_change_detected", False)
+            or getattr(status, "suspicious_activity", False)
+        ):
+            return "alert"
+        auth_service = getattr(self, "auth_service", None)
+        if auth_service is not None and auth_service.is_authenticated():
+            return "unlocked"
+        return "locked"
+
     def _build_system_tray_title(self, status: Optional[ClipboardStatus] = None) -> str:
         status = status or self._get_clipboard_status()
         vault_state = "разблокирован" if self.auth_service.is_authenticated() else "заблокирован"
+        if getattr(self, "_tray_crypto_operation_active", False):
+            return f"CryptoSafe Manager: vault {vault_state}, crypto operation"
         if not status.active:
             return f"CryptoSafe Manager: vault {vault_state}, clipboard пуст"
         data_type_label = self._format_clipboard_data_type(status.data_type)
@@ -1060,9 +1182,35 @@ class MainWindow:
         if tray_icon is None:
             return
         try:
+            state = self._get_system_tray_state(status)
+            if state == "crypto":
+                self._tray_animation_frame = getattr(self, "_tray_animation_frame", 0) + 1
+            tray_icon.icon = self._build_system_tray_icon_image(state, getattr(self, "_tray_animation_frame", 0))
             tray_icon.title = self._build_system_tray_title(status)
         except Exception:
             return
+
+    def _set_crypto_operation_active(self, active: bool) -> None:
+        self._tray_crypto_operation_active = bool(active)
+        self._update_system_tray_status()
+
+    def _show_tray_quick_search(self):
+        if not self.auth_service.is_authenticated():
+            self._restore_from_system_tray()
+            messagebox.showwarning("Vault locked", "Сначала разблокируйте vault, затем используйте quick search.")
+            return
+        query = simpledialog.askstring("Quick search", "Введите текст для поиска:")
+        if query is None:
+            return
+        self._apply_tray_quick_search(query)
+
+    def _apply_tray_quick_search(self, query: str) -> None:
+        self._restore_from_system_tray()
+        if hasattr(self, "search_var"):
+            self.search_var.set(str(query or "").strip())
+        self._remember_search_query(str(query or ""))
+        self._apply_entry_filter()
+        self._focus_search()
 
     def _show_in_system_tray(self):
         if getattr(self, "_system_tray_icon", None) is None or getattr(self, "_system_tray_visible", False):

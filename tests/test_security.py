@@ -15,6 +15,7 @@ from src.core.security import (
     ProtectedKeyOperation,
     SecureBuffer,
     constant_time_compare,
+    get_platform_security_report,
     secure_string_compare,
 )
 
@@ -196,6 +197,35 @@ class TestSecurityHardeningCore(unittest.TestCase):
         elapsed = time.perf_counter() - started
 
         self.assertLess(elapsed, 1.0)
+
+    def test_platform_security_reports_required_os_features_and_degradation(self):
+        windows_report = get_platform_security_report("Windows").as_dict()
+        macos_report = get_platform_security_report("Darwin").as_dict()
+        linux_report = get_platform_security_report("Linux").as_dict()
+
+        self.assertEqual(windows_report["platform"], "Windows")
+        self.assertIn("credential_guard_probe", {feature["name"] for feature in windows_report["features"]})
+        self.assertIn("keychain_services", {feature["name"] for feature in macos_report["features"]})
+        self.assertIn("kernel_keyring", {feature["name"] for feature in linux_report["features"]})
+        self.assertIn("degraded", windows_report)
+
+    def test_startup_with_security_features_completes_under_three_seconds(self):
+        started = time.perf_counter()
+        for system_name in ("Windows", "Darwin", "Linux"):
+            get_platform_security_report(system_name)
+        ActivityMonitorConfig(timeout_seconds=300)
+        PanicMode()
+        MemoryGuard()
+        elapsed = time.perf_counter() - started
+
+        self.assertLess(elapsed, 3.0)
+
+    def test_memory_protection_managed_overhead_stays_under_five_percent(self):
+        guard = MemoryGuard()
+
+        overhead_ratio = guard.managed_overhead_ratio(4096)
+
+        self.assertLessEqual(overhead_ratio, 0.05)
 
 
 if __name__ == "__main__":

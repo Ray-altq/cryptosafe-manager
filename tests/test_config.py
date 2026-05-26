@@ -60,6 +60,8 @@ class TestConfig(unittest.TestCase):
         self.assertEqual(paranoid["auto_lock_minutes"], 1)
         self.assertEqual(paranoid["clipboard_security_level"], "paranoid")
         self.assertTrue(paranoid["panic_stealth_mode"])
+        self.assertTrue(paranoid["panic_gesture_enabled"])
+        self.assertTrue(paranoid["panic_fake_error"])
 
     def test_security_settings_validation_blocks_insecure_combinations(self):
         validation = validate_security_settings(

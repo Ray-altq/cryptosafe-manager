@@ -49,6 +49,12 @@ class FakeDialog:
         self.destroyed = True
 
 
+class FakeMotionEvent:
+    def __init__(self, x_root, y_root=100):
+        self.x_root = x_root
+        self.y_root = y_root
+
+
 class FakeLabel:
     def __init__(self):
         self.text = ""
@@ -76,6 +82,12 @@ class FakeButton:
 
     def winfo_height(self):
         return 24
+
+
+class FakeTrayIcon:
+    def __init__(self):
+        self.icon = None
+        self.title = ""
 
 
 class FakeAuthServiceForReveal:
@@ -1112,9 +1124,66 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
         self.assertIn("Заблокировать vault", labels)
         self.assertIn("Разблокировать vault", labels)
         self.assertIn("Очистить clipboard", labels)
+        self.assertIn("Quick search", labels)
         self.assertIn("Panic mode", labels)
         self.assertIn("Настройки", labels)
         self.assertIn("Выход", labels)
+
+    def test_system_tray_state_changes_for_lock_alert_and_crypto_operation(self):
+        window = MainWindow.__new__(MainWindow)
+        window.auth_service = FakeAuthService()
+        window.auth_service.authenticated = False
+        window._tray_crypto_operation_active = False
+
+        self.assertEqual(window._get_system_tray_state(ClipboardStatus(active=False)), "locked")
+
+        window.auth_service.authenticated = True
+        self.assertEqual(window._get_system_tray_state(ClipboardStatus(active=False)), "unlocked")
+
+        failed_status = ClipboardStatus(active=False, suspicious_activity=True)
+        self.assertEqual(window._get_system_tray_state(failed_status), "alert")
+
+        window._tray_crypto_operation_active = True
+        self.assertEqual(window._get_system_tray_state(failed_status), "crypto")
+
+    def test_update_system_tray_status_refreshes_icon_and_animates_crypto_operation(self):
+        window = MainWindow.__new__(MainWindow)
+        window.auth_service = FakeAuthService()
+        window.auth_service.authenticated = True
+        window._system_tray_icon = FakeTrayIcon()
+        window._tray_crypto_operation_active = False
+        window._tray_animation_frame = 0
+        window._get_clipboard_status = lambda: ClipboardStatus(active=False)
+        built_states = []
+        window._build_system_tray_icon_image = lambda state, frame=0: built_states.append((state, frame)) or f"{state}-{frame}"
+
+        window._update_system_tray_status(ClipboardStatus(active=False))
+        self.assertEqual(window._system_tray_icon.icon, "unlocked-0")
+
+        window._set_crypto_operation_active(True)
+        self.assertEqual(built_states[-1][0], "crypto")
+        self.assertGreater(window._tray_animation_frame, 0)
+        self.assertIn("crypto operation", window._system_tray_icon.title)
+
+    def test_tray_quick_search_restores_window_and_applies_query(self):
+        window = MainWindow.__new__(MainWindow)
+        window.root = FakeRoot()
+        window._system_tray_icon = object()
+        window._system_tray_visible = True
+        window._update_system_tray_status = lambda status=None: None
+        window.search_var = FakeVar("")
+        window.search_entry = FakeEntryWidget()
+        window.search_history = []
+        window.db = type("FakeDb", (), {"set_setting": lambda self, key, value: setattr(self, "saved", (key, value))})()
+        window._update_search_history_button = lambda: None
+        window._apply_entry_filter = lambda: setattr(window, "_filter_applied", True)
+
+        window._apply_tray_quick_search("github")
+
+        self.assertEqual(window.root.window_state, "normal")
+        self.assertEqual(window.search_var.get(), "github")
+        self.assertTrue(window._filter_applied)
+        self.assertTrue(window.search_entry.focused)
 
     def test_system_tray_title_includes_vault_and_clipboard_state(self):
         window = MainWindow.__new__(MainWindow)
@@ -2244,6 +2313,17 @@ class TestMainWindowSecurityState(IntegrationTestCase):
         self.assertTrue(window._state_activity_updated)
         self.assertEqual(window.activity_monitor.recorded_sources, ["keyboard"])
 
+    def test_accessibility_summary_documents_keyboard_and_feedback_support(self):
+        window = MainWindow.__new__(MainWindow)
+
+        summary = window._get_accessibility_summary()
+
+        self.assertTrue(summary["keyboard_only"])
+        self.assertTrue(summary["screen_reader_labels"])
+        self.assertTrue(summary["long_operation_progress"])
+        self.assertEqual(summary["shortcuts"]["Ctrl+F"], "focus_search")
+        self.assertEqual(summary["shortcuts"]["Ctrl+Shift+Esc"], "panic_mode")
+
     def test_activate_panic_mode_locks_clears_hides_and_logs_event(self):
         window = MainWindow.__new__(MainWindow)
         window.auth_service = FakeAuthService()
@@ -2282,6 +2362,39 @@ class TestMainWindowSecurityState(IntegrationTestCase):
         self.assertTrue(window._unlock_called)
         self.assertEqual(window.root.window_state, "normal")
         self.assertFalse(window.panic_mode.activated)
+
+    def test_panic_mouse_shake_gesture_activates_panic_mode(self):
+        window = MainWindow.__new__(MainWindow)
+        window.config = Config()
+        window._panic_gesture_samples = []
+        window.panic_mode = type("FakePanic", (), {"activated": False})()
+        activated_methods = []
+        def fake_activate(method="manual"):
+            window.panic_mode.activated = True
+            activated_methods.append(method)
+        window.activate_panic_mode = fake_activate
+
+        for x_position in (100, 250, 90, 260, 80, 270, 75):
+            window._record_panic_gesture(FakeMotionEvent(x_position))
+
+        self.assertEqual(activated_methods, ["mouse_gesture"])
+        self.assertEqual(window._panic_gesture_samples, [])
+
+    def test_panic_stealth_actions_support_fake_error_decoy_and_redirect(self):
+        window = MainWindow.__new__(MainWindow)
+        window.config = Config()
+        window.config.set("security.panic_fake_error", True)
+        window.config.set("security.panic_decoy_command", "calc")
+        window.config.set("security.panic_redirect_url", "https://example.com")
+
+        with patch("src.gui.main_window.messagebox.showerror") as showerror, patch(
+            "src.gui.main_window.subprocess.Popen"
+        ) as popen, patch("src.gui.main_window.webbrowser.open") as open_url:
+            window._execute_panic_stealth_actions()
+
+        self.assertTrue(showerror.called)
+        popen.assert_called_once_with("calc", shell=True)
+        open_url.assert_called_once_with("https://example.com")
 
     def test_prompt_unlock_if_needed_reloads_entries_after_restore(self):
         window = MainWindow.__new__(MainWindow)
