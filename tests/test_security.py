@@ -1,6 +1,8 @@
 import os
 import sys
+import time
 import unittest
+from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -99,6 +101,101 @@ class TestSecurityHardeningCore(unittest.TestCase):
         self.assertEqual(events[0].type, EventType.PANIC_MODE_ACTIVATED)
         self.assertEqual(events[0].data["details"]["password"], "[redacted]")
         self.assertNotIn("Secret!123", str(events[0].data))
+
+    def test_timing_attack_measurement_keeps_compare_paths_close(self):
+        rounds = 5000
+
+        def measure(left, right):
+            started = time.perf_counter()
+            for _ in range(rounds):
+                constant_time_compare(left, right)
+            return time.perf_counter() - started
+
+        equal_time = measure("A" * 64, "A" * 64)
+        different_time = measure("A" * 64, "B" * 64)
+        different_length_time = measure("A" * 64, "B" * 32)
+        slowest = max(equal_time, different_time, different_length_time)
+        fastest = max(min(equal_time, different_time, different_length_time), 0.000001)
+
+        self.assertLess(slowest / fastest, 2.5)
+
+    def test_memory_protection_snapshot_does_not_keep_plaintext_after_wipe(self):
+        secret = bytearray(b"Sprint7MemorySecret!789")
+        secure_buffer = SecureBuffer(secret)
+        protected_snapshot = secure_buffer.read()
+
+        secure_buffer.close()
+        wiped_snapshot = bytes(bytearray(secure_buffer.buffer or [])) if getattr(secure_buffer, "buffer", None) else b""
+
+        self.assertIn(b"Sprint7MemorySecret!789", protected_snapshot)
+        self.assertNotIn(b"Sprint7MemorySecret!789", bytes(secret))
+        self.assertNotIn(b"Sprint7MemorySecret!789", wiped_snapshot)
+
+    def test_auto_lock_reliability_simulates_twenty_four_hours(self):
+        current_time = datetime(2026, 5, 23, tzinfo=timezone.utc)
+
+        def clock():
+            return current_time
+
+        lock_events = []
+        monitor = ActivityMonitor(
+            lambda: lock_events.append(clock()),
+            ActivityMonitorConfig(timeout_seconds=5 * 60, sensitivity="medium"),
+            clock=clock,
+        )
+
+        for hour in range(24):
+            current_time += timedelta(hours=1)
+            monitor.record_activity("keyboard")
+            self.assertFalse(monitor.tick(), f"unexpected lock after activity at hour {hour}")
+            current_time += timedelta(minutes=6)
+            self.assertTrue(monitor.tick(), f"missing lock after inactivity at hour {hour}")
+
+        self.assertEqual(len(lock_events), 24)
+        self.assertEqual(monitor.lock_count, 24)
+
+    def test_panic_mode_stress_continues_after_handler_failure_and_recovers(self):
+        bus = EventBus()
+        events = []
+        bus.subscribe(EventType.PANIC_MODE_ACTIVATED, lambda event: events.append(event))
+        bus.subscribe(EventType.PANIC_MODE_DEACTIVATED, lambda event: events.append(event))
+        calls = []
+        panic = PanicMode(event_bus=bus)
+        panic.register_handler("lock_vault", lambda: calls.append("lock"))
+        panic.register_handler("failing_handler", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+        panic.register_handler("wipe_memory", lambda: calls.append("wipe"))
+
+        result = panic.activate(method="stress-test", details={"private_key": "SecretKey"})
+        second_result = panic.activate(method="stress-test-repeat")
+        panic.reset_for_recovery()
+
+        self.assertTrue(result.activated)
+        self.assertFalse(second_result.activated)
+        self.assertEqual(calls, ["lock", "wipe"])
+        self.assertIn("failing_handler", result.handler_errors)
+        self.assertFalse(panic.activated)
+        self.assertEqual(events[-1].type, EventType.PANIC_MODE_DEACTIVATED)
+        self.assertNotIn("SecretKey", str(events[0].data))
+
+    def test_idle_activity_monitor_tick_is_lightweight(self):
+        monitor = ActivityMonitor(lambda: None, ActivityMonitorConfig(timeout_seconds=60))
+
+        started = time.perf_counter()
+        for _ in range(10000):
+            self.assertFalse(monitor.tick())
+        elapsed = time.perf_counter() - started
+
+        self.assertLess(elapsed, 1.0)
+
+    def test_security_module_startup_smoke_is_fast(self):
+        started = time.perf_counter()
+        for _ in range(1000):
+            ActivityMonitorConfig(timeout_seconds=300)
+            PanicMode()
+            MemoryGuard()
+        elapsed = time.perf_counter() - started
+
+        self.assertLess(elapsed, 1.0)
 
 
 if __name__ == "__main__":
