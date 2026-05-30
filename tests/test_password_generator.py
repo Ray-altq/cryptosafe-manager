@@ -3,6 +3,8 @@ import sys
 import time
 import unittest
 
+import pytest
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from src.core.vault.password_generator import (
@@ -94,6 +96,7 @@ class TestPasswordGenerator(unittest.TestCase):
         self.assertEqual(len(generated_passwords), len(set(generated_passwords)))
         self.assertEqual(generator.recent_passwords(), generated_passwords[-20:])
 
+    @pytest.mark.slow
     def test_generate_10000_passwords_without_duplicates_and_with_required_strength(self):
         generator = PasswordGenerator(history_limit=20)
         options = PasswordGeneratorOptions(

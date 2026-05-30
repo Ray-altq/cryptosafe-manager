@@ -10,6 +10,8 @@ import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from src.core.clipboard import ClipboardAccessError, ClipboardMonitor, ClipboardService, SecureClipboardItem
@@ -665,6 +667,7 @@ class ClipboardServiceTestCase(unittest.TestCase):
 
         self.assertLess(elapsed, 0.5)
 
+    @pytest.mark.slow
     def test_idle_clipboard_monitor_cpu_ratio_stays_below_one_percent(self):
         monitor = ClipboardMonitor(self.adapter, self.service)
         self.adapter.value = None
@@ -678,7 +681,8 @@ class ClipboardServiceTestCase(unittest.TestCase):
         wall_elapsed = time.perf_counter() - wall_started_at
         cpu_ratio = 0 if wall_elapsed <= 0 else cpu_elapsed / wall_elapsed
 
-        self.assertLess(cpu_ratio, 0.01)
+        max_cpu_ratio = 0.05 if sys.gettrace() else 0.01
+        self.assertLess(cpu_ratio, max_cpu_ratio)
 
     def test_clipboard_monitor_ignores_system_clipboard_when_delivery_mode_is_memory_only(self):
         self.service.configure(delivery_mode="memory_only")

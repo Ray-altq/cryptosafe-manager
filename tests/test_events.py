@@ -5,8 +5,8 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from src.core.audit import AuditLogSigner, AuditLogVerifier
-from src.core.events import AuditLogger, AuditLoggerStub, Event, EventBus, EventType
+from src.core.audit import AuditLogger, AuditLogSigner, AuditLogVerifier
+from src.core.events import AuditLoggerStub, Event, EventBus, EventType
 
 
 class FakeAuditDatabase:

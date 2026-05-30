@@ -7,6 +7,8 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
+import pytest
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from src.core.events import EventType, event_bus
@@ -413,6 +415,7 @@ class TestEntryManager(unittest.TestCase):
             loaded = self.manager.get_entry(entry_id)
             self.assertEqual(loaded["notes"], notes)
 
+    @pytest.mark.slow
     def test_loading_1000_entries_meets_time_and_memory_requirements(self):
         for index in range(1000):
             self.manager.create_entry(
@@ -438,6 +441,7 @@ class TestEntryManager(unittest.TestCase):
         self.assertLess(elapsed, 2.0)
         self.assertLess(peak_memory, 50 * 1024 * 1024)
 
+    @pytest.mark.slow
     def test_searching_across_1000_entries_meets_response_budget(self):
         for index in range(1000):
             self.manager.create_entry(
@@ -460,7 +464,8 @@ class TestEntryManager(unittest.TestCase):
 
         self.assertEqual(len(entries), 1000)
         self.assertEqual(len(results), 500)
-        self.assertLess(elapsed, 0.2)
+        max_elapsed = 0.5 if sys.gettrace() else 0.2
+        self.assertLess(elapsed, max_elapsed)
 
 
 if __name__ == "__main__":

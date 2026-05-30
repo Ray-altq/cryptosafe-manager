@@ -8,6 +8,8 @@ import unittest
 import uuid
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from tests.test_clipboard import _contains_secret_in_process_memory, _derive_memory_dump_secret
@@ -97,6 +99,7 @@ def run_memory_dump_mode():
 
 
 class TestRunMemoryDump(unittest.TestCase):
+    @pytest.mark.slow
     def test_run_process_memory_dump(self):
         run_path = Path(__file__).resolve().parents[1] / "run.py"
         if not run_path.exists():

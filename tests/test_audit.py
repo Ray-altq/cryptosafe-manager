@@ -8,6 +8,8 @@ import unittest
 import json
 from unittest.mock import patch
 
+import pytest
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from src.core.audit import AuditLogger, AuditLogSigner, AuditLogVerifier, export_logs_to_cef, export_logs_to_json, import_logs_from_json
@@ -67,6 +69,7 @@ class TestAuditLogging(unittest.TestCase):
         self.assertFalse(results["verified"])
         self.assertTrue(any(item["sequence_number"] == 501 for item in results["invalid_entries"]))
 
+    @pytest.mark.slow
     def test_audit_performance_10000_events(self):
         #проверяем, что аудит сабсистем выдерживает большой объём событий
         started_at = time.perf_counter()

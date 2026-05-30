@@ -8,6 +8,8 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from src.core.events import EventBus, EventType
@@ -255,6 +257,7 @@ class TestSecurityHardeningCore(unittest.TestCase):
 
         self.assertEqual(secret, bytearray(b"\0" * len(secret)))
 
+    @pytest.mark.slow
     def test_security_memory_dump_process_does_not_contain_plaintext_after_wipe(self):
         run_path = Path(__file__).resolve().parents[1] / "run.py"
         seed = f"sprint7-security-dump-{uuid.uuid4().hex}-{time.time_ns()}".encode("utf-8")

@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from src.core.clipboard import ClipboardStatus
@@ -17,7 +19,7 @@ from src.core.config import Config
 from src.core.crypto.authentication import AuthenticationService
 from src.core.crypto.key_derivation import KeyDerivation
 from src.core.crypto.key_storage import KeyStorage
-from src.core.crypto.placeholder import AES256Placeholder
+from src.core.crypto.legacy_encryption import LegacyXOREncryptionService
 from src.core.crypto.password_validator import PasswordValidator
 from src.core.audit import AuditLogger as RealAuditLogger
 from src.core.events import EventType
@@ -507,7 +509,7 @@ class TestMainWindowIntegration(IntegrationTestCase):
         auth_service = self.make_auth_service(db_path)
         password = "ValidMasterPass!9X"
         auth_service.register_master_password(password)
-        crypto = AES256Placeholder()
+        crypto = LegacyXOREncryptionService()
         encrypted_password = crypto.encrypt(b"secret", auth_service.get_active_key())
         auth_service.logout()
         entry_id = database.add_entry(
@@ -1772,6 +1774,7 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
         self.assertEqual(vault_actions[0]["id"], "show_vault_entry")
         self.assertEqual(auth_actions[0]["id"], "inspect_failed_login")
 
+    @pytest.mark.slow
     def test_audit_viewer_memory_for_10000_entries_stays_under_50mb(self):
         window = MainWindow.__new__(MainWindow)
 

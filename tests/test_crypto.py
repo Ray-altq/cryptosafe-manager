@@ -4,13 +4,13 @@ import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from src.core.crypto.abstract import EncryptionService
-from src.core.crypto.placeholder import AES256Placeholder
+from src.core.crypto.legacy_encryption import LegacyXOREncryptionService
 from src.core.key_manager import KeyManager
 
 class TestCrypto(unittest.TestCase):  #класс для тестирования криптографических функций
     
     def setUp(self):  #метод для настройки тестовой среды
-        self.crypto = AES256Placeholder()
+        self.crypto = LegacyXOREncryptionService()
         self.key_manager = KeyManager()
         self.test_key = b"test_key_16_bytes"
         self.test_data = b"Hello, World!"

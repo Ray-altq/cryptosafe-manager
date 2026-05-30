@@ -40,7 +40,7 @@ from ..core.crypto.authentication import AuthenticationError, AuthenticationServ
 from ..core.crypto.key_derivation import KeyDerivation
 from ..core.crypto.key_storage import KeyStorage
 from ..core.crypto.password_validator import PasswordValidator
-from ..core.crypto.placeholder import AES256Placeholder
+from ..core.crypto.legacy_encryption import LegacyXOREncryptionService
 from ..core.events import Event, EventType, event_bus
 from ..core.import_export import ExportOptions, ImportOptions, KeyExchangeService, QRCodeService, SharePermissions
 from ..core.import_export.exceptions import ImportExportError, ImportValidationError
@@ -134,7 +134,7 @@ class MainWindow:
             self.password_validator,
             self.state,
         )
-        self.crypto = AES256Placeholder(self.key_manager)
+        self.crypto = LegacyXOREncryptionService(self.key_manager)
         self.vault_crypto = AESGCMEncryptionService(self.key_manager)
         self.entry_manager = EntryManager(self.db, self.vault_crypto, legacy_encryption_service=self.crypto)
         self.password_generator = PasswordGenerator()
@@ -2830,8 +2830,8 @@ class MainWindow:
         return "." in hostname
 
     def _rotate_vault_entries(self, old_key: bytes, new_key: bytes):
-        old_crypto = AES256Placeholder()
-        new_crypto = AES256Placeholder()
+        old_crypto = LegacyXOREncryptionService()
+        new_crypto = LegacyXOREncryptionService()
         old_vault_crypto = AESGCMEncryptionService()
         new_vault_crypto = AESGCMEncryptionService()
         progress_dialog = tk.Toplevel(self.root)

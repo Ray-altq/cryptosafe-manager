@@ -9,7 +9,7 @@ from src.core.crypto.authentication import AuthenticationError, AuthenticationSe
 from src.core.crypto.key_derivation import KeyDerivation
 from src.core.crypto.key_storage import KeyStorage
 from src.core.crypto.password_validator import PasswordValidator
-from src.core.crypto.placeholder import AES256Placeholder
+from src.core.crypto.legacy_encryption import LegacyXOREncryptionService
 from src.core.events import EventType, event_bus
 from src.core.state_manager import StateManager
 from src.database.db import Database
@@ -89,7 +89,7 @@ class TestAuthentication(unittest.TestCase):  #класс для тестиро�
     def test_change_master_password_reencrypts_entries(self):
         self.auth.register_master_password(self.password)
         old_key = self.auth.get_active_key()
-        crypto = AES256Placeholder()
+        crypto = LegacyXOREncryptionService()
 
         entry = VaultEntry(
             title="site",
@@ -134,7 +134,7 @@ class TestAuthentication(unittest.TestCase):  #класс для тестиро�
         )
         initial_auth.register_master_password(self.password)
         original_key = initial_auth.get_active_key()
-        crypto = AES256Placeholder()
+        crypto = LegacyXOREncryptionService()
 
         entry = VaultEntry(
             title="site",

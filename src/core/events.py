@@ -2,9 +2,6 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional
 
-from .audit import AuditLogger
-
-
 class EventType(Enum):
     ENTRY_ADDED = "entry_added"
     ENTRY_VIEWED = "entry_viewed"
