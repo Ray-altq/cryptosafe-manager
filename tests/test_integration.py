@@ -1,5 +1,6 @@
 import os
 import json
+import queue
 import shutil
 import sys
 import tempfile
@@ -619,6 +620,33 @@ class TestMainWindowIntegration(IntegrationTestCase):
         self.assertIn("entry_added", audit_events)
         self.assertIn("user_logged_out", audit_events)
 
+    def test_panic_mode_is_written_to_audit_before_keys_are_cleared(self):
+        db_path = self.make_db_path("panic-audit.db")
+        config = Config()
+        config.set("database.path", db_path)
+
+        auth_service = self.make_auth_service(db_path)
+        password = "ValidMasterPass!9X"
+        auth_service.register_master_password(password)
+        auth_service.logout()
+
+        patchers = self._patch_window_chrome()
+        for patcher in patchers:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+        with patch("src.gui.main_window.simpledialog.askstring", return_value=password), patch(
+            "src.gui.main_window.messagebox.showerror"
+        ), patch("src.gui.main_window.messagebox.showwarning"):
+            window = MainWindow()
+            self.addCleanup(window._on_close)
+
+        window._show_panic_notification = lambda method: None
+        window.activate_panic_mode("test")
+
+        audit_events = [log.event_type for log in window.db.get_audit_log_chain()]
+        self.assertIn("panic_mode_activated", audit_events)
+
 
 class TestMainWindowSearchAndFilter(IntegrationTestCase):
     def _make_window(self):
@@ -1142,6 +1170,20 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
         self.assertIn("Panic mode", labels)
         self.assertIn("Настройки", labels)
         self.assertIn("Выход", labels)
+
+    def test_tray_actions_are_scheduled_on_tk_thread(self):
+        window = MainWindow.__new__(MainWindow)
+        window.root = FakeRoot()
+        window._ui_task_queue = queue.Queue()
+        calls = []
+
+        window._run_on_ui_thread(lambda: calls.append("tray"))
+
+        self.assertEqual(calls, [])
+        self.assertEqual(window._ui_task_queue.qsize(), 1)
+        window._ui_task_pump_active = True
+        window._process_ui_task_queue()
+        self.assertEqual(calls, ["tray"])
 
     def test_system_tray_state_changes_for_lock_alert_and_crypto_operation(self):
         window = MainWindow.__new__(MainWindow)
@@ -2338,6 +2380,47 @@ class TestMainWindowSecurityState(IntegrationTestCase):
         self.assertTrue(summary["long_operation_progress"])
         self.assertEqual(summary["shortcuts"]["Ctrl+F"], "focus_search")
         self.assertEqual(summary["shortcuts"]["Ctrl+Shift+Esc"], "panic_mode")
+        self.assertEqual(summary["shortcuts"]["Ctrl+Alt+P"], "panic_mode_fallback")
+        self.assertEqual(summary["shortcuts"]["Ctrl+L"], "lock_vault")
+        self.assertEqual(summary["shortcuts"]["Ctrl+N"], "add_entry")
+
+    def test_keyboard_shortcuts_bind_panic_and_common_actions(self):
+        class BindingRoot(FakeRoot):
+            def __init__(self):
+                super().__init__()
+                self.bindings = []
+
+            def bind_all(self, sequence, callback, add=None):
+                self.bindings.append((sequence, callback, add))
+
+        window = MainWindow.__new__(MainWindow)
+        window.root = BindingRoot()
+        window.config = Config()
+        window._register_global_panic_hotkey = lambda: setattr(window, "_global_registration_attempted", True)
+
+        window._setup_activity_tracking()
+
+        sequences = [binding[0] for binding in window.root.bindings]
+        self.assertIn("<Control-Shift-Escape>", sequences)
+        self.assertIn("<Control-Shift-P>", sequences)
+        self.assertIn("<Control-Alt-p>", sequences)
+        self.assertIn("<Control-l>", sequences)
+        self.assertIn("<Control-u>", sequences)
+        self.assertIn("<Control-n>", sequences)
+        self.assertTrue(window._global_registration_attempted)
+
+    def test_keypress_fallback_handles_password_toggle_and_panic_hotkey(self):
+        window = MainWindow.__new__(MainWindow)
+        calls = []
+        window._toggle_password_visibility = lambda event=None: calls.append("toggle") or "break"
+        window._handle_shortcut = lambda action, event=None: calls.append(action) or "break"
+
+        ctrl_shift_p = type("Event", (), {"keysym": "P", "state": 0x0004 | 0x0001})()
+        ctrl_alt_p = type("Event", (), {"keysym": "p", "state": 0x0004 | 0x0008})()
+
+        self.assertEqual(window._handle_hotkey_keypress(ctrl_shift_p), "break")
+        self.assertEqual(window._handle_hotkey_keypress(ctrl_alt_p), "break")
+        self.assertEqual(calls, ["toggle", "panic_mode"])
 
     def test_prepare_dialog_applies_accessibility_metadata(self):
         window = MainWindow.__new__(MainWindow)
@@ -2361,6 +2444,7 @@ class TestMainWindowSecurityState(IntegrationTestCase):
         window._lock_vault = lambda show_dialog=True: setattr(window, "_locked_with", show_dialog)
         window._clear_sensitive_view_state = lambda: setattr(window, "_view_cleared", True)
         window._flush_audit_logger = lambda: setattr(window, "_audit_flushed", True)
+        window._show_panic_notification = lambda method: setattr(window, "_panic_notification_method", method)
         window.panic_mode = window._create_panic_mode()
         events = []
 
@@ -2372,8 +2456,35 @@ class TestMainWindowSecurityState(IntegrationTestCase):
         self.assertEqual(window._locked_with, False)
         self.assertTrue(window._view_cleared)
         self.assertEqual(window.root.window_state, "withdrawn")
+        self.assertEqual(window._panic_notification_method, "hotkey")
         self.assertEqual(events[-1].type, EventType.PANIC_MODE_ACTIVATED)
         self.assertNotIn("Secret!123", str(events[-1].data))
+
+    def test_panic_mode_closes_child_windows_before_hiding_root(self):
+        class ChildWindow:
+            def __init__(self):
+                self.destroyed = False
+                self.grab_released = False
+
+            def grab_release(self):
+                self.grab_released = True
+
+            def winfo_toplevel(self):
+                return self
+
+            def destroy(self):
+                self.destroyed = True
+
+        window = MainWindow.__new__(MainWindow)
+        window.root = FakeRoot()
+        child = ChildWindow()
+        window.root.winfo_children = lambda: [child]
+
+        window._hide_windows_for_panic()
+
+        self.assertTrue(child.grab_released)
+        self.assertTrue(child.destroyed)
+        self.assertEqual(window.root.window_state, "withdrawn")
 
     def test_recover_from_panic_mode_restores_window_and_unlock_flow(self):
         window = MainWindow.__new__(MainWindow)
@@ -2442,6 +2553,7 @@ class TestMainWindowSecurityState(IntegrationTestCase):
         window = MainWindow.__new__(MainWindow)
         window.auth_service = FakeAuthService()
         window.auth_service.authenticated = False
+        window.config = Config()
         window.key_manager = FakeKeyManager()
         window._initial_login_completed = True
         window._login_prompt_active = False
@@ -2452,6 +2564,42 @@ class TestMainWindowSecurityState(IntegrationTestCase):
 
         self.assertTrue(unlocked)
         self.assertTrue(window.auth_service.authenticated)
+        self.assertTrue(window._entries_reloaded)
+
+    def test_unlock_vault_button_forces_prompt_even_before_initial_login_flag(self):
+        window = MainWindow.__new__(MainWindow)
+        window.auth_service = FakeAuthService()
+        window.auth_service.authenticated = False
+        window.key_manager = FakeKeyManager()
+        window._initial_login_completed = False
+        window._login_prompt_active = False
+        window._require_login = lambda initial=False: setattr(window.auth_service, "authenticated", True)
+        window._load_entries = lambda: setattr(window, "_entries_reloaded", True)
+
+        unlocked = window._unlock_vault()
+
+        self.assertTrue(unlocked)
+        self.assertTrue(window._entries_reloaded)
+
+    def test_unlock_vault_recovers_from_panic_state(self):
+        window = MainWindow.__new__(MainWindow)
+        window.auth_service = FakeAuthService()
+        window.auth_service.authenticated = False
+        window.config = Config()
+        window.key_manager = FakeKeyManager()
+        window.root = FakeRoot()
+        window._initial_login_completed = True
+        window._login_prompt_active = False
+        window.panic_mode = window._create_panic_mode()
+        window.panic_mode.activated = True
+        window._require_login = lambda initial=False: setattr(window.auth_service, "authenticated", True)
+        window._load_entries = lambda: setattr(window, "_entries_reloaded", True)
+
+        unlocked = window._unlock_vault()
+
+        self.assertTrue(unlocked)
+        self.assertFalse(window.panic_mode.activated)
+        self.assertEqual(window.root.window_state, "normal")
         self.assertTrue(window._entries_reloaded)
 
     def test_focus_loss_lock_is_delayed_while_temporary_clipboard_is_active(self):

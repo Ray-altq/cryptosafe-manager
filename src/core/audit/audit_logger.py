@@ -269,6 +269,8 @@ class AuditLogger:
             "entry_deleted",
             "vault_locked",
             "vault_unlocked",
+            "panic_mode_activated",
+            "panic_mode_deactivated",
             "export_operation_completed",
             "import_operation_completed",
             "share_created",

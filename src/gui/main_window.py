@@ -51,6 +51,8 @@ from ..core.key_manager import KeyManager
 from ..core.security import (
     ActivityMonitor,
     ActivityMonitorConfig,
+    WindowsGlobalHotkeyService,
+    get_default_hotkeys,
     PanicMode,
     PanicModeConfig,
     SECURITY_PROFILES,
@@ -151,6 +153,13 @@ class MainWindow:
         self._tray_crypto_operation_active = False
         self._tray_animation_frame = 0
         self._panic_gesture_samples = []
+        self._panic_hotkey_poll_active = False
+        self._panic_hotkey_pressed = False
+        self._global_hotkey_service = None
+        self._global_hotkey_status = "not_registered"
+        self._ui_task_queue = queue.Queue()
+        self._ui_task_pump_active = False
+        self._tray_focus_grace_until = 0.0
         self._last_audit_verification_at = None
         self._audit_tampering_notified = False
         self._internal_modal_depth = 0
@@ -190,6 +199,7 @@ class MainWindow:
         self._create_toolbar()
         self._create_main_area()
         self._create_statusbar()
+        self._start_ui_task_pump()
         self._initialize_system_tray()
         self._run_startup_clipboard_recovery()
         self._setup_events()
@@ -243,9 +253,9 @@ class MainWindow:
         dialog = tk.Toplevel(self.root)
         self._prepare_dialog(dialog)
         dialog.title("Выбор vault")
-        dialog.geometry(self._get_screen_limited_geometry(980, 620))
+        dialog.geometry(self._get_screen_limited_geometry(1100, 720))
         if hasattr(dialog, "minsize"):
-            dialog.minsize(860, 560)
+            dialog.minsize(980, 640)
         dialog.transient(self.root)
         dialog.grab_set()
 
@@ -255,7 +265,7 @@ class MainWindow:
         ttk.Label(
             frame,
             text="Сначала выбирается файл vault, потом вводится мастер-пароль именно для него.",
-            wraplength=860,
+            wraplength=960,
             style="Muted.TLabel",
         ).pack(anchor="w", pady=(6, 14))
 
@@ -651,46 +661,76 @@ class MainWindow:
 
         file_menu = self._create_tk_menu(menubar, tearoff=0)
         menubar.add_cascade(label="Файл", menu=file_menu)
-        file_menu.add_command(label="Новый vault", command=self.new_database)
-        file_menu.add_command(label="Открыть vault", command=self.open_database)
-        file_menu.add_command(label="Резервная копия", command=self.backup)
-        file_menu.add_separator()
-        file_menu.add_command(label="Экспорт vault", command=self.show_export_dialog)
-        file_menu.add_command(label="Импорт vault", command=self.show_import_dialog)
-        file_menu.add_separator()
-        file_menu.add_command(label="Заблокировать", command=self._lock_vault)
-        file_menu.add_command(label="Разблокировать", command=self._unlock_vault)
-        file_menu.add_command(label="Выход", command=self._on_close)
+        self._populate_file_menu(file_menu)
 
         entry_menu = self._create_tk_menu(menubar, tearoff=0)
         menubar.add_cascade(label="Записи", menu=entry_menu)
-        entry_menu.add_command(label="Добавить", command=self.add_entry)
-        entry_menu.add_command(label="Изменить", command=self.edit_entry)
-        entry_menu.add_command(label="Удалить", command=self.delete_entry)
-        entry_menu.add_command(label="Показать пароль", command=self.show_selected_password)
-        entry_menu.add_command(label="Скопировать пароль", command=self.copy_selected_password)
-
-        entry_menu.add_command(label="Скопировать логин", command=self.copy_selected_username)
-        entry_menu.add_command(label="Скопировать запись", command=self.copy_selected_all)
-        entry_menu.add_separator()
-        entry_menu.add_command(label="Поделиться записью", command=self.show_share_dialog)
+        self._populate_entry_menu(entry_menu)
 
         security_menu = self._create_tk_menu(menubar, tearoff=0)
         menubar.add_cascade(label="Безопасность", menu=security_menu)
-        security_menu.add_command(label="Очистить буфер обмена", command=self.clear_clipboard_from_ui)
-        security_menu.add_command(label="Просмотр буфера обмена", command=self.show_clipboard_preview_dialog)
-        security_menu.add_command(label="Диагностика буфера обмена", command=self.show_clipboard_diagnostics)
-        security_menu.add_separator()
-        security_menu.add_command(label="Panic mode", command=lambda: self.activate_panic_mode("menu"))
-        security_menu.add_separator()
-        security_menu.add_command(label="Сменить мастер-пароль", command=self.change_master_password)
-        security_menu.add_command(label="Настройки", command=self.show_settings)
-        security_menu.add_command(label="Журнал аудита", command=self.show_logs)
-        security_menu.add_command(label="Обмен ключами / QR", command=self.show_key_exchange_dialog)
+        self._populate_security_menu(security_menu)
 
         help_menu = self._create_tk_menu(menubar, tearoff=0)
         menubar.add_cascade(label="Справка", menu=help_menu)
-        help_menu.add_command(label="О программе", command=self.show_about)
+        self._populate_help_menu(help_menu)
+        self._create_visible_menu_bar()
+
+    def _populate_file_menu(self, menu):
+        menu.add_command(label="Новый vault", command=self.new_database)
+        menu.add_command(label="Открыть vault", command=self.open_database)
+        menu.add_command(label="Резервная копия", command=self.backup)
+        menu.add_separator()
+        menu.add_command(label="Экспорт vault", command=self.show_export_dialog)
+        menu.add_command(label="Импорт vault", command=self.show_import_dialog)
+        menu.add_separator()
+        menu.add_command(label="Заблокировать", command=self._lock_vault)
+        menu.add_command(label="Разблокировать", command=self._unlock_vault)
+        menu.add_command(label="Выход", command=self._on_close)
+
+    def _populate_entry_menu(self, menu):
+        menu.add_command(label="Добавить", command=self.add_entry)
+        menu.add_command(label="Изменить", command=self.edit_entry)
+        menu.add_command(label="Удалить", command=self.delete_entry)
+        menu.add_command(label="Показать пароль", command=self.show_selected_password)
+        menu.add_command(label="Скопировать пароль", command=self.copy_selected_password)
+        menu.add_command(label="Скопировать логин", command=self.copy_selected_username)
+        menu.add_command(label="Скопировать запись", command=self.copy_selected_all)
+        menu.add_separator()
+        menu.add_command(label="Поделиться записью", command=self.show_share_dialog)
+
+    def _populate_security_menu(self, menu):
+        menu.add_command(label="Очистить буфер обмена", command=self.clear_clipboard_from_ui)
+        menu.add_command(label="Просмотр буфера обмена", command=self.show_clipboard_preview_dialog)
+        menu.add_command(label="Диагностика буфера обмена", command=self.show_clipboard_diagnostics)
+        menu.add_separator()
+        menu.add_command(label="Panic mode", command=lambda: self.activate_panic_mode("menu"))
+        menu.add_separator()
+        menu.add_command(label="Сменить мастер-пароль", command=self.change_master_password)
+        menu.add_command(label="Настройки", command=self.show_settings)
+        menu.add_command(label="Журнал аудита", command=self.show_logs)
+        menu.add_command(label="Обмен ключами / QR", command=self.show_key_exchange_dialog)
+
+    def _populate_help_menu(self, menu):
+        menu.add_command(label="О программе", command=self.show_about)
+
+    def _create_visible_menu_bar(self):
+        menu_bar = ttk.Frame(self.root, style="TopBar.TFrame")
+        menu_bar.pack(side=tk.TOP, fill=tk.X, padx=18, pady=(10, 0), ipady=2)
+        menu_specs = [
+            ("Файл", self._populate_file_menu),
+            ("Записи", self._populate_entry_menu),
+            ("Безопасность", self._populate_security_menu),
+            ("Справка", self._populate_help_menu),
+        ]
+        self._visible_menu_buttons = []
+        for label, populate in menu_specs:
+            button = ttk.Menubutton(menu_bar, text=label, style="Ghost.TButton")
+            menu = self._create_tk_menu(button, tearoff=0)
+            populate(menu)
+            button.configure(menu=menu)
+            button.pack(side=tk.LEFT, padx=(0, 6), pady=4)
+            self._visible_menu_buttons.append(button)
 
     def _create_toolbar(self):
         toolbar = ttk.Frame(self.root, style="App.TFrame")
@@ -869,27 +909,129 @@ class MainWindow:
     def _setup_activity_tracking(self):
         for sequence in ("<Any-KeyPress>", "<Any-ButtonPress>", "<Motion>"):
             self.root.bind_all(sequence, self._on_activity, add="+")
+        self.root.bind_all("<KeyPress>", self._handle_hotkey_keypress, add="+")
         self.root.bind("<FocusIn>", self._on_focus_in, add="+")
         self.root.bind("<FocusOut>", self._on_focus_out, add="+")
         self.root.bind("<Unmap>", self._on_unmap, add="+")
         self.root.bind("<Map>", self._on_map, add="+")
-        self.root.bind_all("<Control-f>", self._focus_search, add="+")
-        self.root.bind_all("<Control-F>", self._focus_search, add="+")
-        self.root.bind_all("<Control-Shift-P>", self._toggle_password_visibility, add="+")
-        self.root.bind_all("<Control-Shift-p>", self._toggle_password_visibility, add="+")
-        self.root.bind_all("<Control-Shift-Escape>", lambda _event: self.activate_panic_mode("hotkey"), add="+")
+        self._register_keyboard_shortcuts()
+        self._register_global_panic_hotkey()
+        self._start_windows_panic_hotkey_poll()
         self.root.bind_all("<Motion>", self._record_panic_gesture, add="+")
 
-    def _get_keyboard_shortcuts(self) -> dict[str, str]:
-        return {
-            "Ctrl+F": "focus_search",
-            "Enter": "confirm_dialog_or_search",
-            "Escape": "cancel_dialog_or_clear_search",
-            "ArrowUp/ArrowDown": "navigate_tables_and_lists",
-            "Tab/Shift+Tab": "move_between_controls",
-            "Ctrl+Shift+P": "toggle_password_visibility",
-            "Ctrl+Shift+Esc": "panic_mode",
+    def _register_keyboard_shortcuts(self) -> None:
+        for binding in get_default_hotkeys().values():
+            if binding.action == "toggle_passwords":
+                continue
+            self.root.bind_all(binding.tk_sequence, lambda event, action=binding.action: self._handle_shortcut(action, event), add="+")
+        self.root.bind_all("<Control-Shift-P>", self._toggle_password_visibility, add="+")
+        self.root.bind_all("<Control-Shift-p>", self._toggle_password_visibility, add="+")
+        self.root.bind_all("<Control-Alt-p>", lambda event: self._handle_shortcut("panic_mode", event), add="+")
+        self.root.bind_all("<Control-Alt-P>", lambda event: self._handle_shortcut("panic_mode", event), add="+")
+
+    def _register_global_panic_hotkey(self) -> None:
+        if getattr(self, "_global_hotkey_service", None) is not None:
+            self._global_hotkey_service.stop()
+        service = WindowsGlobalHotkeyService(self.root, self._handle_global_hotkey)
+        self._global_hotkey_service = service
+        panic_hotkey = self.config.get("security.panic_hotkey", "Ctrl+Shift+Esc")
+        if service.register(panic_hotkey, "panic_mode"):
+            self._global_hotkey_status = f"registered:{panic_hotkey}"
+            return
+        fallback_hotkey = "Ctrl+Alt+P"
+        if panic_hotkey != fallback_hotkey and service.register(fallback_hotkey, "panic_mode"):
+            self._global_hotkey_status = f"fallback:{fallback_hotkey}"
+            return
+        self._global_hotkey_status = "not_registered"
+
+    def _handle_global_hotkey(self, action: str) -> None:
+        if action == "panic_mode":
+            self.activate_panic_mode("global_hotkey")
+
+    def _handle_hotkey_keypress(self, event=None):
+        key = str(getattr(event, "keysym", "") or "").lower()
+        state = int(getattr(event, "state", 0) or 0)
+        ctrl = bool(state & 0x0004)
+        shift = bool(state & 0x0001)
+        alt = bool(state & 0x0008 or state & 0x0080 or state & 0x20000)
+        if ctrl and shift and key == "p":
+            return self._toggle_password_visibility(event)
+        if ctrl and shift and key in {"escape", "esc"}:
+            return self._handle_shortcut("panic_mode", event)
+        if ctrl and alt and key == "p":
+            return self._handle_shortcut("panic_mode", event)
+        return None
+
+    def _handle_shortcut(self, action: str, event=None):
+        if action in {"add_entry", "edit_entry", "delete_entry"} and self._is_text_input_focused():
+            return None
+        handlers = {
+            "panic_mode": lambda: self.activate_panic_mode("hotkey"),
+            "lock_vault": lambda: self._lock_vault(show_dialog=False),
+            "unlock_vault": self._unlock_vault,
+            "focus_search": self._focus_search,
+            "add_entry": self.add_entry,
+            "edit_entry": self.edit_entry,
+            "delete_entry": self.delete_entry,
+            "clear_clipboard": self.clear_clipboard_from_ui,
+            "open_settings": self.show_settings,
         }
+        handler = handlers.get(action)
+        if handler is None:
+            return None
+        handler()
+        return "break"
+
+    def _is_text_input_focused(self) -> bool:
+        try:
+            focused = self.root.focus_get()
+        except Exception:
+            return False
+        input_types = (tk.Entry, tk.Text, ttk.Entry, ttk.Spinbox, ttk.Combobox)
+        return isinstance(focused, input_types)
+
+    def _start_windows_panic_hotkey_poll(self) -> None:
+        if os.name != "nt" or getattr(self, "_panic_hotkey_poll_active", False):
+            return
+        self._panic_hotkey_poll_active = True
+        self._poll_windows_panic_hotkey()
+
+    def _poll_windows_panic_hotkey(self) -> None:
+        if not getattr(self, "_panic_hotkey_poll_active", False):
+            return
+        try:
+            user32 = ctypes.windll.user32
+            ctrl_down = bool(user32.GetAsyncKeyState(0x11) & 0x8000)
+            shift_down = bool(user32.GetAsyncKeyState(0x10) & 0x8000)
+            alt_down = bool(user32.GetAsyncKeyState(0x12) & 0x8000)
+            escape_down = bool(user32.GetAsyncKeyState(0x1B) & 0x8000)
+            p_down = bool(user32.GetAsyncKeyState(ord("P")) & 0x8000)
+            pressed = (ctrl_down and shift_down and escape_down) or (ctrl_down and alt_down and p_down)
+            if pressed and not getattr(self, "_panic_hotkey_pressed", False):
+                self._panic_hotkey_pressed = True
+                self.activate_panic_mode("windows_hotkey")
+            elif not pressed:
+                self._panic_hotkey_pressed = False
+        except Exception:
+            self._panic_hotkey_poll_active = False
+            return
+        try:
+            self.root.after(100, self._poll_windows_panic_hotkey)
+        except Exception:
+            self._panic_hotkey_poll_active = False
+
+    def _get_keyboard_shortcuts(self) -> dict[str, str]:
+        shortcuts = {binding.label: binding.action for binding in get_default_hotkeys().values()}
+        shortcuts.update(
+            {
+                "Ctrl+Alt+P": "panic_mode_fallback",
+                "Enter": "confirm_dialog_or_search",
+                "Escape": "cancel_dialog_or_clear_search",
+                "ArrowUp/ArrowDown": "navigate_tables_and_lists",
+                "Tab/Shift+Tab": "move_between_controls",
+            }
+        )
+        return shortcuts
 
     def _get_accessibility_summary(self) -> dict[str, object]:
         return {
@@ -932,10 +1074,40 @@ class MainWindow:
         return panic
 
     def _hide_windows_for_panic(self):
+        for child in self._get_panic_child_windows():
+            try:
+                child.grab_release()
+            except Exception:
+                pass
+            try:
+                child.destroy()
+                continue
+            except Exception:
+                pass
+            try:
+                child.withdraw()
+            except Exception:
+                pass
         try:
             self.root.withdraw()
         except tk.TclError:
             pass
+
+    def _get_panic_child_windows(self):
+        try:
+            children = list(self.root.winfo_children())
+        except Exception:
+            return []
+        windows = []
+        for child in children:
+            if child is self.root:
+                continue
+            try:
+                if isinstance(child, tk.Toplevel) or child.winfo_toplevel() is child:
+                    windows.append(child)
+            except Exception:
+                continue
+        return windows
 
     def _record_panic_gesture(self, event=None):
         if not bool(self.config.get("security.panic_gesture_enabled", True)):
@@ -952,29 +1124,32 @@ class MainWindow:
         now = time.monotonic()
         samples = list(getattr(self, "_panic_gesture_samples", []))
         samples.append((now, int(x_position), int(y_position)))
-        samples = [sample for sample in samples if now - sample[0] <= 1.2][-10:]
+        samples = [sample for sample in samples if now - sample[0] <= 1.5][-12:]
         self._panic_gesture_samples = samples
         if self._is_panic_shake_gesture(samples):
             self._panic_gesture_samples = []
             self.activate_panic_mode("mouse_gesture")
 
     def _is_panic_shake_gesture(self, samples: list[tuple[float, int, int]]) -> bool:
-        if len(samples) < 6:
+        if len(samples) < 5:
             return False
         x_values = [sample[1] for sample in samples]
-        if max(x_values) - min(x_values) < 120:
+        y_values = [sample[2] for sample in samples]
+        if max(max(x_values) - min(x_values), max(y_values) - min(y_values)) < 90:
             return False
         directions = []
-        previous_x = x_values[0]
-        for current_x in x_values[1:]:
-            delta = current_x - previous_x
-            previous_x = current_x
+        previous_x, previous_y = x_values[0], y_values[0]
+        for current_x, current_y in zip(x_values[1:], y_values[1:]):
+            delta_x = current_x - previous_x
+            delta_y = current_y - previous_y
+            previous_x, previous_y = current_x, current_y
+            delta = delta_x if abs(delta_x) >= abs(delta_y) else delta_y
             if abs(delta) >= 35:
                 directions.append(1 if delta > 0 else -1)
-        if len(directions) < 5:
+        if len(directions) < 4:
             return False
         reversals = sum(1 for previous, current in zip(directions, directions[1:]) if previous != current)
-        return reversals >= 4
+        return reversals >= 3
 
     def _execute_panic_stealth_actions(self):
         if bool(self.config.get("security.panic_fake_error", True)):
@@ -1000,6 +1175,10 @@ class MainWindow:
     def activate_panic_mode(self, method: str = "manual"):
         if not hasattr(self, "panic_mode"):
             self.panic_mode = self._create_panic_mode()
+        if getattr(self.panic_mode, "activated", False):
+            result = self.panic_mode.activate(method=method)
+            self._show_panic_notification(method)
+            return result
         result = self.panic_mode.activate(
             method=method,
             details={
@@ -1007,10 +1186,41 @@ class MainWindow:
                 "window_state": self._safe_root_state(),
             },
         )
+        self._last_panic_result = result
         self._flush_audit_logger()
+        if result.activated and not self.config.get("security.panic_stealth_mode", False):
+            self._show_panic_notification(method)
         if self.config.get("security.panic_close_application", False):
             self._on_close()
         return result
+
+    def _show_panic_notification(self, method: str) -> None:
+        try:
+            self.root.deiconify()
+            self.root.lift()
+        except Exception:
+            pass
+        status = getattr(self, "_global_hotkey_status", "not_registered")
+        if status.startswith("registered:"):
+            hotkey_text = status.split(":", 1)[1]
+        elif status.startswith("fallback:"):
+            hotkey_text = status.split(":", 1)[1]
+        else:
+            hotkey_text = "Ctrl+Shift+Esc внутри приложения"
+        message = (
+            "Panic mode сработал.\n\n"
+            "- vault заблокирован;\n"
+            "- clipboard очищен;\n"
+            "- открытые окна закрыты;\n"
+            "- расшифрованное состояние очищено.\n\n"
+            f"Способ запуска: {method}.\n"
+            f"Рабочий panic-hotkey: {hotkey_text}.\n\n"
+            "Чтобы продолжить работу, нажмите Unlock и введите мастер-пароль."
+        )
+        try:
+            self._show_warning("Panic mode", message)
+        except Exception:
+            pass
 
     def recover_from_panic_mode(self):
         if hasattr(self, "panic_mode"):
@@ -1107,16 +1317,54 @@ class MainWindow:
             self._system_tray_icon = None
 
     def _build_system_tray_menu(self, pystray_module):
+        def tray_action(callback):
+            def run(_icon, _item):
+                self._tray_focus_grace_until = time.monotonic() + 5.0
+                self._run_on_ui_thread(callback)
+
+            return run
+
         return pystray_module.Menu(
-            pystray_module.MenuItem("Показать окно", lambda icon, item: self._restore_from_system_tray()),
-            pystray_module.MenuItem("Заблокировать vault", lambda icon, item: self._lock_vault(show_dialog=False)),
-            pystray_module.MenuItem("Разблокировать vault", lambda icon, item: self._unlock_vault()),
-            pystray_module.MenuItem("Quick search", lambda icon, item: self._show_tray_quick_search()),
-            pystray_module.MenuItem("Очистить clipboard", lambda icon, item: self.clear_clipboard_from_ui()),
-            pystray_module.MenuItem("Panic mode", lambda icon, item: self.activate_panic_mode("tray")),
-            pystray_module.MenuItem("Настройки", lambda icon, item: self.show_settings()),
-            pystray_module.MenuItem("Выход", lambda icon, item: self._on_close()),
+            pystray_module.MenuItem("Показать окно", tray_action(self._restore_from_system_tray)),
+            pystray_module.MenuItem("Заблокировать vault", tray_action(lambda: self._lock_vault(show_dialog=False))),
+            pystray_module.MenuItem("Разблокировать vault", tray_action(self._unlock_vault)),
+            pystray_module.MenuItem("Quick search", tray_action(self._show_tray_quick_search)),
+            pystray_module.MenuItem("Очистить clipboard", tray_action(self.clear_clipboard_from_ui)),
+            pystray_module.MenuItem("Panic mode", tray_action(lambda: self.activate_panic_mode("tray"))),
+            pystray_module.MenuItem("Настройки", tray_action(self.show_settings)),
+            pystray_module.MenuItem("Выход", tray_action(self._on_close)),
         )
+
+    def _run_on_ui_thread(self, callback):
+        if not hasattr(self, "_ui_task_queue"):
+            callback()
+            return
+        self._ui_task_queue.put(callback)
+
+    def _start_ui_task_pump(self):
+        if getattr(self, "_ui_task_pump_active", False):
+            return
+        self._ui_task_pump_active = True
+        self._process_ui_task_queue()
+
+    def _process_ui_task_queue(self):
+        if not getattr(self, "_ui_task_pump_active", False):
+            return
+        task_queue = getattr(self, "_ui_task_queue", None)
+        if task_queue is not None:
+            while True:
+                try:
+                    callback = task_queue.get_nowait()
+                except queue.Empty:
+                    break
+                try:
+                    callback()
+                except Exception:
+                    pass
+        try:
+            self.root.after(50, self._process_ui_task_queue)
+        except Exception:
+            self._ui_task_pump_active = False
 
     def _get_system_tray_menu_labels(self) -> list[str]:
         return [
@@ -1566,7 +1814,8 @@ class MainWindow:
             self.state.set_application_active(True)
             return
         self.state.set_application_active(False)
-        self.root.after(150, self._lock_if_application_inactive)
+        delay_ms = 1500 if getattr(self, "_system_tray_icon", None) is not None else 150
+        self.root.after(delay_ms, self._lock_if_application_inactive)
 
     def _on_unmap(self, _event=None):
         self.state.set_application_active(False)
@@ -1582,6 +1831,12 @@ class MainWindow:
     def _lock_if_application_inactive(self):
         if self._is_internal_modal_active():
             self.state.set_application_active(True)
+            return
+        if time.monotonic() < getattr(self, "_tray_focus_grace_until", 0.0):
+            try:
+                self.root.after(500, self._lock_if_application_inactive)
+            except Exception:
+                pass
             return
         try:
             app_has_focus = self.root.focus_displayof() is not None
@@ -1611,10 +1866,10 @@ class MainWindow:
         if self.config.get("security.lock_on_minimize", True) and self.auth_service.is_authenticated():
             self._lock_vault(show_dialog=False)
 
-    def _prompt_unlock_if_needed(self):
+    def _prompt_unlock_if_needed(self, *, force: bool = False):
         if self._login_prompt_active:
             return
-        if not getattr(self, "_initial_login_completed", False):
+        if not force and not getattr(self, "_initial_login_completed", False):
             return
         if not self.auth_service.is_initialized():
             return
@@ -4554,6 +4809,8 @@ class MainWindow:
             "audit_log_protection_triggered": "Срабатывание защиты журнала аудита",
             "audit_verification_passed": "Проверка аудита пройдена",
             "audit_verification_failed": "Проверка аудита не пройдена",
+            "panic_mode_activated": "Panic mode включён",
+            "panic_mode_deactivated": "Panic mode восстановлен",
         }
         return action_labels.get(str(action or "").strip(), str(action or ""))
 
@@ -5595,7 +5852,7 @@ class MainWindow:
         ttk.Combobox(
             filter_frame,
             textvariable=event_type_var,
-            values=["all", "clipboard_copied", "clipboard_cleared", "clipboard_error", "entry_added", "entry_updated", "entry_deleted", "user_logged_in", "user_login_failed", "settings_changed", "search_performed", "audit_verification_failed"],
+            values=["all", "clipboard_copied", "clipboard_cleared", "clipboard_error", "entry_added", "entry_updated", "entry_deleted", "user_logged_in", "user_login_failed", "settings_changed", "search_performed", "panic_mode_activated", "panic_mode_deactivated", "audit_verification_failed"],
             width=24,
             state="readonly",
         ).grid(row=0, column=3, padx=4, pady=4, sticky="we")
@@ -5876,9 +6133,10 @@ class MainWindow:
         dialog = tk.Toplevel(self.root)
         self._prepare_dialog(dialog)
         dialog.title("Настройки")
-        dialog.geometry("620x760")
+        dialog.geometry(self._get_screen_limited_geometry(820, 760))
         if hasattr(dialog, "minsize"):
-            dialog.minsize(560, 680)
+            dialog.minsize(720, 640)
+        content_parent = self._create_scrollable_dialog_body(dialog)
 
         clipboard_settings = (
             self.clipboard_service.get_settings()
@@ -5929,48 +6187,48 @@ class MainWindow:
         lock_on_focus_loss = tk.BooleanVar(value=self.config.get("security.lock_on_focus_loss", True))
         lock_on_minimize = tk.BooleanVar(value=self.config.get("security.lock_on_minimize", True))
 
-        ttk.Label(dialog, text="Профиль безопасности").pack(anchor=tk.W, padx=10, pady=(12, 2))
+        ttk.Label(content_parent, text="Профиль безопасности").pack(anchor=tk.W, padx=10, pady=(12, 2))
         security_profile_box = ttk.Combobox(
-            dialog,
+            content_parent,
             textvariable=security_profile,
             state="readonly",
             values=list(SECURITY_PROFILES.keys()),
         )
         security_profile_box.pack(fill=tk.X, padx=10, pady=2)
-        ttk.Label(dialog, textvariable=security_profile_summary, wraplength=420, justify=tk.LEFT).pack(
+        ttk.Label(content_parent, textvariable=security_profile_summary, wraplength=420, justify=tk.LEFT).pack(
             anchor=tk.W, padx=10, pady=(2, 8)
         )
 
-        ttk.Label(dialog, text="Профиль буфера обмена").pack(anchor=tk.W, padx=10, pady=(12, 2))
+        ttk.Label(content_parent, text="Профиль буфера обмена").pack(anchor=tk.W, padx=10, pady=(12, 2))
         clipboard_preset_box = ttk.Combobox(
-            dialog,
+            content_parent,
             textvariable=clipboard_preset,
             state="readonly",
             values=list(self._get_clipboard_preset_labels().values()),
         )
         clipboard_preset_box.pack(fill=tk.X, padx=10, pady=2)
 
-        ttk.Label(dialog, text="Таймаут буфера обмена (сек)").pack(anchor=tk.W, padx=10, pady=(12, 2))
-        ttk.Spinbox(dialog, from_=5, to=300, textvariable=clipboard_timeout).pack(fill=tk.X, padx=10, pady=2)
+        ttk.Label(content_parent, text="Таймаут буфера обмена (сек)").pack(anchor=tk.W, padx=10, pady=(12, 2))
+        ttk.Spinbox(content_parent, from_=5, to=300, textvariable=clipboard_timeout).pack(fill=tk.X, padx=10, pady=2)
 
         ttk.Checkbutton(
-            dialog,
+            content_parent,
             text="Показывать уведомления буфера обмена",
             variable=clipboard_notifications_enabled,
         ).pack(anchor=tk.W, padx=10, pady=(8, 2))
 
-        ttk.Label(dialog, text="Уровень защиты буфера обмена").pack(anchor=tk.W, padx=10, pady=(12, 2))
+        ttk.Label(content_parent, text="Уровень защиты буфера обмена").pack(anchor=tk.W, padx=10, pady=(12, 2))
         clipboard_security_level_box = ttk.Combobox(
-            dialog,
+            content_parent,
             textvariable=clipboard_security_level,
             state="readonly",
             values=["basic", "advanced", "paranoid"],
         )
         clipboard_security_level_box.pack(fill=tk.X, padx=10, pady=2)
 
-        ttk.Label(dialog, text="Режим доставки clipboard").pack(anchor=tk.W, padx=10, pady=(12, 2))
+        ttk.Label(content_parent, text="Режим доставки clipboard").pack(anchor=tk.W, padx=10, pady=(12, 2))
         clipboard_delivery_mode_box = ttk.Combobox(
-            dialog,
+            content_parent,
             textvariable=clipboard_delivery_mode,
             state="readonly",
             values=["system", "memory_only"],
@@ -5978,47 +6236,75 @@ class MainWindow:
         clipboard_delivery_mode_box.pack(fill=tk.X, padx=10, pady=2)
 
         ttk.Checkbutton(
-            dialog,
+            content_parent,
             text="Блокировать будущие копирования при подозрительной активности",
             variable=clipboard_blocked_on_suspicious,
         ).pack(anchor=tk.W, padx=10, pady=(8, 2))
 
-        ttk.Label(dialog, text="Разрешённые приложения для clipboard").pack(anchor=tk.W, padx=10, pady=(12, 2))
-        ttk.Entry(dialog, textvariable=clipboard_allowed_applications).pack(fill=tk.X, padx=10, pady=2)
+        ttk.Label(content_parent, text="Разрешённые приложения для clipboard").pack(anchor=tk.W, padx=10, pady=(12, 2))
+        ttk.Entry(content_parent, textvariable=clipboard_allowed_applications).pack(fill=tk.X, padx=10, pady=2)
         ttk.Label(
-            dialog,
+            content_parent,
             text="Укажите имена процессов через запятую, например: explorer, code, keepassxc",
             wraplength=420,
             justify=tk.LEFT,
         ).pack(anchor=tk.W, padx=10, pady=(2, 4))
 
-        ttk.Label(dialog, textvariable=clipboard_summary, wraplength=420, justify=tk.LEFT).pack(
+        ttk.Label(content_parent, textvariable=clipboard_summary, wraplength=420, justify=tk.LEFT).pack(
             anchor=tk.W, padx=10, pady=(4, 8)
         )
 
-        ttk.Label(dialog, text="Таймаут авто-блокировки (мин)").pack(anchor=tk.W, padx=10, pady=(12, 2))
-        ttk.Spinbox(dialog, from_=1, to=120, textvariable=auto_lock_minutes).pack(fill=tk.X, padx=10, pady=2)
+        ttk.Label(content_parent, text="Таймаут авто-блокировки (мин)").pack(anchor=tk.W, padx=10, pady=(12, 2))
+        ttk.Spinbox(content_parent, from_=1, to=120, textvariable=auto_lock_minutes).pack(fill=tk.X, padx=10, pady=2)
 
-        ttk.Label(dialog, text="Таймаут кэша ключа (мин)").pack(anchor=tk.W, padx=10, pady=(12, 2))
-        ttk.Spinbox(dialog, from_=1, to=60, textvariable=key_cache_timeout_minutes).pack(fill=tk.X, padx=10, pady=2)
+        ttk.Label(content_parent, text="Таймаут кэша ключа (мин)").pack(anchor=tk.W, padx=10, pady=(12, 2))
+        ttk.Spinbox(content_parent, from_=1, to=60, textvariable=key_cache_timeout_minutes).pack(fill=tk.X, padx=10, pady=2)
 
-        ttk.Label(dialog, text="Минимальная длина мастер-пароля").pack(anchor=tk.W, padx=10, pady=(12, 2))
-        ttk.Spinbox(dialog, from_=8, to=64, textvariable=min_password_length).pack(fill=tk.X, padx=10, pady=2)
+        ttk.Label(content_parent, text="Минимальная длина мастер-пароля").pack(anchor=tk.W, padx=10, pady=(12, 2))
+        ttk.Spinbox(content_parent, from_=8, to=64, textvariable=min_password_length).pack(fill=tk.X, padx=10, pady=2)
 
         ttk.Checkbutton(
-            dialog,
+            content_parent,
             text="Блокировать при потере фокуса",
             variable=lock_on_focus_loss,
         ).pack(
             anchor=tk.W, padx=10, pady=(12, 2)
         )
         ttk.Checkbutton(
-            dialog,
+            content_parent,
             text="Блокировать при сворачивании",
             variable=lock_on_minimize,
         ).pack(
             anchor=tk.W, padx=10, pady=2
         )
+
+        ttk.Label(content_parent, text="Горячие клавиши").pack(anchor=tk.W, padx=10, pady=(18, 2))
+        hotkey_status = getattr(self, "_global_hotkey_status", "not_registered")
+        descriptions = {
+            "panic_mode": "экстренно заблокировать vault",
+            "lock_vault": "заблокировать vault",
+            "unlock_vault": "разблокировать vault",
+            "focus_search": "перейти к поиску",
+            "add_entry": "добавить запись",
+            "edit_entry": "изменить выбранную запись",
+            "delete_entry": "удалить выбранную запись",
+            "toggle_passwords": "показать или скрыть пароли",
+            "clear_clipboard": "очистить clipboard",
+            "open_settings": "открыть настройки",
+        }
+        hotkey_lines = []
+        for binding in get_default_hotkeys().values():
+            scope = "глобально" if binding.global_hotkey else "внутри приложения"
+            hotkey_lines.append(f"{binding.label} — {descriptions.get(binding.action, binding.description)} ({scope})")
+        hotkey_lines.append("Ctrl+Alt+P — резервный panic-hotkey, если Windows забирает Ctrl+Shift+Esc")
+        hotkey_lines.append(f"Статус глобального panic-hotkey: {hotkey_status}")
+        ttk.Label(
+            content_parent,
+            text="\n".join(hotkey_lines),
+            wraplength=680,
+            justify=tk.LEFT,
+            style="Muted.TLabel",
+        ).pack(anchor=tk.W, fill=tk.X, padx=10, pady=(2, 10))
 
         def refresh_clipboard_summary(*_args):
             detected_preset = self._detect_clipboard_preset(
@@ -6163,6 +6449,7 @@ class MainWindow:
             self.config.set("security.panic_stealth_mode", validation.settings["panic_stealth_mode"])
             self.activity_monitor = self._create_activity_monitor()
             self.panic_mode = self._create_panic_mode()
+            self._register_global_panic_hotkey()
             self._persist_runtime_settings()
             event_bus.publish(
                 Event(
@@ -6190,8 +6477,9 @@ class MainWindow:
             self._show_info("Настройки", "Настройки сохранены.", parent=dialog)
             dialog.destroy()
 
-        ttk.Button(dialog, text="Сохранить", command=save).pack(pady=16)
-        ttk.Button(dialog, text="Сменить мастер-пароль", command=self.change_master_password).pack(pady=2)
+        button_bar = self._create_dialog_button_bar(dialog)
+        ttk.Button(button_bar, text="Сменить мастер-пароль", style="Ghost.TButton", command=self.change_master_password).pack(side=tk.LEFT)
+        ttk.Button(button_bar, text="Сохранить", style="Accent.TButton", command=save).pack(side=tk.RIGHT)
 
     def change_master_password(self):
         current_password = self._ask_string("Смена пароля", "Текущий мастер-пароль:", show="*")
@@ -6233,11 +6521,18 @@ class MainWindow:
                 self._load_entries()
 
     def _unlock_vault(self):
+        if hasattr(self, "panic_mode") and getattr(self.panic_mode, "activated", False):
+            self.panic_mode.reset_for_recovery()
+            try:
+                self.root.deiconify()
+                self.root.lift()
+            except Exception:
+                pass
         if self.auth_service.is_authenticated():
             self._load_entries()
             self._set_status("Разблокировано")
             return True
-        self._prompt_unlock_if_needed()
+        self._prompt_unlock_if_needed(force=True)
         return self.auth_service.is_authenticated()
 
     def _on_close(self):
@@ -6254,6 +6549,10 @@ class MainWindow:
         self._clear_system_clipboard()
         self._handle_clipboard_clear_failure()
         self._clear_clipboard_recovery_pending()
+        self._ui_task_pump_active = False
+        self._panic_hotkey_poll_active = False
+        if getattr(self, "_global_hotkey_service", None) is not None:
+            self._global_hotkey_service.stop()
         self._shutdown_system_tray()
         try:
             self.audit_logger.close()

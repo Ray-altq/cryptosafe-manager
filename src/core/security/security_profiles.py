@@ -2,6 +2,8 @@ import copy
 from dataclasses import dataclass
 from typing import Any
 
+from .hotkeys import parse_windows_hotkey
+
 
 SECURITY_PROFILE_ORDER = ("standard", "enhanced", "paranoid")
 
@@ -159,6 +161,12 @@ def validate_security_settings(settings: dict[str, Any]) -> SecuritySettingsVali
 
     normalized["panic_decoy_command"] = str(normalized.get("panic_decoy_command", "") or "").strip()
     normalized["panic_redirect_url"] = str(normalized.get("panic_redirect_url", "") or "").strip()
+    normalized["panic_hotkey"] = str(normalized.get("panic_hotkey", "Ctrl+Shift+Esc") or "Ctrl+Shift+Esc").strip()
+    try:
+        parse_windows_hotkey(normalized["panic_hotkey"])
+    except ValueError:
+        errors.append("Invalid panic hotkey")
+        normalized["panic_hotkey"] = "Ctrl+Shift+Esc"
 
     if clipboard_level == "paranoid" and delivery_mode != "memory_only":
         errors.append("Paranoid clipboard requires memory_only delivery")

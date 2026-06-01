@@ -23,7 +23,9 @@ from src.core.security import (
     SecureBuffer,
     StackFrameGuard,
     constant_time_compare,
+    get_default_hotkeys,
     get_platform_security_report,
+    parse_windows_hotkey,
     secure_string_compare,
 )
 from src.core.security.memory_dump_probe import derive_security_dump_secret
@@ -112,6 +114,23 @@ class TestSecurityHardeningCore(unittest.TestCase):
         self.assertEqual(events[0].type, EventType.PANIC_MODE_ACTIVATED)
         self.assertEqual(events[0].data["details"]["password"], "[redacted]")
         self.assertNotIn("Secret!123", str(events[0].data))
+
+    def test_default_hotkeys_cover_panic_and_common_actions(self):
+        hotkeys = get_default_hotkeys()
+
+        self.assertEqual(hotkeys["panic_mode"].label, "Ctrl+Shift+Esc")
+        self.assertTrue(hotkeys["panic_mode"].global_hotkey)
+        self.assertEqual(hotkeys["lock_vault"].tk_sequence, "<Control-l>")
+        self.assertEqual(hotkeys["unlock_vault"].tk_sequence, "<Control-u>")
+        self.assertEqual(hotkeys["add_entry"].label, "Ctrl+N")
+        self.assertEqual(hotkeys["clear_clipboard"].label, "Ctrl+Shift+C")
+
+    def test_windows_hotkey_parser_accepts_supported_windows_combinations(self):
+        modifiers, virtual_key = parse_windows_hotkey("Ctrl+Shift+Esc")
+
+        self.assertEqual(modifiers, 0x0002 | 0x0004)
+        self.assertEqual(virtual_key, 0x1B)
+        self.assertEqual(parse_windows_hotkey("Ctrl+Alt+P"), (0x0002 | 0x0001, ord("P")))
 
     def test_timing_attack_measurement_keeps_compare_paths_close(self):
         rounds = 5000

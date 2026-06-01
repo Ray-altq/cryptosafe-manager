@@ -41,6 +41,9 @@ class PanicMode:
             self.activated = True
 
         result = PanicModeResult(activated=True, method=method)
+        # Publish before handlers: panic handlers wipe keys and lock the vault,
+        # so audit must receive the activation while signing key is still alive.
+        self._publish_activation(method, details or {}, result)
         for name, handler in list(self._handlers):
             try:
                 handler()
@@ -48,7 +51,6 @@ class PanicMode:
             except Exception as exc:
                 result.handler_errors[name] = str(exc)
 
-        self._publish_activation(method, details or {}, result)
         return result
 
     def reset_for_recovery(self) -> None:

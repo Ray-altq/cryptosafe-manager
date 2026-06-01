@@ -418,12 +418,20 @@ cryptosafe-manager/
 │   ├── test_setup.py
 │   └── test_vault_encryption.py
 ├── docs/
-│   └── sprint7_usability_test.md
+│   ├── sprint7_usability_test.md
+│   ├── technical.md
+│   └── user_guide.md
 ├── .gitignore
 ├── README.md
 ├── requirements.txt
 └── run.py
 ```
+
+## Документация
+
+- `docs/user_guide.md` — руководство пользователя: запуск, vault, записи, clipboard, аудит, импорт/экспорт, share и QR/key exchange.
+- `docs/technical.md` — техническая документация для защиты: архитектура, модули, БД, тестирование, coverage и PyInstaller-сборка.
+- `docs/sprint7_usability_test.md` — отчет usability-проверки Sprint 7.
 
 ## Установка и запуск
 
@@ -471,6 +479,22 @@ pip install -r requirements.txt
 ```bash
 python run.py
 ```
+
+### 6. Сборка исполняемой версии
+
+Для финальной сдачи проект собирается через PyInstaller по готовому spec-файлу:
+
+```powershell
+python -m PyInstaller cryptosafe-manager.spec --noconfirm --clean
+```
+
+После успешной сборки исполняемый файл находится здесь:
+
+```text
+dist/CryptoSafe Manager/CryptoSafe Manager.exe
+```
+
+Для передачи приложения можно упаковать весь каталог `dist/CryptoSafe Manager` в ZIP. Важно передавать именно весь каталог, а не только `.exe`, потому что рядом лежат служебные библиотеки PyInstaller.
 
 ## Технологии
 

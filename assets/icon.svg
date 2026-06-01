@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="160" y1="96" x2="864" y2="928" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1f2937"/>
+      <stop offset="1" stop-color="#0b1120"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="328" y1="214" x2="728" y2="800" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#93c5fd"/>
+      <stop offset="1" stop-color="#2563eb"/>
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="1024" rx="224" fill="url(#bg)"/>
+  <path d="M512 116 790 226v238c0 202-118 356-278 444C352 820 234 666 234 464V226l278-110Z" fill="#111827" stroke="#334155" stroke-width="34"/>
+  <path d="M512 174 728 260v196c0 158-86 280-216 358-130-78-216-200-216-358V260l216-86Z" fill="url(#accent)"/>
+  <rect x="344" y="430" width="336" height="274" rx="52" fill="#f8fafc"/>
+  <path d="M402 430v-66c0-72 50-128 110-128s110 56 110 128v66h-58v-66c0-38-23-70-52-70s-52 32-52 70v66h-58Z" fill="#f8fafc"/>
+  <circle cx="512" cy="550" r="48" fill="#0f172a"/>
+  <path d="M492 588h40l22 74h-84l22-74Z" fill="#0f172a"/>
+  <path d="M234 226 512 116v792C352 820 234 666 234 464V226Z" fill="#ffffff" opacity=".08"/>
+</svg>

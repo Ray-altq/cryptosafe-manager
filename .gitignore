@@ -24,3 +24,7 @@ venv/
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Packaging
+build/
+dist/
