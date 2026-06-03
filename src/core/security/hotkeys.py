@@ -34,16 +34,16 @@ class HotkeyBinding:
 
 
 DEFAULT_HOTKEYS: tuple[HotkeyBinding, ...] = (
-    HotkeyBinding("panic_mode", "Ctrl+Shift+Esc", "<Control-Shift-Escape>", "Emergency vault lock", True),
-    HotkeyBinding("lock_vault", "Ctrl+L", "<Control-l>", "Lock vault"),
-    HotkeyBinding("unlock_vault", "Ctrl+U", "<Control-u>", "Unlock vault"),
-    HotkeyBinding("focus_search", "Ctrl+F", "<Control-f>", "Focus search"),
-    HotkeyBinding("add_entry", "Ctrl+N", "<Control-n>", "Add entry"),
-    HotkeyBinding("edit_entry", "Ctrl+E", "<Control-e>", "Edit selected entry"),
-    HotkeyBinding("delete_entry", "Delete", "<Delete>", "Delete selected entry"),
-    HotkeyBinding("toggle_passwords", "Ctrl+Shift+P", "<Control-Shift-P>", "Toggle password visibility"),
-    HotkeyBinding("clear_clipboard", "Ctrl+Shift+C", "<Control-Shift-C>", "Clear clipboard"),
-    HotkeyBinding("open_settings", "Ctrl+,", "<Control-comma>", "Open settings"),
+    HotkeyBinding("panic_mode", "Ctrl+Shift+Esc", "<Control-Shift-Escape>", "Экстренно заблокировать хранилище", True),
+    HotkeyBinding("lock_vault", "Ctrl+L", "<Control-l>", "Заблокировать хранилище"),
+    HotkeyBinding("unlock_vault", "Ctrl+U", "<Control-u>", "Разблокировать хранилище"),
+    HotkeyBinding("focus_search", "Ctrl+F", "<Control-f>", "Перейти к поиску"),
+    HotkeyBinding("add_entry", "Ctrl+N", "<Control-n>", "Добавить запись"),
+    HotkeyBinding("edit_entry", "Ctrl+E", "<Control-e>", "Изменить выбранную запись"),
+    HotkeyBinding("delete_entry", "Delete", "<Delete>", "Удалить выбранную запись"),
+    HotkeyBinding("toggle_passwords", "Ctrl+Shift+P", "<Control-Shift-P>", "Показать или скрыть пароли"),
+    HotkeyBinding("clear_clipboard", "Ctrl+Shift+C", "<Control-Shift-C>", "Очистить буфер обмена"),
+    HotkeyBinding("open_settings", "Ctrl+,", "<Control-comma>", "Открыть настройки"),
 )
 
 

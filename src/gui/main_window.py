@@ -194,6 +194,7 @@ class MainWindow:
             self._load_password_policy()
             self.password_visibility_overrides = {}
             self._load_search_history()
+            self._sync_active_key_from_auth()
 
         self._create_menu()
         self._create_toolbar()
@@ -209,6 +210,7 @@ class MainWindow:
         self._initial_login_completed = True
         if not self.auth_service.is_authenticated():
             return
+        self._sync_active_key_from_auth()
         self._verify_audit_log_on_startup()
         event_bus.publish(Event(EventType.APP_STARTED, {"component": "main_window"}))
         self._load_entries()
@@ -252,7 +254,7 @@ class MainWindow:
 
         dialog = tk.Toplevel(self.root)
         self._prepare_dialog(dialog)
-        dialog.title("Выбор vault")
+        dialog.title("Выбор хранилища")
         dialog.geometry(self._get_screen_limited_geometry(1100, 720))
         if hasattr(dialog, "minsize"):
             dialog.minsize(980, 640)
@@ -261,10 +263,10 @@ class MainWindow:
 
         frame = ttk.Frame(dialog, padding=18, style="App.TFrame")
         frame.pack(fill=tk.BOTH, expand=True)
-        ttk.Label(frame, text="Выберите vault для открытия", style="DialogTitle.TLabel").pack(anchor="w")
+        ttk.Label(frame, text="Выберите хранилище для открытия", style="DialogTitle.TLabel").pack(anchor="w")
         ttk.Label(
             frame,
-            text="Сначала выбирается файл vault, потом вводится мастер-пароль именно для него.",
+            text="Сначала выбирается файл хранилища, потом вводится мастер-пароль именно для него.",
             wraplength=960,
             style="Muted.TLabel",
         ).pack(anchor="w", pady=(6, 14))
@@ -303,8 +305,8 @@ class MainWindow:
 
         def choose_existing():
             path = filedialog.askopenfilename(
-                title="Открыть vault",
-                filetypes=[("SQLite database", "*.db"), ("All files", "*.*")],
+                title="Открыть хранилище",
+                filetypes=[("База SQLite", "*.db"), ("Все файлы", "*.*")],
                 parent=dialog,
             )
             if path:
@@ -313,17 +315,17 @@ class MainWindow:
 
         def create_new():
             path = filedialog.asksaveasfilename(
-                title="Создать новый vault",
+                title="Создать новое хранилище",
                 defaultextension=".db",
-                filetypes=[("SQLite database", "*.db"), ("All files", "*.*")],
+                filetypes=[("База SQLite", "*.db"), ("Все файлы", "*.*")],
                 parent=dialog,
             )
             if not path:
                 return
             if os.path.exists(path):
                 self._show_warning(
-                    "Создать новый vault",
-                    "Такой файл уже существует. Чтобы не потерять данные, выберите другой файл или откройте существующий vault.",
+                    "Создать новое хранилище",
+                    "Такой файл уже существует. Чтобы не потерять данные, выберите другой файл или откройте существующее хранилище.",
                     parent=dialog,
                 )
                 return
@@ -485,7 +487,7 @@ class MainWindow:
         style.configure("TFrame", background=colors["bg"])
         style.configure("App.TFrame", background=colors["bg"])
         style.configure("Surface.TFrame", background=colors["surface"], relief="flat", borderwidth=1)
-        style.configure("TopBar.TFrame", background=colors["surface"])
+        style.configure("TopBar.TFrame", background=colors["surface"], relief="solid", borderwidth=1)
         style.configure("Status.TFrame", background=colors["surface_alt"], relief="flat")
         style.configure("AppTitle.TLabel", background=colors["surface"], foreground=colors["ink_strong"], font=title_font)
         style.configure("AppSubtitle.TLabel", background=colors["surface"], foreground=colors["muted"])
@@ -657,6 +659,7 @@ class MainWindow:
 
     def _create_menu(self):
         menubar = self._create_tk_menu(self.root)
+        self._menubar = menubar
         self.root.config(menu=menubar)
 
         file_menu = self._create_tk_menu(menubar, tearoff=0)
@@ -674,15 +677,14 @@ class MainWindow:
         help_menu = self._create_tk_menu(menubar, tearoff=0)
         menubar.add_cascade(label="Справка", menu=help_menu)
         self._populate_help_menu(help_menu)
-        self._create_visible_menu_bar()
 
     def _populate_file_menu(self, menu):
-        menu.add_command(label="Новый vault", command=self.new_database)
-        menu.add_command(label="Открыть vault", command=self.open_database)
+        menu.add_command(label="Новое хранилище", command=self.new_database)
+        menu.add_command(label="Открыть хранилище", command=self.open_database)
         menu.add_command(label="Резервная копия", command=self.backup)
         menu.add_separator()
-        menu.add_command(label="Экспорт vault", command=self.show_export_dialog)
-        menu.add_command(label="Импорт vault", command=self.show_import_dialog)
+        menu.add_command(label="Экспорт хранилища", command=self.show_export_dialog)
+        menu.add_command(label="Импорт хранилища", command=self.show_import_dialog)
         menu.add_separator()
         menu.add_command(label="Заблокировать", command=self._lock_vault)
         menu.add_command(label="Разблокировать", command=self._unlock_vault)
@@ -704,7 +706,7 @@ class MainWindow:
         menu.add_command(label="Просмотр буфера обмена", command=self.show_clipboard_preview_dialog)
         menu.add_command(label="Диагностика буфера обмена", command=self.show_clipboard_diagnostics)
         menu.add_separator()
-        menu.add_command(label="Panic mode", command=lambda: self.activate_panic_mode("menu"))
+        menu.add_command(label="Паник-режим", command=lambda: self.activate_panic_mode("menu"))
         menu.add_separator()
         menu.add_command(label="Сменить мастер-пароль", command=self.change_master_password)
         menu.add_command(label="Настройки", command=self.show_settings)
@@ -734,15 +736,15 @@ class MainWindow:
 
     def _create_toolbar(self):
         toolbar = ttk.Frame(self.root, style="App.TFrame")
-        toolbar.pack(side=tk.TOP, fill=tk.X, padx=18, pady=(16, 10))
+        toolbar.pack(side=tk.TOP, fill=tk.X, padx=18, pady=(8, 10))
 
         top_bar = ttk.Frame(toolbar, style="TopBar.TFrame")
         top_bar.pack(fill=tk.X, pady=(0, 10), ipady=8)
         ttk.Label(top_bar, text="CryptoSafe", style="AppTitle.TLabel").pack(side=tk.LEFT, padx=(14, 14))
-        ttk.Button(top_bar, text="Lock", style="Danger.TButton", command=self._lock_vault).pack(
+        ttk.Button(top_bar, text="Заблокировать", style="Danger.TButton", command=self._lock_vault).pack(
             side=tk.RIGHT, padx=(4, 14)
         )
-        ttk.Button(top_bar, text="Unlock", style="Ghost.TButton", command=self._unlock_vault).pack(
+        ttk.Button(top_bar, text="Разблокировать", style="Ghost.TButton", command=self._unlock_vault).pack(
             side=tk.RIGHT, padx=4
         )
 
@@ -774,7 +776,7 @@ class MainWindow:
         ttk.Label(exchange_row, text="Обмен данными", style="TLabel").pack(side=tk.LEFT, padx=(0, 10))
         ttk.Button(exchange_row, text="Экспорт", style="Ghost.TButton", command=self.show_export_dialog).pack(side=tk.LEFT, padx=3)
         ttk.Button(exchange_row, text="Импорт", style="Ghost.TButton", command=self.show_import_dialog).pack(side=tk.LEFT, padx=3)
-        ttk.Button(exchange_row, text="Share", style="Ghost.TButton", command=self.show_share_dialog).pack(side=tk.LEFT, padx=3)
+        ttk.Button(exchange_row, text="Поделиться", style="Ghost.TButton", command=self.show_share_dialog).pack(side=tk.LEFT, padx=3)
         ttk.Button(exchange_row, text="QR / Ключи", style="Ghost.TButton", command=self.show_key_exchange_dialog).pack(side=tk.LEFT, padx=3)
 
         ttk.Label(search_row, text="Поиск", style="TLabel").pack(side=tk.LEFT, padx=(0, 10))
@@ -836,7 +838,7 @@ class MainWindow:
 
         table_header = ttk.Frame(main_frame, style="Surface.TFrame")
         table_header.pack(fill=tk.X, padx=12, pady=(10, 6))
-        ttk.Label(table_header, text="Записи vault", style="Section.TLabel").pack(side=tk.LEFT)
+        ttk.Label(table_header, text="Записи хранилища", style="Section.TLabel").pack(side=tk.LEFT)
 
         columns = [
             {"id": "title", "label": "Название", "width": 180},
@@ -852,25 +854,40 @@ class MainWindow:
         self._create_table_context_menu()
 
     def _create_table_context_menu(self):
-        self.table_menu = self._create_tk_menu(self.root, tearoff=0)
-        self.table_menu.add_command(label="Изменить", command=self.edit_entry)
-        self.table_menu.add_command(label="Удалить", command=self.delete_entry)
-        self.table_menu.add_separator()
-        self.table_menu.add_command(label="Показать пароль", command=self.show_selected_password)
-        self.table_menu.add_command(label="Скопировать пароль", command=self.copy_selected_password)
-        self.table_menu.add_command(label="Скопировать логин", command=self.copy_selected_username)
-        self.table_menu.add_command(label="Скопировать запись", command=self.copy_selected_all)
-        self.table_menu.add_command(label="Очистить буфер обмена", command=self.clear_clipboard_from_ui)
+        self.table_menu = self._build_table_context_menu()
         self.table.bind_context_menu(self._show_table_context_menu)
+
+    def _build_table_context_menu(self):
+        menu = self._create_tk_menu(self.root, tearoff=0)
+        menu.add_command(label="Изменить", command=self.edit_entry)
+        menu.add_command(label="Удалить", command=self.delete_entry)
+        menu.add_separator()
+        menu.add_command(label="Показать пароль", command=self.show_selected_password)
+        menu.add_command(label="Скопировать пароль", command=self.copy_selected_password)
+        menu.add_command(label="Скопировать логин", command=self.copy_selected_username)
+        menu.add_command(label="Скопировать запись", command=self.copy_selected_all)
+        menu.add_command(label="Очистить буфер обмена", command=self.clear_clipboard_from_ui)
+        return menu
 
     def _show_table_context_menu(self, event):
         selected = self.table.ensure_row_selected_at_y(event.y)
         if not selected:
             return
         try:
+            menu_exists = bool(getattr(self, "table_menu", None)) and self.table_menu.winfo_exists()
+        except tk.TclError:
+            menu_exists = False
+        if not menu_exists:
+            self.table_menu = self._build_table_context_menu()
+        try:
             self.table_menu.tk_popup(event.x_root, event.y_root)
+        except tk.TclError:
+            return
         finally:
-            self.table_menu.grab_release()
+            try:
+                self.table_menu.grab_release()
+            except tk.TclError:
+                pass
 
     def _create_statusbar(self):
         statusbar = ttk.Frame(self.root, style="Status.TFrame")
@@ -900,11 +917,23 @@ class MainWindow:
         event_bus.subscribe(EventType.ENTRY_ADDED, self._on_entry_changed)
         event_bus.subscribe(EventType.ENTRY_UPDATED, self._on_entry_changed)
         event_bus.subscribe(EventType.ENTRY_DELETED, self._on_entry_changed)
-        event_bus.subscribe(EventType.USER_LOGGED_IN, lambda _event: self._set_status("Разблокировано"))
-        event_bus.subscribe(EventType.USER_LOGGED_OUT, lambda _event: self._set_status("Заблокировано"))
+        event_bus.subscribe(EventType.USER_LOGGED_IN, self._on_user_logged_in_event)
+        event_bus.subscribe(EventType.USER_LOGGED_OUT, self._on_user_logged_out_event)
         event_bus.subscribe(EventType.CLIPBOARD_COPIED, lambda _event: self._refresh_clipboard_status())
         event_bus.subscribe(EventType.CLIPBOARD_CLEARED, lambda _event: self._refresh_clipboard_status())
-        event_bus.subscribe(EventType.VAULT_LOCKED, lambda _event: self.clipboard_service.clear(reason="vault_locked"))
+        event_bus.subscribe(EventType.VAULT_LOCKED, self._on_vault_locked_event)
+
+    def _on_user_logged_in_event(self, _event):
+        self._set_status("Разблокировано")
+        self._update_system_tray_status()
+
+    def _on_user_logged_out_event(self, _event):
+        self._set_status("Заблокировано")
+
+    def _on_vault_locked_event(self, event):
+        if event.data.get("preserve_clipboard", False):
+            return
+        self.clipboard_service.clear(reason="vault_locked")
 
     def _setup_activity_tracking(self):
         for sequence in ("<Any-KeyPress>", "<Any-ButtonPress>", "<Motion>"):
@@ -1154,7 +1183,7 @@ class MainWindow:
     def _execute_panic_stealth_actions(self):
         if bool(self.config.get("security.panic_fake_error", True)):
             try:
-                messagebox.showerror("Application Error", "The application encountered an unexpected error.")
+                messagebox.showerror("Ошибка приложения", "В приложении произошла непредвиденная ошибка.")
             except Exception:
                 pass
 
@@ -1195,11 +1224,7 @@ class MainWindow:
         return result
 
     def _show_panic_notification(self, method: str) -> None:
-        try:
-            self.root.deiconify()
-            self.root.lift()
-        except Exception:
-            pass
+        self._restore_main_window(force_rebuild_menu=True)
         status = getattr(self, "_global_hotkey_status", "not_registered")
         if status.startswith("registered:"):
             hotkey_text = status.split(":", 1)[1]
@@ -1208,27 +1233,25 @@ class MainWindow:
         else:
             hotkey_text = "Ctrl+Shift+Esc внутри приложения"
         message = (
-            "Panic mode сработал.\n\n"
-            "- vault заблокирован;\n"
-            "- clipboard очищен;\n"
+            "Паник-режим сработал.\n\n"
+            "- хранилище заблокировано;\n"
+            "- буфер обмена очищен;\n"
             "- открытые окна закрыты;\n"
             "- расшифрованное состояние очищено.\n\n"
             f"Способ запуска: {method}.\n"
-            f"Рабочий panic-hotkey: {hotkey_text}.\n\n"
-            "Чтобы продолжить работу, нажмите Unlock и введите мастер-пароль."
+            f"Рабочая горячая клавиша паник-режима: {hotkey_text}.\n\n"
+            "Чтобы продолжить работу, нажмите «Разблокировать» и введите мастер-пароль."
         )
         try:
-            self._show_warning("Panic mode", message)
+            self._show_warning("Паник-режим", message)
         except Exception:
             pass
+        self._restore_main_window_chrome(force_rebuild=True)
 
     def recover_from_panic_mode(self):
         if hasattr(self, "panic_mode"):
             self.panic_mode.reset_for_recovery()
-        try:
-            self.root.deiconify()
-        except tk.TclError:
-            pass
+        self._restore_main_window(force_rebuild_menu=True)
         return self._unlock_vault()
 
     def _safe_root_state(self) -> str:
@@ -1326,11 +1349,11 @@ class MainWindow:
 
         return pystray_module.Menu(
             pystray_module.MenuItem("Показать окно", tray_action(self._restore_from_system_tray)),
-            pystray_module.MenuItem("Заблокировать vault", tray_action(lambda: self._lock_vault(show_dialog=False))),
-            pystray_module.MenuItem("Разблокировать vault", tray_action(self._unlock_vault)),
-            pystray_module.MenuItem("Quick search", tray_action(self._show_tray_quick_search)),
-            pystray_module.MenuItem("Очистить clipboard", tray_action(self.clear_clipboard_from_ui)),
-            pystray_module.MenuItem("Panic mode", tray_action(lambda: self.activate_panic_mode("tray"))),
+            pystray_module.MenuItem("Заблокировать хранилище", tray_action(lambda: self._lock_vault(show_dialog=False))),
+            pystray_module.MenuItem("Разблокировать хранилище", tray_action(self._unlock_vault)),
+            pystray_module.MenuItem("Быстрый поиск", tray_action(self._show_tray_quick_search)),
+            pystray_module.MenuItem("Очистить буфер обмена", tray_action(self.clear_clipboard_from_ui)),
+            pystray_module.MenuItem("Паник-режим", tray_action(lambda: self.activate_panic_mode("tray"))),
             pystray_module.MenuItem("Настройки", tray_action(self.show_settings)),
             pystray_module.MenuItem("Выход", tray_action(self._on_close)),
         )
@@ -1369,11 +1392,11 @@ class MainWindow:
     def _get_system_tray_menu_labels(self) -> list[str]:
         return [
             "Показать окно",
-            "Заблокировать vault",
-            "Разблокировать vault",
-            "Quick search",
-            "Очистить clipboard",
-            "Panic mode",
+            "Заблокировать хранилище",
+            "Разблокировать хранилище",
+            "Быстрый поиск",
+            "Очистить буфер обмена",
+            "Паник-режим",
             "Настройки",
             "Выход",
         ]
@@ -1382,10 +1405,10 @@ class MainWindow:
         from PIL import Image, ImageDraw  # type: ignore
 
         colors = {
-            "locked": ("#1f2937", "#60a5fa"),
+            "locked": ("#7f1d1d", "#f87171"),
             "unlocked": ("#064e3b", "#34d399"),
             "alert": ("#7f1d1d", "#f87171"),
-            "crypto": ("#1e3a8a", "#93c5fd" if animation_frame % 2 == 0 else "#facc15"),
+            "crypto": ("#064e3b", "#34d399" if animation_frame % 2 == 0 else "#facc15"),
         }
         fill, accent = colors.get(state, colors["locked"])
         image = Image.new("RGB", (16, 16), color=fill)
@@ -1410,20 +1433,23 @@ class MainWindow:
         auth_service = getattr(self, "auth_service", None)
         if auth_service is not None and auth_service.is_authenticated():
             return "unlocked"
+        state = getattr(self, "state", None)
+        if state is not None and getattr(state, "is_unlocked", lambda: False)():
+            return "unlocked"
         return "locked"
 
     def _build_system_tray_title(self, status: Optional[ClipboardStatus] = None) -> str:
         status = status or self._get_clipboard_status()
-        vault_state = "разблокирован" if self.auth_service.is_authenticated() else "заблокирован"
+        vault_state = "разблокировано" if self.auth_service.is_authenticated() else "заблокировано"
         if getattr(self, "_tray_crypto_operation_active", False):
-            return f"CryptoSafe Manager: vault {vault_state}, crypto operation"
+            return f"CryptoSafe Manager: хранилище {vault_state}, криптооперация"
         if not status.active:
-            return f"CryptoSafe Manager: vault {vault_state}, clipboard пуст"
+            return f"CryptoSafe Manager: хранилище {vault_state}, буфер обмена пуст"
         data_type_label = self._format_clipboard_data_type(status.data_type)
         delivery_text = self._format_clipboard_delivery_mode(status.delivery_mode)
         if status.remaining_seconds > 0:
-            return f"CryptoSafe Manager: vault {vault_state}, {data_type_label}, {delivery_text}, осталось {status.remaining_seconds} сек"
-        return f"CryptoSafe Manager: vault {vault_state}, {data_type_label}, {delivery_text}"
+            return f"CryptoSafe Manager: хранилище {vault_state}, {data_type_label}, {delivery_text}, осталось {status.remaining_seconds} сек"
+        return f"CryptoSafe Manager: хранилище {vault_state}, {data_type_label}, {delivery_text}"
 
     def _update_system_tray_status(self, status: Optional[ClipboardStatus] = None):
         tray_icon = getattr(self, "_system_tray_icon", None)
@@ -1453,9 +1479,9 @@ class MainWindow:
     def _show_tray_quick_search(self):
         if not self.auth_service.is_authenticated():
             self._restore_from_system_tray()
-            messagebox.showwarning("Vault locked", "Сначала разблокируйте vault, затем используйте quick search.")
+            messagebox.showwarning("Хранилище заблокировано", "Сначала разблокируйте хранилище, затем используйте быстрый поиск.")
             return
-        query = simpledialog.askstring("Quick search", "Введите текст для поиска:")
+        query = simpledialog.askstring("Быстрый поиск", "Введите текст для поиска:")
         if query is None:
             return
         self._apply_tray_quick_search(query)
@@ -1478,14 +1504,67 @@ class MainWindow:
         self._system_tray_visible = True
         self._update_system_tray_status()
 
-    def _restore_from_system_tray(self):
-        if getattr(self, "_system_tray_icon", None) is None:
+    def _rebuild_main_menu(self):
+        old_menubar = getattr(self, "_menubar", None)
+        try:
+            self.root.config(menu="")
+        except tk.TclError:
+            pass
+        if old_menubar is not None:
+            try:
+                old_menubar.destroy()
+            except tk.TclError:
+                pass
+        self._create_menu()
+        try:
+            self.root.update_idletasks()
+        except tk.TclError:
+            pass
+
+    def _restore_main_window_chrome(self, *, force_rebuild: bool = False):
+        if force_rebuild:
+            self._rebuild_main_menu()
             return
+        menubar = getattr(self, "_menubar", None)
+        if menubar is None:
+            if hasattr(self, "_create_tk_menu") and hasattr(getattr(self, "root", None), "tk"):
+                self._rebuild_main_menu()
+            return
+        try:
+            if not menubar.winfo_exists():
+                self._rebuild_main_menu()
+                return
+            self.root.config(menu=menubar)
+        except tk.TclError:
+            self._rebuild_main_menu()
+
+    def _restore_main_window(self, *, force_rebuild_menu: bool = False):
         try:
             self.root.deiconify()
             self.root.state("normal")
-            self.root.update()
+            self._restore_main_window_chrome(force_rebuild=force_rebuild_menu)
         except Exception:
+            return False
+        try:
+            self.root.lift()
+        except Exception:
+            pass
+        try:
+            self.root.update_idletasks()
+        except Exception:
+            pass
+        if force_rebuild_menu:
+            for delay_ms in (50, 250):
+                try:
+                    self.root.after(delay_ms, lambda: self._restore_main_window_chrome(force_rebuild=True))
+                except tk.TclError:
+                    break
+        return True
+
+    def _restore_from_system_tray(self):
+        if getattr(self, "_system_tray_icon", None) is None:
+            return
+        if not self._restore_main_window():
             return
         self._system_tray_visible = False
         self._update_system_tray_status()
@@ -1570,6 +1649,52 @@ class MainWindow:
         except tk.TclError:
             pass
 
+    def _parse_geometry_size(self, geometry: str) -> tuple[int, int]:
+        try:
+            size_part = str(geometry or "").split("+", 1)[0]
+            width_text, height_text = size_part.split("x", 1)
+            return int(width_text), int(height_text)
+        except (TypeError, ValueError):
+            return 0, 0
+
+    def _fit_dialog_to_content(self, dialog, parent=None, *, margin: int = 96):
+        try:
+            if not dialog.winfo_exists():
+                return
+            dialog.update_idletasks()
+            screen_width = int(dialog.winfo_screenwidth())
+            screen_height = int(dialog.winfo_screenheight())
+            max_width = max(420, screen_width - margin)
+            max_height = max(360, screen_height - margin)
+            current_width, current_height = self._parse_geometry_size(dialog.winfo_geometry())
+            requested_width = max(dialog.winfo_reqwidth(), current_width)
+            requested_height = max(dialog.winfo_reqheight(), current_height)
+            target_width = min(max_width, max(current_width, requested_width + 24))
+            target_height = min(max_height, max(current_height, requested_height + 24))
+            if target_width > current_width or target_height > current_height:
+                dialog.geometry(f"{target_width}x{target_height}")
+                dialog.update_idletasks()
+            try:
+                dialog.minsize(min(target_width, max_width), min(target_height, max_height))
+            except (AttributeError, tk.TclError):
+                pass
+            self._center_dialog(dialog, parent)
+        except tk.TclError:
+            pass
+
+    def _schedule_dialog_fit(self, dialog, parent=None):
+        def fit():
+            self._fit_dialog_to_content(dialog, parent)
+
+        for delay_ms in (0, 80, 250):
+            try:
+                if delay_ms == 0:
+                    dialog.after_idle(fit)
+                else:
+                    dialog.after(delay_ms, fit)
+            except tk.TclError:
+                break
+
     def _get_screen_limited_geometry(self, width: int, height: int, *, margin: int = 96) -> str:
         try:
             screen_width = int(self.root.winfo_screenwidth())
@@ -1590,7 +1715,8 @@ class MainWindow:
         dialog.title(title)
         dialog.transient(parent)
         dialog.grab_set()
-        dialog.resizable(False, False)
+        dialog.resizable(True, True)
+        dialog.geometry(self._get_screen_limited_geometry(560, 240))
         dialog.minsize(420, 150)
 
         card = ttk.Frame(dialog, style="DialogCard.TFrame", padding=(18, 16, 18, 14))
@@ -1623,10 +1749,10 @@ class MainWindow:
             ttk.Button(buttons, text="Нет", style="Ghost.TButton", command=lambda: close(False)).pack(side=tk.RIGHT, padx=(8, 0))
             ttk.Button(buttons, text="Да", style="Accent.TButton", command=lambda: close(True)).pack(side=tk.RIGHT)
         else:
-            ttk.Button(buttons, text="OK", style="Accent.TButton", command=lambda: close(None)).pack(side=tk.RIGHT)
+            ttk.Button(buttons, text="ОК", style="Accent.TButton", command=lambda: close(None)).pack(side=tk.RIGHT)
 
         dialog.protocol("WM_DELETE_WINDOW", lambda: close(False if is_question else None))
-        self._center_dialog(dialog, parent)
+        self._fit_dialog_to_content(dialog, parent)
         dialog.wait_window()
         return result["value"]
 
@@ -1639,7 +1765,8 @@ class MainWindow:
         dialog.title(title)
         dialog.transient(parent)
         dialog.grab_set()
-        dialog.resizable(False, False)
+        dialog.resizable(True, True)
+        dialog.geometry(self._get_screen_limited_geometry(600, 240))
         dialog.minsize(460, 170)
 
         card = ttk.Frame(dialog, style="DialogCard.TFrame", padding=(18, 16, 18, 14))
@@ -1663,11 +1790,11 @@ class MainWindow:
             dialog.destroy()
 
         ttk.Button(buttons, text="Отмена", style="Ghost.TButton", command=cancel).pack(side=tk.RIGHT, padx=(8, 0))
-        ttk.Button(buttons, text="OK", style="Accent.TButton", command=submit).pack(side=tk.RIGHT)
+        ttk.Button(buttons, text="ОК", style="Accent.TButton", command=submit).pack(side=tk.RIGHT)
         dialog.bind("<Return>", submit)
         dialog.bind("<Escape>", cancel)
         dialog.protocol("WM_DELETE_WINDOW", cancel)
-        self._center_dialog(dialog, parent)
+        self._fit_dialog_to_content(dialog, parent)
         entry.focus_set()
         entry.selection_range(0, tk.END)
         dialog.wait_window()
@@ -1699,7 +1826,14 @@ class MainWindow:
             dialog.configure(bg=colors["bg"])
         except tk.TclError:
             pass
+        try:
+            dialog.resizable(True, True)
+        except (AttributeError, tk.TclError):
+            pass
         self._apply_accessibility_metadata(dialog)
+        parent = getattr(dialog, "master", None) or getattr(self, "root", None)
+        if parent is not None and hasattr(dialog, "after_idle"):
+            self._schedule_dialog_fit(dialog, parent)
         return dialog
 
     def _apply_accessibility_metadata(self, widget, *, role: str = "dialog"):
@@ -1774,28 +1908,52 @@ class MainWindow:
                 return 0
             return -1 * max(-8, min(8, int(delta / 120) if abs(delta) >= 120 else (1 if delta > 0 else -1)))
 
-        def on_mousewheel(event):
-            units = scroll_units_from_event(event)
-            if units:
-                canvas.yview_scroll(units, "units")
-            return "break"
+        def is_inside_scroll_area(widget) -> bool:
+            while widget is not None:
+                if widget is container:
+                    return True
+                try:
+                    widget = widget.master
+                except AttributeError:
+                    return False
+            return False
+
+        wheel_bindings = []
 
         def bind_mousewheel(_event=None):
-            canvas.bind_all("<MouseWheel>", on_mousewheel, add="+")
-            canvas.bind_all("<Button-4>", on_mousewheel, add="+")
-            canvas.bind_all("<Button-5>", on_mousewheel, add="+")
-
-        def unbind_mousewheel(_event=None):
-            canvas.unbind_all("<MouseWheel>")
-            canvas.unbind_all("<Button-4>")
-            canvas.unbind_all("<Button-5>")
+            if wheel_bindings:
+                return
+            for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+                bind_id = canvas.bind_all(sequence, on_mousewheel, add="+")
+                wheel_bindings.append((sequence, bind_id))
 
         body.bind("<Configure>", sync_scroll_region)
         canvas.bind("<Configure>", sync_body_width)
-        canvas.bind("<Enter>", bind_mousewheel)
-        canvas.bind("<Leave>", unbind_mousewheel)
-        body.bind("<Enter>", bind_mousewheel)
-        body.bind("<Leave>", unbind_mousewheel)
+
+        def on_mousewheel(event):
+            try:
+                if not canvas.winfo_exists() or not is_inside_scroll_area(getattr(event, "widget", None)):
+                    return None
+            except tk.TclError:
+                return None
+            units = scroll_units_from_event(event)
+            if units:
+                canvas.yview_scroll(units, "units")
+                return "break"
+            return None
+
+        def unbind_mousewheel(_event=None):
+            while wheel_bindings:
+                sequence, bind_id = wheel_bindings.pop()
+                try:
+                    script = str(canvas.tk.call("bind", "all", sequence) or "")
+                    if bind_id and script:
+                        filtered_script = "\n".join(line for line in script.splitlines() if bind_id not in line)
+                        canvas.tk.call("bind", "all", sequence, filtered_script)
+                except (AttributeError, tk.TclError, TypeError):
+                    pass
+
+        bind_mousewheel()
         dialog.bind("<Destroy>", unbind_mousewheel, add="+")
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
@@ -1819,12 +1977,12 @@ class MainWindow:
 
     def _on_unmap(self, _event=None):
         self.state.set_application_active(False)
-        self._show_in_system_tray()
         self.root.after(100, self._lock_if_window_minimized)
 
     def _on_map(self, _event=None):
         self.state.set_application_active(True)
         self._system_tray_visible = False
+        self._restore_main_window_chrome()
         if getattr(self, "_initial_login_completed", False):
             self.root.after(100, self._prompt_unlock_if_needed)
 
@@ -1849,9 +2007,7 @@ class MainWindow:
 
         self.state.set_application_active(False)
         if self.config.get("security.lock_on_focus_loss", True) and self.auth_service.is_authenticated():
-            if self.state.get_clipboard() is not None:
-                return
-            self._lock_vault(show_dialog=False)
+            self._lock_vault(show_dialog=False, preserve_clipboard=True, reason="focus_loss")
 
     def _lock_if_window_minimized(self):
         try:
@@ -2140,7 +2296,7 @@ class MainWindow:
             "monitor_warning": "Буфер обмена очищен из-за подозрительной активности",
             "startup_recovery": "Буфер обмена очищен при запуске после нештатного завершения",
             "timeout": "Буфер обмена очищен автоматически",
-            "vault_locked": "Буфер обмена очищен при блокировке vault",
+            "vault_locked": "Буфер обмена очищен при блокировке хранилища",
             "replacement": "Буфер обмена заменён новым содержимым",
             "manual": "Буфер обмена очищен вручную",
         }
@@ -2363,7 +2519,7 @@ class MainWindow:
         while not self.auth_service.is_authenticated():
             password = self._ask_string(
                 "Мастер-пароль",
-                "Введите мастер-пароль, чтобы разблокировать vault:",
+                "Введите мастер-пароль, чтобы разблокировать хранилище:",
                 show="*",
             )
             if password is None:
@@ -2393,6 +2549,17 @@ class MainWindow:
         self.state.update_activity()
         self.key_storage.touch_cached_key(self.state.key_cache_timeout)
         self._login_prompt_active = False
+
+    def _sync_active_key_from_auth(self) -> bool:
+        if not hasattr(self, "auth_service") or not hasattr(self, "key_manager"):
+            return False
+        if not self.auth_service.is_authenticated():
+            return False
+        active_key = self.auth_service.get_active_key()
+        if not active_key:
+            return False
+        self.key_manager.store_key("active", active_key)
+        return True
 
     def _load_entries(self):
         if not self.auth_service.is_authenticated():
@@ -2996,7 +3163,7 @@ class MainWindow:
         password_entry.set(password)
         password_entry.show_password.set(True)
         dialog.password_was_generated = True
-        strength_var = getattr(password_entry.master, "strength_var", None)
+        strength_var = getattr(dialog, "strength_var", None)
         if strength_var is not None:
             self._update_password_strength(password_entry, strength_var)
 
@@ -3004,12 +3171,11 @@ class MainWindow:
         dialog = tk.Toplevel(self.root)
         self._prepare_dialog(dialog)
         dialog.title("Параметры генерации пароля")
-        dialog.geometry("460x420")
+        dialog.geometry(self._get_screen_limited_geometry(560, 520))
         if hasattr(dialog, "minsize"):
-            dialog.minsize(420, 380)
+            dialog.minsize(460, 420)
         dialog.transient(parent_dialog)
         dialog.grab_set()
-        dialog.resizable(False, False)
 
         length_var = tk.IntVar(value=16)
         uppercase_var = tk.BooleanVar(value=True)
@@ -3085,6 +3251,7 @@ class MainWindow:
         return "." in hostname
 
     def _rotate_vault_entries(self, old_key: bytes, new_key: bytes):
+        self._flush_audit_logger()
         old_crypto = LegacyXOREncryptionService()
         new_crypto = LegacyXOREncryptionService()
         old_vault_crypto = AESGCMEncryptionService()
@@ -3092,12 +3259,11 @@ class MainWindow:
         progress_dialog = tk.Toplevel(self.root)
         self._prepare_dialog(progress_dialog)
         progress_dialog.title("Смена мастер-пароля")
-        progress_dialog.geometry("560x240")
+        progress_dialog.geometry(self._get_screen_limited_geometry(640, 280))
         if hasattr(progress_dialog, "minsize"):
-            progress_dialog.minsize(520, 220)
+            progress_dialog.minsize(560, 240)
         progress_dialog.transient(self.root)
         progress_dialog.grab_set()
-        progress_dialog.resizable(False, False)
 
         status_var = tk.StringVar(value="Подготовка к пере-шифрованию записей...")
         progress_var = tk.DoubleVar(value=0)
@@ -3105,9 +3271,11 @@ class MainWindow:
         progress_queue: queue.Queue = queue.Queue()
         pause_event = threading.Event()
         pause_event.set()
-        state = {"paused": False, "processed": 0, "total": 0, "error": None}
+        state = {"paused": False, "processed": 0, "total": 0, "error": None, "stage": "vault"}
+        visible_since = time.monotonic()
+        minimum_visible_seconds = 1.2
 
-        ttk.Label(progress_dialog, text="Пере-шифрование vault", font=("Segoe UI", 10, "bold")).pack(
+        ttk.Label(progress_dialog, text="Пере-шифрование хранилища", font=("Segoe UI", 10, "bold")).pack(
             anchor=tk.W, padx=12, pady=(12, 6)
         )
         ttk.Label(progress_dialog, textvariable=status_var, wraplength=380, justify=tk.LEFT).pack(
@@ -3121,10 +3289,11 @@ class MainWindow:
 
         def update_status():
             suffix = " (пауза)" if state["paused"] else ""
+            stage_label = "записей хранилища" if state["stage"] == "vault" else "журнала аудита"
             if state["total"] == 0:
-                status_var.set(f"Пере-шифрование записей...{suffix}")
+                status_var.set(f"Пере-шифрование {stage_label}...{suffix}")
             else:
-                status_var.set(f"Пере-шифровано записей: {state['processed']} из {state['total']}{suffix}")
+                status_var.set(f"Пере-шифрование {stage_label}: {state['processed']} из {state['total']}{suffix}")
 
         def toggle_pause():
             state["paused"] = not state["paused"]
@@ -3160,9 +3329,18 @@ class MainWindow:
             try:
                 self.db.reencrypt_entry_payloads(
                     transform,
-                    progress_callback=lambda processed, total: progress_queue.put(("progress", processed, total)),
+                    progress_callback=lambda processed, total: progress_queue.put(("progress", "vault", processed, total)),
                     pause_event=pause_event,
                 )
+                if hasattr(self, "audit_logger") and hasattr(self.audit_logger, "reencrypt_entry_payloads"):
+                    self._flush_audit_logger()
+                    self.audit_logger.reencrypt_entry_payloads(
+                        old_key,
+                        new_key,
+                        progress_callback=lambda processed, total: progress_queue.put(("progress", "audit", processed, total)),
+                        pause_event=pause_event,
+                    )
+                    self._flush_audit_logger()
                 progress_queue.put(("done",))
             except Exception as error:
                 progress_queue.put(("error", str(error)))
@@ -3173,7 +3351,8 @@ class MainWindow:
                     message = progress_queue.get_nowait()
                     kind = message[0]
                     if kind == "progress":
-                        _, processed, total = message
+                        _, stage, processed, total = message
+                        state["stage"] = stage
                         state["processed"] = processed
                         state["total"] = total
                         progressbar.configure(maximum=max(total, 1))
@@ -3186,7 +3365,10 @@ class MainWindow:
                             if state["total"]
                             else "Записей для пере-шифрования не найдено."
                         )
-                        progress_dialog.destroy()
+                        progressbar.configure(maximum=max(state["total"], 1))
+                        progress_var.set(max(state["total"], 1))
+                        remaining_ms = max(0, int((minimum_visible_seconds - (time.monotonic() - visible_since)) * 1000))
+                        progress_dialog.after(remaining_ms, progress_dialog.destroy)
                         return
                     elif kind == "error":
                         state["error"] = message[1]
@@ -3198,8 +3380,12 @@ class MainWindow:
             if progress_dialog.winfo_exists():
                 progress_dialog.after(100, poll_progress)
 
-        threading.Thread(target=worker, daemon=True).start()
-        poll_progress()
+        def start_worker():
+            threading.Thread(target=worker, daemon=True).start()
+            poll_progress()
+
+        progress_dialog.update_idletasks()
+        progress_dialog.after(150, start_worker)
         progress_dialog.wait_window()
 
         if state["error"] is not None:
@@ -3207,17 +3393,17 @@ class MainWindow:
 
     def new_database(self):
         new_path = self._ask_saveas_filename(
-            title="Создать новый vault",
+            title="Создать новое хранилище",
             defaultextension=".db",
-            filetypes=[("SQLite database", "*.db"), ("All files", "*.*")],
+            filetypes=[("База SQLite", "*.db"), ("Все файлы", "*.*")],
         )
         if not new_path:
             return
 
         if os.path.exists(new_path):
             self._show_warning(
-                "Создать новый vault",
-                "Такой файл уже существует. Чтобы не потерять данные, выберите другое имя или откройте существующий vault.",
+                "Создать новое хранилище",
+                "Такой файл уже существует. Чтобы не потерять данные, выберите другое имя или откройте существующее хранилище.",
             )
             return
         self._remember_vault_path(new_path)
@@ -3244,8 +3430,8 @@ class MainWindow:
 
     def open_database(self):
         path = self._ask_open_filename(
-            title="Открыть базу vault",
-            filetypes=[("SQLite database", "*.db"), ("All files", "*.*")],
+            title="Открыть базу хранилища",
+            filetypes=[("База SQLite", "*.db"), ("Все файлы", "*.*")],
         )
         if not path:
             return
@@ -3278,9 +3464,9 @@ class MainWindow:
 
     def backup(self):
         backup_path = self._ask_saveas_filename(
-            title="Создать резервную копию vault",
+            title="Создать резервную копию хранилища",
             defaultextension=".db",
-            filetypes=[("SQLite database", "*.db"), ("All files", "*.*")],
+            filetypes=[("База SQLite", "*.db"), ("Все файлы", "*.*")],
         )
         if not backup_path:
             return
@@ -3290,6 +3476,8 @@ class MainWindow:
     def add_entry(self):
         if not self.auth_service.is_authenticated():
             self._require_login()
+        if not self.auth_service.is_authenticated():
+            return
         dialog, title_entry, username_entry, password_entry, url_entry, notes_text = self._build_entry_dialog("Добавить запись")
 
         def save():
@@ -3301,19 +3489,24 @@ class MainWindow:
                 self._show_error("Ошибка", str(error), parent=dialog)
                 return
 
-            self.entry_manager.create_entry(
-                {
-                    "title": title,
-                    "username": username,
-                    "password": password,
-                    "url": url,
-                    "category": category,
-                    "notes": notes,
-                    "tags": tags,
-                    "clipboard_policy": clipboard_policy,
-                }
-            )
+            try:
+                self.entry_manager.create_entry(
+                    {
+                        "title": title,
+                        "username": username,
+                        "password": password,
+                        "url": url,
+                        "category": category,
+                        "notes": notes,
+                        "tags": tags,
+                        "clipboard_policy": clipboard_policy,
+                    }
+                )
+            except Exception as error:
+                self._show_error("Ошибка сохранения", str(error), parent=dialog)
+                return
             dialog.destroy()
+            self._load_entries()
 
         ttk.Button(dialog.button_bar, text="Сохранить", style="Ghost.TButton", command=save).pack(side=tk.RIGHT)
 
@@ -3337,20 +3530,25 @@ class MainWindow:
                 self._show_error("Ошибка", str(error), parent=dialog)
                 return
 
-            self.entry_manager.update_entry(
-                entry["id"],
-                {
-                    "title": title,
-                    "username": username,
-                    "password": password,
-                    "url": url,
-                    "category": category,
-                    "notes": notes,
-                    "tags": tags,
-                    "clipboard_policy": clipboard_policy,
-                },
-            )
+            try:
+                self.entry_manager.update_entry(
+                    entry["id"],
+                    {
+                        "title": title,
+                        "username": username,
+                        "password": password,
+                        "url": url,
+                        "category": category,
+                        "notes": notes,
+                        "tags": tags,
+                        "clipboard_policy": clipboard_policy,
+                    },
+                )
+            except Exception as error:
+                self._show_error("Ошибка сохранения", str(error), parent=dialog)
+                return
             dialog.destroy()
+            self._load_entries()
 
         ttk.Button(dialog.button_bar, text="Сохранить изменения", style="Ghost.TButton", command=save).pack(side=tk.RIGHT)
 
@@ -3502,9 +3700,20 @@ class MainWindow:
         importer = self._build_vault_importer()
         normalized_format = self.detect_vault_import_format(source_path, payload) if str(import_format or "auto").strip().lower() == "auto" else str(import_format or "encrypted_json").strip().lower()
         options = ImportOptions(format=normalized_format, mode="dry-run", duplicate_strategy="skip")
+        if normalized_format == "share_package":
+            preview = self._preview_share_package_payload(payload, password)
+            entry = preview.get("entry", {})
+            return {
+                "validated": 1,
+                "mode": "dry-run",
+                "format": normalized_format,
+                "titles": [str(entry.get("title", ""))],
+                "share_id": preview.get("share_id", ""),
+                "permissions": preview.get("permissions", {}),
+            }
         if normalized_format in {"encrypted_json", "json"}:
             if not password:
-                raise ImportValidationError("Для encrypted JSON нужен пароль экспорта")
+                raise ImportValidationError("Для зашифрованного JSON нужен пароль экспорта")
             entries = importer.preview_encrypted_json(payload, password, options)
         else:
             entries = importer.preview_plaintext(payload, options)
@@ -3527,6 +3736,8 @@ class MainWindow:
             if isinstance(parsed, dict):
                 if parsed.get("cryptosafe_export"):
                     return "encrypted_json"
+                if parsed.get("cryptosafe_share"):
+                    return "share_package"
                 if isinstance(parsed.get("items"), list):
                     return "bitwarden_json"
         first_line = text.splitlines()[0].strip().lower() if text.splitlines() else ""
@@ -3560,6 +3771,37 @@ class MainWindow:
             history.append(item)
         return history
 
+    def _get_share_package_encryption_method(self, package_payload: str | bytes) -> str:
+        raw_text = package_payload.decode("utf-8-sig", errors="ignore") if isinstance(package_payload, bytes) else str(package_payload)
+        try:
+            package = json.loads(raw_text)
+        except json.JSONDecodeError as error:
+            raise ImportValidationError("Файл пакета доступа повреждён или не является JSON.") from error
+        if not isinstance(package, dict) or not package.get("cryptosafe_share"):
+            raise ImportValidationError("Файл не является пакетом доступа CryptoSafe.")
+        encryption = package.get("encryption", {})
+        return str(encryption.get("method", "password") or "password").strip().lower()
+
+    def _preview_share_package_payload(self, package_payload: str | bytes, secret: str) -> dict:
+        method = self._get_share_package_encryption_method(package_payload)
+        if method == "password":
+            if not secret:
+                raise ImportValidationError("Для пакета доступа нужен пароль пакета.")
+            return self._build_sharing_service().preview_password_share_package(package_payload, secret)
+        if not secret:
+            raise ImportValidationError("Для пакета доступа с публичным ключом нужен приватный ключ.")
+        return self._build_sharing_service().preview_public_key_share_package(package_payload, secret)
+
+    def _import_share_package_payload(self, package_payload: str | bytes, secret: str) -> dict:
+        method = self._get_share_package_encryption_method(package_payload)
+        if method == "password":
+            if not secret:
+                raise ImportValidationError("Для пакета доступа нужен пароль пакета.")
+            return self._build_sharing_service().import_password_share_package(package_payload, secret)
+        if not secret:
+            raise ImportValidationError("Для пакета доступа с публичным ключом нужен приватный ключ.")
+        return self._build_sharing_service().import_public_key_share_package(package_payload, secret)
+
     def export_vault_encrypted_json_to_path(
         self,
         target_path: str,
@@ -3573,7 +3815,7 @@ class MainWindow:
     ) -> bool:
         entry_ids = self._resolve_selected_export_entry_ids(selected_only, selected_entry_ids)
         if selected_only and not entry_ids:
-            self._show_warning("Экспорт vault", "Выберите записи для выборочного экспорта.")
+            self._show_warning("Экспорт хранилища", "Выберите записи для выборочного экспорта.")
             return False
         with self._crypto_operation_status():
             payload = self._build_vault_exporter().export_encrypted_json(
@@ -3586,7 +3828,7 @@ class MainWindow:
                 ),
             )
             self._write_audit_export_file(target_path, payload)
-        self._show_info("Экспорт vault", "Зашифрованный экспорт vault успешно сохранён.")
+        self._show_info("Экспорт хранилища", "Зашифрованный экспорт хранилища успешно сохранён.")
         return True
 
     def export_vault_csv_to_path(
@@ -3610,7 +3852,7 @@ class MainWindow:
             ExportOptions(format="csv", entry_ids=entry_ids, include_fields=include_fields, plaintext_allowed=True),
         )
         self._write_audit_export_file(target_path, payload)
-        self._show_info("Экспорт CSV", "CSV экспорт vault сохранён.")
+        self._show_info("Экспорт CSV", "CSV-экспорт хранилища сохранён.")
         return True
 
     def export_vault_public_key_json_to_path(
@@ -3624,7 +3866,7 @@ class MainWindow:
     ) -> bool:
         entry_ids = self._resolve_selected_export_entry_ids(selected_only, selected_entry_ids)
         if selected_only and not entry_ids:
-            self._show_warning("Экспорт vault", "Выберите записи для выборочного экспорта.")
+            self._show_warning("Экспорт хранилища", "Выберите записи для выборочного экспорта.")
             return False
         with self._crypto_operation_status():
             payload = self._build_vault_exporter().export_encrypted_json_for_public_key(
@@ -3632,7 +3874,7 @@ class MainWindow:
                 ExportOptions(entry_ids=entry_ids, include_fields=include_fields, compression=True),
             )
             self._write_audit_export_file(target_path, payload)
-        self._show_info("Экспорт vault", "Public-key экспорт vault успешно сохранён.")
+        self._show_info("Экспорт хранилища", "Экспорт хранилища с публичным ключом успешно сохранён.")
         return True
 
     def export_vault_bitwarden_encrypted_json_to_path(
@@ -3673,7 +3915,7 @@ class MainWindow:
             return False
         entry_ids = self._resolve_selected_export_entry_ids(selected_only, selected_entry_ids)
         if selected_only and not entry_ids:
-            self._show_warning("Экспорт vault", "Выберите записи для выборочного экспорта.")
+            self._show_warning("Экспорт хранилища", "Выберите записи для выборочного экспорта.")
             return False
         with self._crypto_operation_status():
             options = ExportOptions(format=export_format, entry_ids=entry_ids, include_fields=include_fields, plaintext_allowed=True)
@@ -3682,7 +3924,7 @@ class MainWindow:
             elif export_format == "lastpass_csv":
                 payload = self._build_vault_exporter().export_lastpass_csv(options)
             else:
-                raise ValueError("Unsupported password-manager export format")
+                raise ValueError("Неподдерживаемый формат экспорта менеджера паролей")
             self._write_audit_export_file(target_path, payload)
         self._show_info("Экспорт менеджера паролей", "Миграционный экспорт сохранён.")
         return True
@@ -3702,16 +3944,25 @@ class MainWindow:
         normalized_format = self.detect_vault_import_format(source_path, payload) if str(import_format or "auto").strip().lower() == "auto" else str(import_format or "encrypted_json").strip().lower()
         options = ImportOptions(format=normalized_format, mode=mode, duplicate_strategy=duplicate_strategy)
         with self._crypto_operation_status():
-            if normalized_format in {"encrypted_json", "json"}:
+            if normalized_format == "share_package":
+                if mode == "dry-run":
+                    preview = self.preview_vault_import_file(source_path, import_format=normalized_format, password=password)
+                    result = {"validated": preview.get("validated", 0), "created": 0, "updated": 0, "skipped": 0}
+                else:
+                    result = self._import_share_package_payload(payload, password)
+                    result.setdefault("validated", 1)
+                    result.setdefault("updated", 0)
+                    result.setdefault("skipped", 0)
+            elif normalized_format in {"encrypted_json", "json"}:
                 if not password:
-                    raise ImportValidationError("Для encrypted JSON нужен пароль экспорта")
+                    raise ImportValidationError("Для зашифрованного JSON нужен пароль экспорта")
                 result = importer.import_encrypted_json(payload, password, options)
             else:
                 result = importer.import_plaintext(payload, options)
         if mode != "dry-run":
             self._load_entries()
         self._show_info(
-            "Импорт vault",
+            "Импорт хранилища",
             (
                 f"Проверено: {result.get('validated', 0)}; "
                 f"создано: {result.get('created', 0)}; "
@@ -3741,7 +3992,7 @@ class MainWindow:
             permissions=SharePermissions(read=read, edit=edit, expires_in_days=expires_in_days),
         )
         self._write_audit_export_file(target_path, package)
-        self._show_info("Поделиться записью", "Зашифрованный share package сохранён.")
+        self._show_info("Поделиться записью", "Зашифрованный пакет доступа сохранён.")
         return True
 
     def share_selected_entry_public_key_to_path(
@@ -3764,7 +4015,7 @@ class MainWindow:
             permissions=SharePermissions(read=read, edit=edit, expires_in_days=expires_in_days),
         )
         self._write_audit_export_file(target_path, package)
-        self._show_info("Поделиться записью", "Public-key share package сохранён.")
+        self._show_info("Поделиться записью", "Пакет доступа с публичным ключом сохранён.")
         return True
 
     def generate_key_exchange_payload_text(self, *, identifier: str, public_key: str) -> str:
@@ -3844,24 +4095,24 @@ class MainWindow:
     def _get_export_format_descriptions(self) -> dict[str, dict[str, str]]:
         return {
             "encrypted_json": {
-                "label": "Encrypted JSON",
-                "description": "Основной безопасный формат CryptoSafe: AES-GCM, metadata, integrity, пароль экспорта.",
+                "label": "Зашифрованный JSON",
+                "description": "Основной безопасный формат CryptoSafe: AES-GCM, метаданные, проверка целостности, пароль экспорта.",
                 "extension": ".json",
             },
             "public_key_json": {
-                "label": "Public-key JSON",
+                "label": "JSON с публичным ключом",
                 "description": "Гибридное шифрование RSA-OAEP/AES-GCM для получателя с публичным ключом.",
                 "extension": ".json",
             },
             "bitwarden_encrypted_json": {
-                "label": "Bitwarden Encrypted JSON",
-                "description": "Password-protected JSON для импорта в Bitwarden: данные зашифрованы, plaintext не пишется в файл.",
+                "label": "Зашифрованный JSON Bitwarden",
+                "description": "JSON с защитой паролем для импорта в Bitwarden: данные зашифрованы, открытый текст не пишется в файл.",
                 "extension": ".json",
             },
         }
 
     def show_export_dialog(self):
-        if not self._reauthenticate_for_sensitive_action("Экспорт vault"):
+        if not self._reauthenticate_for_sensitive_action("Экспорт хранилища"):
             return False
         if not self._can_use_themed_dialogs():
             return self._show_export_dialog_fallback()
@@ -3870,7 +4121,7 @@ class MainWindow:
         result = {"value": False}
         dialog = tk.Toplevel(self.root)
         self._prepare_dialog(dialog)
-        dialog.title("Экспорт vault")
+        dialog.title("Экспорт хранилища")
         dialog.geometry(self._get_screen_limited_geometry(1040, 780))
         if hasattr(dialog, "minsize"):
             dialog.minsize(940, 700)
@@ -3880,10 +4131,10 @@ class MainWindow:
         body = self._create_scrollable_dialog_body(dialog)
         content = ttk.Frame(body, style="App.TFrame", padding=16)
         content.pack(fill=tk.BOTH, expand=True)
-        ttk.Label(content, text="Экспорт vault", style="DialogTitle.TLabel").pack(anchor=tk.W)
+        ttk.Label(content, text="Экспорт хранилища", style="DialogTitle.TLabel").pack(anchor=tk.W)
         ttk.Label(
             content,
-            text="Настройте формат, состав данных и параметры шифрования. Перед сохранением проверьте preview.",
+            text="Настройте формат, состав данных и параметры шифрования. Перед сохранением проверьте предпросмотр.",
             style="Muted.TLabel",
             wraplength=920,
         ).pack(anchor=tk.W, pady=(6, 14))
@@ -3893,7 +4144,9 @@ class MainWindow:
         right = ttk.Frame(content, style="App.TFrame")
         right.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
 
-        format_var = tk.StringVar(value="encrypted_json")
+        format_label_to_key = {description["label"]: key for key, description in formats.items()}
+        format_key_to_label = {key: description["label"] for key, description in formats.items()}
+        format_var = tk.StringVar(value=format_key_to_label["encrypted_json"])
         selected_only_var = tk.BooleanVar(value=False)
         compression_var = tk.BooleanVar(value=True)
         strength_var = tk.StringVar(value="256")
@@ -3908,6 +4161,15 @@ class MainWindow:
             "category": tk.BooleanVar(value=True),
             "tags": tk.BooleanVar(value=True),
         }
+        field_labels = {
+            "title": "Название",
+            "username": "Логин",
+            "password": "Пароль",
+            "url": "URL",
+            "notes": "Заметки",
+            "category": "Категория",
+            "tags": "Теги",
+        }
         export_entries = self._build_vault_exporter().get_entries_for_export(ExportOptions())
         selected_entry_ids = {int(entry.get("id")) for entry in self._get_selected_entries()}
         if not selected_entry_ids:
@@ -3918,7 +4180,7 @@ class MainWindow:
             left,
             textvariable=format_var,
             state="readonly",
-            values=list(formats.keys()),
+            values=list(format_label_to_key.keys()),
             width=34,
         )
         format_box.pack(fill=tk.X, pady=(0, 8))
@@ -3929,7 +4191,7 @@ class MainWindow:
 
         ttk.Label(left, text="Состав экспорта", style="DialogHeader.TLabel").pack(anchor=tk.W, pady=(0, 6))
         ttk.Checkbutton(left, text="Только выбранные записи", variable=selected_only_var).pack(anchor=tk.W, pady=2)
-        ttk.Label(left, text="Записи для selected export", style="TLabel").pack(anchor=tk.W, pady=(8, 4))
+        ttk.Label(left, text="Записи для выборочного экспорта", style="TLabel").pack(anchor=tk.W, pady=(8, 4))
         entry_tree = ttk.Treeview(
             left,
             columns=("checked", "title", "username"),
@@ -3957,7 +4219,7 @@ class MainWindow:
         fields_frame = ttk.Frame(left, style="App.TFrame")
         fields_frame.pack(fill=tk.X, pady=(8, 14))
         for index, (field, variable) in enumerate(field_vars.items()):
-            ttk.Checkbutton(fields_frame, text=field, variable=variable).grid(
+            ttk.Checkbutton(fields_frame, text=field_labels.get(field, field), variable=variable).grid(
                 row=index // 2,
                 column=index % 2,
                 sticky="w",
@@ -3972,12 +4234,12 @@ class MainWindow:
         ttk.Label(left, text="Публичный ключ получателя", style="TLabel").pack(anchor=tk.W)
         public_key_entry = ttk.Entry(left, textvariable=public_key_var)
         public_key_entry.pack(fill=tk.X, pady=(2, 8))
-        ttk.Label(left, text="Strength", style="TLabel").pack(anchor=tk.W)
+        ttk.Label(left, text="Стойкость шифрования", style="TLabel").pack(anchor=tk.W)
         strength_box = ttk.Combobox(left, textvariable=strength_var, state="readonly", values=["256", "128"], width=10)
         strength_box.pack(anchor=tk.W, pady=(2, 8))
-        ttk.Checkbutton(left, text="GZIP compression", variable=compression_var).pack(anchor=tk.W, pady=(2, 8))
+        ttk.Checkbutton(left, text="Сжатие GZIP", variable=compression_var).pack(anchor=tk.W, pady=(2, 8))
 
-        ttk.Label(right, text="Preview", style="DialogHeader.TLabel").pack(anchor=tk.W, pady=(0, 6))
+        ttk.Label(right, text="Предпросмотр", style="DialogHeader.TLabel").pack(anchor=tk.W, pady=(0, 6))
         preview_text = self._style_text_widget(tk.Text(right, wrap=tk.WORD, height=22))
         preview_text.pack(fill=tk.BOTH, expand=True)
 
@@ -4017,7 +4279,7 @@ class MainWindow:
             return "break"
 
         def refresh_preview(*_args):
-            normalized = format_var.get()
+            normalized = format_label_to_key.get(format_var.get(), format_var.get())
             info = formats.get(normalized, formats["encrypted_json"])
             description_var.set(info["description"])
             password_entry.state(["!disabled"] if normalized in {"encrypted_json", "bitwarden_encrypted_json"} else ["disabled"])
@@ -4030,41 +4292,44 @@ class MainWindow:
                     excluded_fields=selected_excluded_fields(),
                     selected_entry_ids=selected_dialog_entry_ids(),
                 )
+                mode_labels = {"selected": "выбранные записи", "full": "все записи"}
+                included_field_labels = [field_labels.get(field, field) for field in preview["included_fields"]]
+                excluded_field_labels = [field_labels.get(field, field) for field in preview["excluded_fields"]]
                 lines = [
                     f"Формат: {info['label']}",
-                    "Безопасность: encrypted by default",
-                    f"Режим: {preview['mode']}",
+                    "Безопасность: шифрование включено по умолчанию",
+                    f"Режим: {mode_labels.get(preview['mode'], preview['mode'])}",
                     f"Записей: {preview['entry_count']}",
                     f"Отмечено в списке: {len(selected_entry_ids)}",
-                    f"Поля: {', '.join(preview['included_fields'])}",
-                    f"Исключено: {', '.join(preview['excluded_fields']) or 'нет'}",
-                    f"Strength: {strength_var.get()}-bit" if normalized == "encrypted_json" else "Strength: не применяется",
-                    f"Compression: {'да' if compression_var.get() and normalized == 'encrypted_json' else 'нет'}",
+                    f"Поля: {', '.join(included_field_labels)}",
+                    f"Исключено: {', '.join(excluded_field_labels) or 'нет'}",
+                    f"Стойкость: {strength_var.get()} бит" if normalized == "encrypted_json" else "Стойкость: не применяется",
+                    f"Сжатие: {'да' if compression_var.get() and normalized == 'encrypted_json' else 'нет'}",
                     "",
                     "Первые записи:",
                     *[f"- {title}" for title in preview["titles"]],
                 ]
             except Exception as error:
-                lines = [f"Preview недоступен: {error}"]
+                lines = [f"Предпросмотр недоступен: {error}"]
             preview_text.config(state=tk.NORMAL)
             preview_text.delete("1.0", tk.END)
             preview_text.insert("1.0", "\n".join(lines))
             preview_text.config(state=tk.DISABLED)
 
         def choose_target_and_export():
-            normalized = format_var.get()
+            normalized = format_label_to_key.get(format_var.get(), format_var.get())
             if not selected_include_fields():
-                self._show_warning("Экспорт vault", "Выберите хотя бы одно поле для экспорта.", parent=dialog)
+                self._show_warning("Экспорт хранилища", "Выберите хотя бы одно поле для экспорта.", parent=dialog)
                 return
             if normalized in {"encrypted_json", "bitwarden_encrypted_json"} and not password_var.get():
-                self._show_warning("Экспорт vault", "Введите пароль экспорта.", parent=dialog)
+                self._show_warning("Экспорт хранилища", "Введите пароль экспорта.", parent=dialog)
                 return
             if normalized == "public_key_json" and not public_key_var.get().strip():
-                self._show_warning("Экспорт vault", "Вставьте публичный ключ получателя.", parent=dialog)
+                self._show_warning("Экспорт хранилища", "Вставьте публичный ключ получателя.", parent=dialog)
                 return
             extension = formats[normalized]["extension"]
             target_path = self._ask_saveas_filename(
-                title="Экспорт vault",
+                title="Экспорт хранилища",
                 defaultextension=extension,
                 filetypes=[("JSON", "*.json"), ("Все файлы", "*.*")],
                 parent=dialog,
@@ -4102,9 +4367,9 @@ class MainWindow:
                         include_fields=include_fields,
                     )
                 else:
-                    raise ValueError("Unsupported safe export format")
+                    raise ValueError("Неподдерживаемый безопасный формат экспорта")
             except Exception as error:
-                self._show_error("Экспорт vault", str(error), parent=dialog)
+                self._show_error("Экспорт хранилища", str(error), parent=dialog)
                 return
             if result["value"]:
                 dialog.destroy()
@@ -4113,7 +4378,7 @@ class MainWindow:
             variable.trace_add("write", refresh_preview)
         format_box.bind("<<ComboboxSelected>>", refresh_preview)
         entry_tree.bind("<ButtonRelease-1>", toggle_export_entry_from_event)
-        ttk.Button(button_bar, text="Обновить preview", style="Ghost.TButton", command=refresh_preview).pack(side=tk.LEFT)
+        ttk.Button(button_bar, text="Обновить предпросмотр", style="Ghost.TButton", command=refresh_preview).pack(side=tk.LEFT)
         ttk.Button(button_bar, text="Отмена", style="Ghost.TButton", command=dialog.destroy).pack(side=tk.RIGHT, padx=(8, 0))
         ttk.Button(button_bar, text="Экспортировать", style="Accent.TButton", command=choose_target_and_export).pack(side=tk.RIGHT)
 
@@ -4123,21 +4388,21 @@ class MainWindow:
 
     def _show_export_dialog_fallback(self):
         export_format = self._ask_string(
-            "Экспорт vault",
+            "Экспорт хранилища",
             "Формат: encrypted_json, public_key_json или bitwarden_encrypted_json",
             initialvalue="encrypted_json",
         )
         if not export_format:
             return False
         normalized_format = str(export_format).strip().lower()
-        selected_only = self._ask_yes_no("Экспорт vault", "Экспортировать только выбранные записи?")
+        selected_only = self._ask_yes_no("Экспорт хранилища", "Экспортировать только выбранные записи?")
         include_fields = self._build_export_include_fields([])
         if normalized_format in {"encrypted_json", "json"}:
             password = self._ask_string("Пароль экспорта", "Введите пароль для файла экспорта:", show="*")
             if not password:
                 return False
             target_path = self._ask_saveas_filename(
-                title="Экспорт vault",
+                title="Экспорт хранилища",
                 defaultextension=".json",
                 filetypes=[("CryptoSafe JSON", "*.json"), ("Все файлы", "*.*")],
             )
@@ -4149,7 +4414,7 @@ class MainWindow:
             if not public_key:
                 return False
             target_path = self._ask_saveas_filename(
-                title="Экспорт vault public-key",
+                title="Экспорт хранилища с публичным ключом",
                 defaultextension=".json",
                 filetypes=[("CryptoSafe JSON", "*.json"), ("Все файлы", "*.*")],
             )
@@ -4157,11 +4422,11 @@ class MainWindow:
                 return False
             return self.export_vault_public_key_json_to_path(target_path, public_key, selected_only=selected_only, include_fields=include_fields)
         if normalized_format in {"bitwarden_encrypted_json", "bitwarden"}:
-            password = self._ask_string("Пароль экспорта", "Введите пароль для Bitwarden encrypted JSON:", show="*")
+            password = self._ask_string("Пароль экспорта", "Введите пароль для зашифрованного JSON Bitwarden:", show="*")
             if not password:
                 return False
             target_path = self._ask_saveas_filename(
-                title="Экспорт Bitwarden encrypted JSON",
+                title="Экспорт зашифрованного JSON Bitwarden",
                 defaultextension=".json",
                 filetypes=[("Bitwarden JSON", "*.json"), ("Все файлы", "*.*")],
             )
@@ -4173,11 +4438,11 @@ class MainWindow:
                 selected_only=selected_only,
                 include_fields=include_fields,
             )
-        self._show_error("Экспорт vault", "Поддерживаются encrypted_json, public_key_json и bitwarden_encrypted_json.")
+        self._show_error("Экспорт хранилища", "Поддерживаются зашифрованный JSON, JSON с публичным ключом и зашифрованный JSON Bitwarden.")
         return False
 
     def show_import_dialog(self):
-        if not self._reauthenticate_for_sensitive_action("Импорт vault"):
+        if not self._reauthenticate_for_sensitive_action("Импорт хранилища"):
             return False
         if not self._can_use_themed_dialogs():
             return self._show_import_dialog_fallback()
@@ -4185,7 +4450,7 @@ class MainWindow:
         result = {"value": False}
         dialog = tk.Toplevel(self.root)
         self._prepare_dialog(dialog)
-        dialog.title("Импорт vault")
+        dialog.title("Импорт хранилища")
         dialog.geometry(self._get_screen_limited_geometry(1040, 760))
         if hasattr(dialog, "minsize"):
             dialog.minsize(940, 680)
@@ -4195,10 +4460,10 @@ class MainWindow:
         body = self._create_scrollable_dialog_body(dialog)
         content = ttk.Frame(body, style="App.TFrame", padding=16)
         content.pack(fill=tk.BOTH, expand=True)
-        ttk.Label(content, text="Импорт vault", style="DialogTitle.TLabel").pack(anchor=tk.W)
+        ttk.Label(content, text="Импорт хранилища", style="DialogTitle.TLabel").pack(anchor=tk.W)
         ttk.Label(
             content,
-            text="Выберите файл, проверьте auto-detect и preview. По умолчанию импорт не применяется, пока вы явно не выберете режим.",
+            text="Выберите файл, проверьте автоопределение и предпросмотр. По умолчанию импорт не применяется, пока вы явно не выберете режим.",
             style="Muted.TLabel",
             wraplength=920,
         ).pack(anchor=tk.W, pady=(6, 14))
@@ -4206,9 +4471,29 @@ class MainWindow:
         top = ttk.Frame(content, style="App.TFrame")
         top.pack(fill=tk.X, pady=(0, 12))
         source_var = tk.StringVar()
-        format_var = tk.StringVar(value="auto")
-        mode_var = tk.StringVar(value="dry-run")
-        duplicate_var = tk.StringVar(value="skip")
+        format_labels = {
+            "auto": "Авто",
+            "encrypted_json": "Зашифрованный JSON",
+            "share_package": "Пакет доступа CryptoSafe",
+            "csv": "CSV",
+            "lastpass_csv": "LastPass CSV",
+            "bitwarden_json": "Bitwarden JSON",
+        }
+        format_label_to_key = {label: key for key, label in format_labels.items()}
+        mode_labels = {
+            "dry-run": "Только предпросмотр",
+            "merge": "Добавить/обновить",
+            "replace": "Заменить",
+        }
+        mode_label_to_key = {label: key for key, label in mode_labels.items()}
+        duplicate_labels = {
+            "skip": "Пропускать",
+            "replace": "Заменять",
+        }
+        duplicate_label_to_key = {label: key for key, label in duplicate_labels.items()}
+        format_var = tk.StringVar(value=format_labels["auto"])
+        mode_var = tk.StringVar(value=mode_labels["dry-run"])
+        duplicate_var = tk.StringVar(value=duplicate_labels["skip"])
         password_var = tk.StringVar()
         detected_var = tk.StringVar(value="Формат ещё не определён")
 
@@ -4219,7 +4504,7 @@ class MainWindow:
 
         def browse_file():
             path = self._ask_open_filename(
-                title="Импорт vault",
+                title="Импорт хранилища",
                 filetypes=[("Поддерживаемые файлы", "*.json *.csv"), ("Все файлы", "*.*")],
                 parent=dialog,
             )
@@ -4235,7 +4520,7 @@ class MainWindow:
             top,
             textvariable=format_var,
             state="readonly",
-            values=["auto", "encrypted_json", "csv", "lastpass_csv", "bitwarden_json"],
+            values=list(format_labels.values()),
             width=24,
         ).grid(row=1, column=1, sticky="w", pady=4)
         ttk.Label(top, textvariable=detected_var, style="Muted.TLabel").grid(row=1, column=2, sticky="w", padx=(8, 0), pady=4)
@@ -4245,7 +4530,7 @@ class MainWindow:
             top,
             textvariable=mode_var,
             state="readonly",
-            values=["dry-run", "merge", "replace"],
+            values=list(mode_labels.values()),
             width=24,
         ).grid(row=2, column=1, sticky="w", pady=4)
 
@@ -4254,7 +4539,7 @@ class MainWindow:
             top,
             textvariable=duplicate_var,
             state="readonly",
-            values=["skip", "replace"],
+            values=list(duplicate_labels.values()),
             width=14,
         ).grid(row=2, column=3, sticky="w", pady=4)
 
@@ -4266,7 +4551,7 @@ class MainWindow:
         preview_text.pack(fill=tk.BOTH, expand=True, pady=(6, 12))
 
         def selected_format() -> str:
-            chosen = str(format_var.get() or "auto").strip().lower()
+            chosen = format_label_to_key.get(format_var.get(), str(format_var.get() or "auto").strip().lower())
             if chosen != "auto":
                 return chosen
             path = source_var.get().strip()
@@ -4283,22 +4568,29 @@ class MainWindow:
             try:
                 with open(path, "rb") as handle:
                     detected = self.detect_vault_import_format(path, handle.read())
-                detected_var.set(f"Auto-detect: {detected}")
+                detected_var.set(f"Автоопределение: {format_labels.get(detected, detected)}")
             except Exception as error:
-                detected_var.set(f"Auto-detect: {error}")
+                detected_var.set(f"Автоопределение: {error}")
 
         def refresh_preview(*_args):
             path = source_var.get().strip()
             lines = []
             if not path:
-                lines = ["Выберите файл для preview."]
+                lines = ["Выберите файл для предпросмотра."]
             elif not os.path.exists(path):
                 lines = ["Файл не найден."]
             else:
                 try:
                     fmt = selected_format()
-                    if fmt in {"encrypted_json", "json"} and not password_var.get():
-                        lines = ["Encrypted JSON определён. Введите пароль, чтобы показать preview."]
+                    if fmt == "share_package" and not password_var.get():
+                        with open(path, "rb") as handle:
+                            method = self._get_share_package_encryption_method(handle.read())
+                        if method == "password":
+                            lines = ["Определён пакет доступа CryptoSafe. Введите пароль пакета, чтобы показать предпросмотр."]
+                        else:
+                            lines = ["Определён пакет доступа CryptoSafe. Введите приватный ключ, чтобы показать предпросмотр."]
+                    elif fmt in {"encrypted_json", "json"} and not password_var.get():
+                        lines = ["Определён зашифрованный JSON. Введите пароль, чтобы показать предпросмотр."]
                     else:
                         preview = self.preview_vault_import_file(
                             path,
@@ -4306,7 +4598,7 @@ class MainWindow:
                             password=password_var.get(),
                         )
                         lines = [
-                            f"Формат: {preview['format']}",
+                            f"Формат: {format_labels.get(preview['format'], preview['format'])}",
                             f"Режим: {mode_var.get()}",
                             f"Дубликаты: {duplicate_var.get()}",
                             f"Проверено записей: {preview['validated']}",
@@ -4315,7 +4607,7 @@ class MainWindow:
                             *[f"- {title}" for title in preview["titles"]],
                         ]
                 except Exception as error:
-                    lines = [f"Preview недоступен: {error}"]
+                    lines = [f"Предпросмотр недоступен: {error}"]
             preview_text.config(state=tk.NORMAL)
             preview_text.delete("1.0", tk.END)
             preview_text.insert("1.0", "\n".join(lines))
@@ -4324,7 +4616,7 @@ class MainWindow:
         def apply_import():
             path = source_var.get().strip()
             if not path:
-                self._show_warning("Импорт vault", "Выберите файл импорта.", parent=dialog)
+                self._show_warning("Импорт хранилища", "Выберите файл импорта.", parent=dialog)
                 return
             try:
                 fmt = selected_format()
@@ -4332,17 +4624,17 @@ class MainWindow:
                     path,
                     import_format=fmt,
                     password=password_var.get(),
-                    mode=mode_var.get(),
-                    duplicate_strategy=duplicate_var.get(),
+                    mode=mode_label_to_key.get(mode_var.get(), mode_var.get()),
+                    duplicate_strategy=duplicate_label_to_key.get(duplicate_var.get(), duplicate_var.get()),
                 )
             except Exception as error:
-                self._show_error("Импорт vault", str(error), parent=dialog)
+                self._show_error("Импорт хранилища", str(error), parent=dialog)
                 return
             dialog.destroy()
 
         button_bar = ttk.Frame(dialog, style="App.TFrame")
         button_bar.pack(fill=tk.X, padx=16, pady=(0, 16))
-        ttk.Button(button_bar, text="Preview", style="Ghost.TButton", command=refresh_preview).pack(side=tk.LEFT)
+        ttk.Button(button_bar, text="Предпросмотр", style="Ghost.TButton", command=refresh_preview).pack(side=tk.LEFT)
         ttk.Button(button_bar, text="Отмена", style="Ghost.TButton", command=dialog.destroy).pack(side=tk.RIGHT, padx=(8, 0))
         ttk.Button(button_bar, text="Импортировать", style="Accent.TButton", command=apply_import).pack(side=tk.RIGHT)
 
@@ -4355,26 +4647,26 @@ class MainWindow:
 
     def _show_import_dialog_fallback(self):
         import_format = self._ask_string(
-            "Импорт vault",
-            "Формат: auto, encrypted_json, csv, lastpass_csv или bitwarden_json",
+            "Импорт хранилища",
+            "Формат: auto, encrypted_json, share_package, csv, lastpass_csv или bitwarden_json",
             initialvalue="auto",
         )
         if not import_format:
             return False
         source_path = self._ask_open_filename(
-            title="Импорт vault",
+            title="Импорт хранилища",
             filetypes=[("Поддерживаемые файлы", "*.json *.csv"), ("Все файлы", "*.*")],
         )
         if not source_path:
             return False
-        mode = "merge" if self._ask_yes_no("Импорт vault", "Применить импорт сейчас? Нет = dry-run preview.") else "dry-run"
+        mode = "merge" if self._ask_yes_no("Импорт хранилища", "Применить импорт сейчас? Нет = только предпросмотр.") else "dry-run"
         password = ""
-        if str(import_format).strip().lower() in {"encrypted_json", "json", "auto"}:
-            password = self._ask_string("Пароль импорта", "Введите пароль файла экспорта, если он нужен:", show="*") or ""
+        if str(import_format).strip().lower() in {"encrypted_json", "json", "share_package", "auto"}:
+            password = self._ask_string("Секрет импорта", "Введите пароль файла экспорта, пароль пакета доступа или приватный ключ, если он нужен:", show="*") or ""
         try:
             return self.import_vault_file(source_path, import_format=import_format, password=password, mode=mode)
         except ImportExportError as error:
-            self._show_error("Импорт vault", str(error))
+            self._show_error("Импорт хранилища", str(error))
             return False
 
     def show_share_dialog(self):
@@ -4402,7 +4694,7 @@ class MainWindow:
         ttk.Label(content, text="Поделиться записью", style="DialogTitle.TLabel").pack(anchor=tk.W)
         ttk.Label(
             content,
-            text=f"Запись: {entry.get('title', '')}. Настройте получателя, права, срок и способ доставки.",
+            text=f"Запись: {entry.get('title', '')}. Настройте получателя, права, срок и способ передачи.",
             style="Muted.TLabel",
             wraplength=880,
         ).pack(anchor=tk.W, pady=(6, 14))
@@ -4412,9 +4704,19 @@ class MainWindow:
         right = ttk.Frame(content, style="App.TFrame")
         right.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
 
+        method_labels = {
+            "password": "Пароль",
+            "public_key": "Публичный ключ",
+        }
+        method_label_to_key = {label: key for key, label in method_labels.items()}
+        delivery_labels = {
+            "file": "Файл",
+            "qr": "QR",
+        }
+        delivery_label_to_key = {label: key for key, label in delivery_labels.items()}
         recipient_var = tk.StringVar()
-        method_var = tk.StringVar(value="password")
-        delivery_var = tk.StringVar(value="file")
+        method_var = tk.StringVar(value=method_labels["password"])
+        delivery_var = tk.StringVar(value=delivery_labels["file"])
         expiration_var = tk.IntVar(value=7)
         read_var = tk.BooleanVar(value=True)
         edit_var = tk.BooleanVar(value=False)
@@ -4424,27 +4726,27 @@ class MainWindow:
         ttk.Label(left, text="Получатель", style="DialogHeader.TLabel").pack(anchor=tk.W, pady=(0, 6))
         ttk.Entry(left, textvariable=recipient_var).pack(fill=tk.X, pady=(0, 10))
         ttk.Label(left, text="Метод шифрования", style="TLabel").pack(anchor=tk.W)
-        ttk.Combobox(left, textvariable=method_var, state="readonly", values=["password", "public_key"], width=24).pack(anchor=tk.W, pady=(2, 10))
+        ttk.Combobox(left, textvariable=method_var, state="readonly", values=list(method_labels.values()), width=24).pack(anchor=tk.W, pady=(2, 10))
         ttk.Label(left, text="Доставка", style="TLabel").pack(anchor=tk.W)
-        ttk.Combobox(left, textvariable=delivery_var, state="readonly", values=["file", "qr"], width=24).pack(anchor=tk.W, pady=(2, 10))
+        ttk.Combobox(left, textvariable=delivery_var, state="readonly", values=list(delivery_labels.values()), width=24).pack(anchor=tk.W, pady=(2, 10))
         ttk.Label(left, text="Срок действия, дней (1-30)", style="TLabel").pack(anchor=tk.W)
         ttk.Spinbox(left, from_=1, to=30, textvariable=expiration_var, width=8).pack(anchor=tk.W, pady=(2, 10))
-        ttk.Checkbutton(left, text="Read permission", variable=read_var).pack(anchor=tk.W, pady=2)
-        ttk.Checkbutton(left, text="Edit permission", variable=edit_var).pack(anchor=tk.W, pady=2)
+        ttk.Checkbutton(left, text="Право на чтение", variable=read_var).pack(anchor=tk.W, pady=2)
+        ttk.Checkbutton(left, text="Право на изменение", variable=edit_var).pack(anchor=tk.W, pady=2)
 
-        ttk.Label(left, text="Пароль share package", style="TLabel").pack(anchor=tk.W, pady=(12, 2))
+        ttk.Label(left, text="Пароль пакета доступа", style="TLabel").pack(anchor=tk.W, pady=(12, 2))
         password_entry = ttk.Entry(left, textvariable=password_var, show="*")
         password_entry.pack(fill=tk.X, pady=(0, 8))
         ttk.Label(left, text="Публичный ключ получателя", style="TLabel").pack(anchor=tk.W, pady=(8, 2))
         public_key_entry = ttk.Entry(left, textvariable=public_key_var)
         public_key_entry.pack(fill=tk.X, pady=(0, 8))
 
-        ttk.Label(right, text="Share history", style="DialogHeader.TLabel").pack(anchor=tk.W, pady=(0, 6))
+        ttk.Label(right, text="История отправки", style="DialogHeader.TLabel").pack(anchor=tk.W, pady=(0, 6))
         history_text = self._style_text_widget(tk.Text(right, wrap=tk.WORD, height=18))
         history_text.pack(fill=tk.BOTH, expand=True)
 
         def refresh_controls(*_args):
-            if method_var.get() == "password":
+            if method_label_to_key.get(method_var.get(), method_var.get()) == "password":
                 password_entry.state(["!disabled"])
                 public_key_entry.state(["disabled"])
             else:
@@ -4457,7 +4759,7 @@ class MainWindow:
                     f"{item.get('computed_status', item.get('status', ''))} | до {item.get('expires_at', '')}"
                 )
             if not lines:
-                lines = ["История share пока пустая."]
+                lines = ["История отправки пока пустая."]
             history_text.config(state=tk.NORMAL)
             history_text.delete("1.0", tk.END)
             history_text.insert("1.0", "\n".join(lines))
@@ -4472,15 +4774,15 @@ class MainWindow:
                 self._show_warning("Поделиться записью", "Выберите хотя бы одно право доступа.", parent=dialog)
                 return
             target_path = self._ask_saveas_filename(
-                title="Сохранить share package",
+                title="Сохранить пакет доступа",
                 defaultextension=".cs-share.json",
-                filetypes=[("CryptoSafe Share", "*.json"), ("Все файлы", "*.*")],
+                filetypes=[("Пакет доступа CryptoSafe", "*.json"), ("Все файлы", "*.*")],
                 parent=dialog,
             )
             if not target_path:
                 return
             try:
-                if method_var.get() == "public_key":
+                if method_label_to_key.get(method_var.get(), method_var.get()) == "public_key":
                     public_key = public_key_var.get().strip()
                     if not public_key:
                         self._show_warning("Поделиться записью", "Вставьте публичный ключ получателя.", parent=dialog)
@@ -4496,7 +4798,7 @@ class MainWindow:
                 else:
                     password = password_var.get()
                     if not password:
-                        self._show_warning("Поделиться записью", "Введите пароль share package.", parent=dialog)
+                        self._show_warning("Поделиться записью", "Введите пароль пакета доступа.", parent=dialog)
                         return
                     result["value"] = self.share_selected_entry_to_path(
                         target_path,
@@ -4510,12 +4812,12 @@ class MainWindow:
                 self._show_error("Поделиться записью", str(error), parent=dialog)
                 return
             if result["value"]:
-                if delivery_var.get() == "qr":
+                if delivery_label_to_key.get(delivery_var.get(), delivery_var.get()) == "qr":
                     try:
                         with open(target_path, "r", encoding="utf-8") as handle:
                             package_payload = handle.read()
                         pngs = self.generate_share_package_qr_pngs(package_payload=package_payload, label=recipient)
-                        self._show_qr_png_preview("QR share package", pngs, parent=dialog)
+                        self._show_qr_png_preview("QR пакета доступа", pngs, parent=dialog)
                         return
                     except Exception as error:
                         self._show_error("Поделиться записью", f"Package сохранён, но QR не создан: {error}", parent=dialog)
@@ -4529,7 +4831,7 @@ class MainWindow:
         button_bar.pack(fill=tk.X, padx=16, pady=(0, 16))
         ttk.Button(button_bar, text="Обновить историю", style="Ghost.TButton", command=refresh_controls).pack(side=tk.LEFT)
         ttk.Button(button_bar, text="Отмена", style="Ghost.TButton", command=dialog.destroy).pack(side=tk.RIGHT, padx=(8, 0))
-        ttk.Button(button_bar, text="Создать package", style="Accent.TButton", command=create_share).pack(side=tk.RIGHT)
+        ttk.Button(button_bar, text="Создать пакет", style="Accent.TButton", command=create_share).pack(side=tk.RIGHT)
         dialog.wait_window()
         return result["value"]
 
@@ -4541,9 +4843,9 @@ class MainWindow:
         if not method:
             return False
         target_path = self._ask_saveas_filename(
-            title="Сохранить share package",
+            title="Сохранить пакет доступа",
             defaultextension=".cs-share.json",
-            filetypes=[("CryptoSafe Share", "*.json"), ("Все файлы", "*.*")],
+            filetypes=[("Пакет доступа CryptoSafe", "*.json"), ("Все файлы", "*.*")],
         )
         if not target_path:
             return False
@@ -4557,7 +4859,7 @@ class MainWindow:
                 public_key=public_key,
                 expires_in_days=7,
             )
-        password = self._ask_string("Пароль share package", "Пароль для получателя:", show="*")
+        password = self._ask_string("Пароль пакета доступа", "Пароль для получателя:", show="*")
         if not password:
             return False
         return self.share_selected_entry_to_path(
@@ -4585,7 +4887,7 @@ class MainWindow:
         ttk.Label(content, text=title, style="DialogTitle.TLabel").pack(anchor=tk.W)
         ttk.Label(
             content,
-            text=f"Показан QR 1 из {len(pngs)}. Полный share package уже сохранён в файл.",
+            text=f"Показан QR 1 из {len(pngs)}. Полный пакет доступа уже сохранён в файл.",
             style="Muted.TLabel",
             wraplength=540,
         ).pack(anchor=tk.W, pady=(6, 14))
@@ -4626,7 +4928,7 @@ class MainWindow:
             image = tk.PhotoImage(data=b64encode(pngs[0]).decode("ascii"))
             qr_preview.configure(image=image, text="")
             qr_preview.image = image
-            qr_status.configure(text=f"Показан QR 1 из {len(pngs)}. QR действителен 5 минут; auto-refresh обновит payload.")
+            qr_status.configure(text=f"Показан QR 1 из {len(pngs)}. QR действителен 5 минут; автообновление обновит пакет обмена.")
 
         def cancel_auto_refresh():
             after_id = last_bundle.get("after_id")
@@ -4663,7 +4965,7 @@ class MainWindow:
             schedule_auto_refresh()
 
         def generate():
-            identifier = self._ask_string("Обмен ключами", "Identifier контакта:", initialvalue="local-user")
+            identifier = self._ask_string("Обмен ключами", "Идентификатор контакта:", initialvalue="local-user")
             if not identifier:
                 return
             output_dir = self._ask_directory(title="Куда сохранить ключи и QR?")
@@ -4693,16 +4995,16 @@ class MainWindow:
             try:
                 payload_text = self.scan_key_exchange_payload_from_camera()
             except ImportExportError as error:
-                self._show_error("QR camera", str(error), parent=dialog)
+                self._show_error("QR-камера", str(error), parent=dialog)
                 return
             text.delete("1.0", tk.END)
             text.insert("1.0", payload_text)
-            qr_status.configure(text="Payload получен с camera scanner. Проверьте fingerprint и импортируйте.")
+            qr_status.configure(text="Пакет обмена получен со сканера камеры. Проверьте отпечаток и импортируйте.")
 
         def copy_payload():
             payload_text = text.get("1.0", tk.END).strip()
             if not payload_text:
-                self._show_warning("Обмен ключами", "Нет payload для копирования.", parent=dialog)
+                self._show_warning("Обмен ключами", "Нет пакета обмена для копирования.", parent=dialog)
                 return
             try:
                 self.clipboard_service.copy_text(
@@ -4714,7 +5016,7 @@ class MainWindow:
             except ClipboardAccessError as error:
                 self._show_error("Буфер обмена", str(error), parent=dialog)
                 return
-            self._show_info("Обмен ключами", "Payload скопирован в буфер с автоочисткой.", parent=dialog)
+            self._show_info("Обмен ключами", "Пакет обмена скопирован в буфер с автоочисткой.", parent=dialog)
 
         def import_qr_svg():
             file_paths = self._ask_open_filenames(
@@ -4732,26 +5034,26 @@ class MainWindow:
                 self._show_error("Обмен ключами", str(error), parent=dialog)
 
         dialog.protocol("WM_DELETE_WINDOW", lambda: (cancel_auto_refresh(), dialog.destroy()))
-        ttk.Checkbutton(controls, text="Auto-refresh QR каждые 4 минуты", variable=auto_refresh_var, command=schedule_auto_refresh).pack(side=tk.LEFT, padx=3)
-        ttk.Button(controls, text="Сгенерировать payload", style="Ghost.TButton", command=generate).pack(side=tk.LEFT, padx=3)
+        ttk.Checkbutton(controls, text="Автообновлять QR каждые 4 минуты", variable=auto_refresh_var, command=schedule_auto_refresh).pack(side=tk.LEFT, padx=3)
+        ttk.Button(controls, text="Сгенерировать пакет", style="Ghost.TButton", command=generate).pack(side=tk.LEFT, padx=3)
         ttk.Button(controls, text="Сканировать камерой", style="Ghost.TButton", command=scan_camera).pack(side=tk.LEFT, padx=3)
-        ttk.Button(controls, text="Импортировать payload", style="Ghost.TButton", command=import_payload).pack(side=tk.LEFT, padx=3)
+        ttk.Button(controls, text="Импортировать пакет", style="Ghost.TButton", command=import_payload).pack(side=tk.LEFT, padx=3)
         ttk.Button(controls, text="Импортировать QR SVG", style="Ghost.TButton", command=import_qr_svg).pack(side=tk.LEFT, padx=3)
-        ttk.Button(controls, text="Копировать payload", style="Ghost.TButton", command=copy_payload).pack(side=tk.LEFT, padx=3)
+        ttk.Button(controls, text="Копировать пакет", style="Ghost.TButton", command=copy_payload).pack(side=tk.LEFT, padx=3)
         ttk.Button(controls, text="Закрыть", style="Ghost.TButton", command=lambda: (cancel_auto_refresh(), dialog.destroy())).pack(side=tk.RIGHT, padx=3)
         return dialog
 
     def _format_key_exchange_bundle_summary(self, bundle: dict) -> str:
         qr_list = "\n".join(f"- {path}" for path in bundle.get("qr_paths", []))
         return (
-            "Key exchange files generated.\n\n"
-            f"Fingerprint: {bundle.get('fingerprint', '')}\n"
-            f"Valid until: {bundle.get('expires_at', '')}\n\n"
-            "Private key file - keep it secret:\n"
+            "Файлы обмена ключами созданы.\n\n"
+            f"Отпечаток: {bundle.get('fingerprint', '')}\n"
+            f"Действительно до: {bundle.get('expires_at', '')}\n\n"
+            "Файл приватного ключа - храните его в секрете:\n"
             f"{bundle.get('private_key_path', '')}\n\n"
-            "Public payload file - safe to share:\n"
+            "Публичный файл пакета обмена: его можно безопасно передать:\n"
             f"{bundle.get('payload_path', '')}\n\n"
-            "QR SVG file(s):\n"
+            "Файлы QR SVG:\n"
             f"{qr_list}\n"
         )
 
@@ -4791,17 +5093,17 @@ class MainWindow:
             "entry_viewed": "Просмотр записи",
             "entry_updated": "Обновление записи",
             "entry_deleted": "Удаление записи",
-            "user_logged_in": "Вход в vault",
+            "user_logged_in": "Вход в хранилище",
             "user_login_failed": "Неуспешный вход",
-            "user_logged_out": "Выход из vault",
+            "user_logged_out": "Выход из хранилища",
             "password_changed": "Смена мастер-пароля",
             "clipboard_copied": "Копирование в буфер обмена",
             "clipboard_cleared": "Очистка буфера обмена",
             "clipboard_error": "Ошибка буфера обмена",
-            "vault_locked": "Блокировка vault",
-            "vault_unlocked": "Разблокировка vault",
+            "vault_locked": "Блокировка хранилища",
+            "vault_unlocked": "Разблокировка хранилища",
             "settings_changed": "Изменение настроек",
-            "search_performed": "Поиск по vault",
+            "search_performed": "Поиск по хранилищу",
             "app_started": "Запуск приложения",
             "app_shutdown": "Завершение приложения",
             "audit_log_exported": "Экспорт журнала аудита",
@@ -4809,8 +5111,8 @@ class MainWindow:
             "audit_log_protection_triggered": "Срабатывание защиты журнала аудита",
             "audit_verification_passed": "Проверка аудита пройдена",
             "audit_verification_failed": "Проверка аудита не пройдена",
-            "panic_mode_activated": "Panic mode включён",
-            "panic_mode_deactivated": "Panic mode восстановлен",
+            "panic_mode_activated": "Паник-режим включён",
+            "panic_mode_deactivated": "Паник-режим восстановлен",
         }
         return action_labels.get(str(action or "").strip(), str(action or ""))
 
@@ -4858,8 +5160,8 @@ class MainWindow:
                 "value_too_large": "превышен безопасный лимит данных",
                 "blocked_on_suspicious": "копирование заблокировано защитой",
                 "entry_copy_disabled": "копирование запрещено политикой записи",
-                "application_not_allowed": "приложение не входит в whitelist",
-                "vault_locked": "vault заблокирован",
+                "application_not_allowed": "приложение не входит в список разрешённых",
+                "vault_locked": "хранилище заблокировано",
                 "adapter_write_failed": "сбой записи через системный адаптер",
                 "adapter_clear_failed": "сбой системной очистки буфера обмена",
                 "monitor_unavailable": "мониторинг буфера обмена недоступен",
@@ -5155,9 +5457,10 @@ class MainWindow:
         chart_width = int(canvas.cget("width")) if hasattr(canvas, "cget") else 520
         bar_height = 20
         gap = 10
-        left = 140
+        label_width = min(320, max(220, chart_width // 3))
+        left = label_width + 12
         top = 12
-        usable_width = max(80, chart_width - left - 24)
+        usable_width = max(80, chart_width - left - 52)
         max_count = max(item["count"] for item in frequency) or 1
 
         for index, item in enumerate(frequency):
@@ -5165,10 +5468,17 @@ class MainWindow:
             y2 = y1 + bar_height
             width = int((item["count"] / max_count) * usable_width)
             if hasattr(canvas, "create_text"):
-                canvas.create_text(8, y1 + bar_height / 2, anchor="w", text=item["label"][:24], fill=self.UI_COLORS["muted"])
+                canvas.create_text(
+                    8,
+                    y1 + bar_height / 2,
+                    anchor="w",
+                    text=item["label"][:32],
+                    fill=self.UI_COLORS["muted"],
+                )
             canvas.create_rectangle(left, y1, left + width, y2, fill=self.UI_COLORS["accent"], outline="")
             if hasattr(canvas, "create_text"):
-                canvas.create_text(left + width + 8, y1 + bar_height / 2, anchor="w", text=str(item["count"]), fill=self.UI_COLORS["ink"])
+                count_x = min(left + width + 8, chart_width - 32)
+                canvas.create_text(count_x, y1 + bar_height / 2, anchor="w", text=str(item["count"]), fill=self.UI_COLORS["ink"])
 
     def _build_audit_log_detail_lines(self, log) -> list[str]:
         parsed_details = self._parse_audit_details(getattr(log, "details", ""))
@@ -5193,10 +5503,10 @@ class MainWindow:
             f"Серьёзность: {getattr(log, 'severity', 'INFO')}",
             f"Пользователь: {getattr(log, 'user_id', 'local-user')}",
             f"Источник: {getattr(log, 'source', 'unknown')}",
-            f"Entry ID: {getattr(log, 'entry_id', '-')}",
+            f"ID записи: {getattr(log, 'entry_id', '-')}",
             f"Статус подписи: {verification_status}",
-            f"Previous hash: {getattr(log, 'previous_hash', '')}",
-            f"Current hash: {getattr(log, 'entry_hash', '')}",
+            f"Предыдущий хэш: {getattr(log, 'previous_hash', '')}",
+            f"Текущий хэш: {getattr(log, 'entry_hash', '')}",
             "",
             "Структурированные детали:",
         ]
@@ -5234,7 +5544,7 @@ class MainWindow:
                 if hasattr(tree, "see"):
                     tree.see(item_id)
             if hasattr(self, "_set_status"):
-                self._set_status(f"Выбрана связанная запись vault: #{entry_id}")
+                self._set_status(f"Выбрана связанная запись хранилища: #{entry_id}")
             return True
         return False
 
@@ -5262,7 +5572,7 @@ class MainWindow:
             if not self._highlight_vault_entry_from_audit_log(log):
                 self._show_info(
                     "Журнал аудита",
-                    "Связанная запись vault не найдена в текущем списке.",
+                    "Связанная запись хранилища не найдена в текущем списке.",
                 )
             return
         if action_id == "inspect_failed_login":
@@ -5827,9 +6137,9 @@ class MainWindow:
         dialog = tk.Toplevel(self.root)
         self._prepare_dialog(dialog)
         dialog.title("Журнал аудита")
-        dialog.geometry("1180x760")
+        dialog.geometry(self._get_screen_limited_geometry(1240, 820))
         if hasattr(dialog, "minsize"):
-            dialog.minsize(1040, 680)
+            dialog.minsize(960, 640)
 
         filter_frame = ttk.Frame(dialog, style="App.TFrame")
         filter_frame.pack(fill=tk.X, padx=8, pady=8)
@@ -5898,7 +6208,7 @@ class MainWindow:
             "severity": "Серьёзность",
             "source": "Источник",
             "user_id": "Пользователь",
-            "entry_id": "Entry ID",
+            "entry_id": "ID записи",
         }
 
         def toggle_sort(column_name: str):
@@ -6085,16 +6395,21 @@ class MainWindow:
             linux_selection_mode="clipboard",
         )
 
+        security_level_labels = {
+            "basic": "базовый",
+            "advanced": "повышенный",
+            "paranoid": "параноидальный",
+        }
         lines = [
-            "Диагностика secure clipboard",
+            "Диагностика защищённого буфера обмена",
             f"Активен: {'да' if status.active else 'нет'}",
             f"Тип данных: {self._format_clipboard_data_type(status.data_type)}",
             f"Режим доставки: {self._format_clipboard_delivery_mode(service_settings.get('delivery_mode', 'system'))}",
-            f"Уровень защиты: {service_settings.get('security_level', 'basic')}",
+            f"Уровень защиты: {security_level_labels.get(str(service_settings.get('security_level', 'basic')).strip().lower(), service_settings.get('security_level', 'basic'))}",
             f"Источник: {status.source_label or 'не указан'}",
             f"Осталось времени: {status.remaining_seconds} сек" if status.active else "Осталось времени: нет активных данных",
             "",
-            "Проверка platform adapter:",
+            "Проверка системного адаптера:",
         ]
 
         for adapter_info in platform_report.get("adapters", []):
@@ -6104,26 +6419,26 @@ class MainWindow:
         lines.extend(
             [
                 "",
-                "Проверка memory exposure:",
+                "Проверка следов в памяти:",
             ]
         )
         if memory_report:
-            lines.append(f"- delivery_mode: {memory_report.get('delivery_mode', 'system')}")
-            lines.append(f"- plaintext в mask: {'да' if memory_report.get('in_mask_buffer') else 'нет'}")
-            lines.append(f"- plaintext в text_mask: {'да' if memory_report.get('in_text_mask_buffer') else 'нет'}")
-            lines.append(f"- plaintext в source_label: {'да' if memory_report.get('in_source_label') else 'нет'}")
-            lines.append(f"- plaintext в state_manager: {'да' if memory_report.get('in_state_manager') else 'нет'}")
+            lines.append(f"- режим доставки: {self._format_clipboard_delivery_mode(memory_report.get('delivery_mode', 'system'))}")
+            lines.append(f"- открытый текст в mask: {'да' if memory_report.get('in_mask_buffer') else 'нет'}")
+            lines.append(f"- открытый текст в text_mask: {'да' if memory_report.get('in_text_mask_buffer') else 'нет'}")
+            lines.append(f"- открытый текст в source_label: {'да' if memory_report.get('in_source_label') else 'нет'}")
+            lines.append(f"- открытый текст в state_manager: {'да' if memory_report.get('in_state_manager') else 'нет'}")
         else:
-            lines.append("- активных данных для self-check нет")
+            lines.append("- активных данных для самопроверки нет")
         return lines
 
     def show_clipboard_diagnostics(self):
         dialog = tk.Toplevel(self.root)
         self._prepare_dialog(dialog)
         dialog.title("Диагностика буфера обмена")
-        dialog.geometry("880x560")
+        dialog.geometry(self._get_screen_limited_geometry(880, 560))
         if hasattr(dialog, "minsize"):
-            dialog.minsize(760, 480)
+            dialog.minsize(680, 440)
         text = self._style_text_widget(tk.Text(dialog, wrap=tk.WORD))
         text.pack(fill=tk.BOTH, expand=True)
         text.insert("1.0", "\n".join(self._build_clipboard_diagnostics_lines()))
@@ -6156,8 +6471,48 @@ class MainWindow:
         clipboard_notifications_enabled = tk.BooleanVar(
             value=clipboard_settings.get("notifications_enabled", True)
         )
-        clipboard_security_level = tk.StringVar(value=clipboard_settings.get("security_level", "basic"))
-        clipboard_delivery_mode = tk.StringVar(value=clipboard_settings.get("delivery_mode", "system"))
+        security_level_labels = {
+            "basic": "Базовый",
+            "advanced": "Повышенный",
+            "paranoid": "Параноидальный",
+        }
+        security_level_label_to_key = {label: key for key, label in security_level_labels.items()}
+        delivery_mode_labels = {
+            "system": "Системный буфер",
+            "memory_only": "Только память",
+        }
+        delivery_mode_label_to_key = {label: key for key, label in delivery_mode_labels.items()}
+        security_profile_labels = {
+            "standard": "Стандартный",
+            "enhanced": "Усиленный",
+            "paranoid": "Параноидальный",
+        }
+        security_profile_label_to_key = {label: key for key, label in security_profile_labels.items()}
+
+        def clipboard_security_level_key() -> str:
+            return security_level_label_to_key.get(
+                clipboard_security_level.get(),
+                str(clipboard_security_level.get() or "basic").strip().lower(),
+            )
+
+        def clipboard_delivery_mode_key() -> str:
+            return delivery_mode_label_to_key.get(
+                clipboard_delivery_mode.get(),
+                str(clipboard_delivery_mode.get() or "system").strip().lower(),
+            )
+
+        def security_profile_key() -> str:
+            return security_profile_label_to_key.get(
+                security_profile.get(),
+                str(security_profile.get() or "standard").strip().lower(),
+            )
+
+        clipboard_security_level = tk.StringVar(
+            value=security_level_labels.get(str(clipboard_settings.get("security_level", "basic")).strip().lower(), "Базовый")
+        )
+        clipboard_delivery_mode = tk.StringVar(
+            value=delivery_mode_labels.get(str(clipboard_settings.get("delivery_mode", "system")).strip().lower(), "Системный буфер")
+        )
         clipboard_blocked_on_suspicious = tk.BooleanVar(
             value=clipboard_settings.get("blocked_on_suspicious", False)
         )
@@ -6179,8 +6534,10 @@ class MainWindow:
         )
         clipboard_preset = tk.StringVar(value=self._get_clipboard_preset_label(initial_clipboard_preset))
         clipboard_summary = tk.StringVar()
-        security_profile = tk.StringVar(value=self.config.get("security.security_profile", "standard"))
-        security_profile_summary = tk.StringVar(value=explain_security_profile(security_profile.get()))
+        security_profile = tk.StringVar(
+            value=security_profile_labels.get(str(self.config.get("security.security_profile", "standard")).strip().lower(), "Стандартный")
+        )
+        security_profile_summary = tk.StringVar(value=explain_security_profile(security_profile_key()))
         auto_lock_minutes = tk.IntVar(value=self.config.get("security.auto_lock_minutes", 5))
         min_password_length = tk.IntVar(value=self.config.get("security.min_password_length", 12))
         key_cache_timeout_minutes = tk.IntVar(value=self.config.get("security.key_cache_timeout_minutes", 60))
@@ -6192,7 +6549,7 @@ class MainWindow:
             content_parent,
             textvariable=security_profile,
             state="readonly",
-            values=list(SECURITY_PROFILES.keys()),
+            values=[security_profile_labels[key] for key in SECURITY_PROFILES.keys()],
         )
         security_profile_box.pack(fill=tk.X, padx=10, pady=2)
         ttk.Label(content_parent, textvariable=security_profile_summary, wraplength=420, justify=tk.LEFT).pack(
@@ -6222,16 +6579,16 @@ class MainWindow:
             content_parent,
             textvariable=clipboard_security_level,
             state="readonly",
-            values=["basic", "advanced", "paranoid"],
+            values=list(security_level_labels.values()),
         )
         clipboard_security_level_box.pack(fill=tk.X, padx=10, pady=2)
 
-        ttk.Label(content_parent, text="Режим доставки clipboard").pack(anchor=tk.W, padx=10, pady=(12, 2))
+        ttk.Label(content_parent, text="Режим доставки буфера обмена").pack(anchor=tk.W, padx=10, pady=(12, 2))
         clipboard_delivery_mode_box = ttk.Combobox(
             content_parent,
             textvariable=clipboard_delivery_mode,
             state="readonly",
-            values=["system", "memory_only"],
+            values=list(delivery_mode_labels.values()),
         )
         clipboard_delivery_mode_box.pack(fill=tk.X, padx=10, pady=2)
 
@@ -6241,7 +6598,7 @@ class MainWindow:
             variable=clipboard_blocked_on_suspicious,
         ).pack(anchor=tk.W, padx=10, pady=(8, 2))
 
-        ttk.Label(content_parent, text="Разрешённые приложения для clipboard").pack(anchor=tk.W, padx=10, pady=(12, 2))
+        ttk.Label(content_parent, text="Разрешённые приложения для буфера обмена").pack(anchor=tk.W, padx=10, pady=(12, 2))
         ttk.Entry(content_parent, textvariable=clipboard_allowed_applications).pack(fill=tk.X, padx=10, pady=2)
         ttk.Label(
             content_parent,
@@ -6280,24 +6637,30 @@ class MainWindow:
 
         ttk.Label(content_parent, text="Горячие клавиши").pack(anchor=tk.W, padx=10, pady=(18, 2))
         hotkey_status = getattr(self, "_global_hotkey_status", "not_registered")
+        hotkey_status_labels = {
+            "registered": "зарегистрирована",
+            "not_registered": "не зарегистрирована",
+            "unsupported": "не поддерживается",
+            "failed": "ошибка регистрации",
+        }
         descriptions = {
-            "panic_mode": "экстренно заблокировать vault",
-            "lock_vault": "заблокировать vault",
-            "unlock_vault": "разблокировать vault",
+            "panic_mode": "экстренно заблокировать хранилище",
+            "lock_vault": "заблокировать хранилище",
+            "unlock_vault": "разблокировать хранилище",
             "focus_search": "перейти к поиску",
             "add_entry": "добавить запись",
             "edit_entry": "изменить выбранную запись",
             "delete_entry": "удалить выбранную запись",
             "toggle_passwords": "показать или скрыть пароли",
-            "clear_clipboard": "очистить clipboard",
+            "clear_clipboard": "очистить буфер обмена",
             "open_settings": "открыть настройки",
         }
         hotkey_lines = []
         for binding in get_default_hotkeys().values():
             scope = "глобально" if binding.global_hotkey else "внутри приложения"
             hotkey_lines.append(f"{binding.label} — {descriptions.get(binding.action, binding.description)} ({scope})")
-        hotkey_lines.append("Ctrl+Alt+P — резервный panic-hotkey, если Windows забирает Ctrl+Shift+Esc")
-        hotkey_lines.append(f"Статус глобального panic-hotkey: {hotkey_status}")
+        hotkey_lines.append("Ctrl+Alt+P — резервная горячая клавиша паник-режима, если Windows забирает Ctrl+Shift+Esc")
+        hotkey_lines.append(f"Статус глобальной горячей клавиши паник-режима: {hotkey_status_labels.get(str(hotkey_status), hotkey_status)}")
         ttk.Label(
             content_parent,
             text="\n".join(hotkey_lines),
@@ -6310,9 +6673,9 @@ class MainWindow:
             detected_preset = self._detect_clipboard_preset(
                 timeout_seconds=clipboard_timeout.get(),
                 notifications_enabled=clipboard_notifications_enabled.get(),
-                security_level=clipboard_security_level.get(),
+                security_level=clipboard_security_level_key(),
                 blocked_on_suspicious=clipboard_blocked_on_suspicious.get(),
-                delivery_mode=clipboard_delivery_mode.get(),
+                delivery_mode=clipboard_delivery_mode_key(),
             )
             selected_preset = self._get_clipboard_preset_key_from_label(clipboard_preset.get())
             if selected_preset != detected_preset:
@@ -6321,9 +6684,9 @@ class MainWindow:
                 self._build_clipboard_settings_summary(
                     timeout_seconds=clipboard_timeout.get(),
                     notifications_enabled=clipboard_notifications_enabled.get(),
-                    security_level=clipboard_security_level.get(),
+                    security_level=clipboard_security_level_key(),
                     blocked_on_suspicious=clipboard_blocked_on_suspicious.get(),
-                    delivery_mode=clipboard_delivery_mode.get(),
+                    delivery_mode=clipboard_delivery_mode_key(),
                     allowed_applications=clipboard_allowed_applications.get(),
                 )
             )
@@ -6338,11 +6701,14 @@ class MainWindow:
                 blocked_var=clipboard_blocked_on_suspicious,
                 delivery_mode_var=clipboard_delivery_mode,
             ):
+                preset_settings = ClipboardService.PRESETS[selected_preset]
+                clipboard_security_level.set(security_level_labels.get(str(preset_settings["security_level"]), clipboard_security_level.get()))
+                clipboard_delivery_mode.set(delivery_mode_labels.get(str(preset_settings.get("delivery_mode", "system")), clipboard_delivery_mode.get()))
                 clipboard_preset.set(self._get_clipboard_preset_label(selected_preset))
             refresh_clipboard_summary()
 
         def apply_selected_security_profile(_event=None):
-            selected_profile = security_profile.get()
+            selected_profile = security_profile_key()
             profile_settings = SECURITY_PROFILES.get(selected_profile, SECURITY_PROFILES["standard"])
             security_profile_summary.set(explain_security_profile(selected_profile))
             auto_lock_minutes.set(int(profile_settings["auto_lock_minutes"]))
@@ -6350,8 +6716,8 @@ class MainWindow:
             lock_on_focus_loss.set(bool(profile_settings["lock_on_focus_loss"]))
             lock_on_minimize.set(bool(profile_settings["lock_on_minimize"]))
             clipboard_timeout.set(int(profile_settings["clipboard_timeout"]))
-            clipboard_security_level.set(str(profile_settings["clipboard_security_level"]))
-            clipboard_delivery_mode.set(str(profile_settings["clipboard_delivery_mode"]))
+            clipboard_security_level.set(security_level_labels.get(str(profile_settings["clipboard_security_level"]), "Базовый"))
+            clipboard_delivery_mode.set(delivery_mode_labels.get(str(profile_settings["clipboard_delivery_mode"]), "Системный буфер"))
             clipboard_blocked_on_suspicious.set(bool(profile_settings["clipboard_blocked_on_suspicious"]))
             refresh_clipboard_summary()
 
@@ -6372,10 +6738,10 @@ class MainWindow:
             selected_security_settings = dict(self.config.get("security", {}))
             selected_security_settings.update(
                 {
-                    "security_profile": security_profile.get(),
+                    "security_profile": security_profile_key(),
                     "clipboard_timeout": clipboard_timeout.get(),
-                    "clipboard_security_level": clipboard_security_level.get(),
-                    "clipboard_delivery_mode": clipboard_delivery_mode.get(),
+                    "clipboard_security_level": clipboard_security_level_key(),
+                    "clipboard_delivery_mode": clipboard_delivery_mode_key(),
                     "clipboard_blocked_on_suspicious": clipboard_blocked_on_suspicious.get(),
                     "auto_lock_minutes": auto_lock_minutes.get(),
                     "min_password_length": min_password_length.get(),
@@ -6399,8 +6765,8 @@ class MainWindow:
             self.config.set("security.security_profile", validation.settings["security_profile"])
             self.config.set("security.clipboard_timeout", clipboard_timeout.get())
             self.config.set("security.clipboard_notifications", clipboard_notifications_enabled.get())
-            self.config.set("security.clipboard_security_level", clipboard_security_level.get())
-            self.config.set("security.clipboard_delivery_mode", clipboard_delivery_mode.get())
+            self.config.set("security.clipboard_security_level", clipboard_security_level_key())
+            self.config.set("security.clipboard_delivery_mode", clipboard_delivery_mode_key())
             self.config.set("security.clipboard_blocked_on_suspicious", clipboard_blocked_on_suspicious.get())
             normalized_allowed_applications = [
                 item.strip() for item in clipboard_allowed_applications.get().replace(";", ",").split(",") if item.strip()
@@ -6414,16 +6780,16 @@ class MainWindow:
             selected_preset = self._detect_clipboard_preset(
                 timeout_seconds=clipboard_timeout.get(),
                 notifications_enabled=clipboard_notifications_enabled.get(),
-                security_level=clipboard_security_level.get(),
+                security_level=clipboard_security_level_key(),
                 blocked_on_suspicious=clipboard_blocked_on_suspicious.get(),
-                delivery_mode=clipboard_delivery_mode.get(),
+                delivery_mode=clipboard_delivery_mode_key(),
             )
             if hasattr(self, "clipboard_service"):
                 self.clipboard_service.configure(
                     timeout_seconds=clipboard_timeout.get(),
                     notifications_enabled=clipboard_notifications_enabled.get(),
-                    security_level=clipboard_security_level.get(),
-                    delivery_mode=clipboard_delivery_mode.get(),
+                    security_level=clipboard_security_level_key(),
+                    delivery_mode=clipboard_delivery_mode_key(),
                     blocked_on_suspicious=clipboard_blocked_on_suspicious.get(),
                     allowed_applications=normalized_allowed_applications,
                     preset=selected_preset,
@@ -6498,41 +6864,44 @@ class MainWindow:
                 new_password,
                 rotate_entries_callback=self._rotate_vault_entries,
             )
+            if hasattr(self, "audit_logger") and hasattr(self.audit_logger, "signer"):
+                self.audit_logger.signer.clear()
             self.key_manager.store_key("active", self.auth_service.get_active_key())
             self._show_info("Успешно", "Мастер-пароль успешно изменён.")
         except AuthenticationError as error:
             self._show_error("Ошибка", str(error))
 
-    def _lock_vault(self, show_dialog: bool = True):
+    def _lock_vault(self, show_dialog: bool = True, *, preserve_clipboard: bool = False, reason: str = "manual"):
         self._flush_audit_logger()
-        event_bus.publish(Event(EventType.VAULT_LOCKED, {}))
+        event_bus.publish(Event(EventType.VAULT_LOCKED, {"reason": reason, "preserve_clipboard": preserve_clipboard}))
         self._flush_audit_logger()
         self.auth_service.logout()
         self.key_manager.clear_key()
-        self.state.clear_clipboard()
-        self._clear_system_clipboard()
-        self._handle_clipboard_clear_failure()
+        if not preserve_clipboard:
+            self.state.clear_clipboard()
+            self._clear_system_clipboard()
+            self._handle_clipboard_clear_failure()
         self._clear_sensitive_view_state()
         self._set_status("Заблокировано")
+        self._update_system_tray_status()
         if show_dialog:
             self._require_login()
             if self.auth_service.is_authenticated():
                 self.key_manager.store_key("active", self.auth_service.get_active_key())
                 self._load_entries()
+                self._update_system_tray_status()
 
     def _unlock_vault(self):
         if hasattr(self, "panic_mode") and getattr(self.panic_mode, "activated", False):
             self.panic_mode.reset_for_recovery()
-            try:
-                self.root.deiconify()
-                self.root.lift()
-            except Exception:
-                pass
+            self._restore_main_window(force_rebuild_menu=True)
         if self.auth_service.is_authenticated():
             self._load_entries()
             self._set_status("Разблокировано")
+            self._update_system_tray_status()
             return True
         self._prompt_unlock_if_needed(force=True)
+        self._update_system_tray_status()
         return self.auth_service.is_authenticated()
 
     def _on_close(self):

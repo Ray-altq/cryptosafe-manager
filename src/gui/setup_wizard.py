@@ -27,18 +27,16 @@ class SetupWizard:
         self.wizard = tk.Toplevel(parent)
         self._apply_theme()
         self.wizard.title("Первоначальная настройка")
-        self.wizard.geometry("680x560")
+        self.wizard.geometry(self._get_screen_limited_geometry(820, 680))
         if hasattr(self.wizard, "minsize"):
-            self.wizard.minsize(620, 520)
+            self.wizard.minsize(680, 560)
         self.wizard.transient(parent)
         self.wizard.grab_set()
-        self.wizard.resizable(False, False)
+        self.wizard.resizable(True, True)
 
         self.master_password = tk.StringVar()
         self.confirm_password = tk.StringVar()
-        self.db_path = tk.StringVar(value=str(Path.home() / ".cryptosafe" / "vault.db"))
-        self.algorithm = tk.StringVar(value=self.config.get("crypto.algorithm", "XOR"))
-        self.pbkdf2_iterations = tk.IntVar(value=self.config.get("crypto.pbkdf2_iterations", 100000))
+        self.db_path = tk.StringVar(value=self._get_initial_db_path())
         self.auto_lock_minutes = tk.IntVar(value=self.config.get("security.auto_lock_minutes", 5))
         self.key_cache_timeout_minutes = tk.IntVar(value=self.config.get("security.key_cache_timeout_minutes", 60))
 
@@ -47,7 +45,6 @@ class SetupWizard:
             self._step_welcome,
             self._step_master_password,
             self._step_database_location,
-            self._step_encryption_settings,
             self._step_finish,
         ]
 
@@ -70,6 +67,70 @@ class SetupWizard:
             style.configure("WizardDialogText.TLabel", background=colors["surface"], foreground=colors["ink"])
         except tk.TclError:
             pass
+
+    def _get_screen_limited_geometry(self, width: int, height: int, *, margin: int = 96) -> str:
+        try:
+            screen_width = int(self.parent.winfo_screenwidth())
+            screen_height = int(self.parent.winfo_screenheight())
+        except (AttributeError, tk.TclError, TypeError):
+            return f"{width}x{height}"
+        safe_width = max(520, min(width, screen_width - margin))
+        safe_height = max(420, min(height, screen_height - margin))
+        return f"{safe_width}x{safe_height}"
+
+    def _parse_geometry_size(self, geometry: str) -> tuple[int, int]:
+        try:
+            size_part = str(geometry or "").split("+", 1)[0]
+            width_text, height_text = size_part.split("x", 1)
+            return int(width_text), int(height_text)
+        except (TypeError, ValueError):
+            return 0, 0
+
+    def _center_dialog(self, dialog):
+        try:
+            dialog.update_idletasks()
+            parent_x = self.wizard.winfo_rootx()
+            parent_y = self.wizard.winfo_rooty()
+            parent_width = self.wizard.winfo_width()
+            parent_height = self.wizard.winfo_height()
+            width = dialog.winfo_width()
+            height = dialog.winfo_height()
+            x = parent_x + max(0, (parent_width - width) // 2)
+            y = parent_y + max(0, (parent_height - height) // 2)
+            dialog.geometry(f"+{x}+{y}")
+        except tk.TclError:
+            pass
+
+    def _fit_dialog_to_content(self, dialog, *, margin: int = 96):
+        try:
+            if not dialog.winfo_exists():
+                return
+            dialog.update_idletasks()
+            screen_width = int(dialog.winfo_screenwidth())
+            screen_height = int(dialog.winfo_screenheight())
+            max_width = max(420, screen_width - margin)
+            max_height = max(360, screen_height - margin)
+            current_width, current_height = self._parse_geometry_size(dialog.winfo_geometry())
+            requested_width = max(dialog.winfo_reqwidth(), current_width)
+            requested_height = max(dialog.winfo_reqheight(), current_height)
+            target_width = min(max_width, max(current_width, requested_width + 24))
+            target_height = min(max_height, max(current_height, requested_height + 24))
+            if target_width > current_width or target_height > current_height:
+                dialog.geometry(f"{target_width}x{target_height}")
+                dialog.update_idletasks()
+            try:
+                dialog.minsize(min(target_width, max_width), min(target_height, max_height))
+            except (AttributeError, tk.TclError):
+                pass
+            self._center_dialog(dialog)
+        except tk.TclError:
+            pass
+
+    def _get_initial_db_path(self) -> str:
+        configured_path = str(self.config.get("database.path", "") or "").strip()
+        if configured_path:
+            return configured_path
+        return str(Path.home() / ".cryptosafe" / "vault.db")
 
     def _style_text(self, widget):
         colors = self.COLORS
@@ -105,7 +166,9 @@ class SetupWizard:
         dialog.title(title)
         dialog.transient(self.wizard)
         dialog.grab_set()
-        dialog.resizable(False, False)
+        dialog.geometry(self._get_screen_limited_geometry(560, 220))
+        dialog.minsize(420, 150)
+        dialog.resizable(True, True)
 
         card = ttk.Frame(dialog, style="WizardDialog.TFrame", padding=(18, 16, 18, 14))
         card.pack(fill=tk.BOTH, expand=True, padx=1, pady=1)
@@ -113,7 +176,8 @@ class SetupWizard:
         ttk.Label(card, text=message, style="WizardDialogText.TLabel", wraplength=420, justify=tk.LEFT).pack(
             fill=tk.X, pady=(12, 18)
         )
-        ttk.Button(card, text="OK", command=dialog.destroy).pack(anchor=tk.E)
+        ttk.Button(card, text="ОК", command=dialog.destroy).pack(anchor=tk.E)
+        self._fit_dialog_to_content(dialog)
         dialog.wait_window()
 
     def _show_themed_error(self, title: str, message: str):
@@ -177,7 +241,7 @@ class SetupWizard:
             "Добро пожаловать в CryptoSafe Manager.\n\n"
             "Этот мастер поможет:\n"
             "1. Создать мастер-пароль\n"
-            "2. Выбрать расположение базы данных vault\n"
+            "2. Выбрать расположение базы данных хранилища\n"
             "3. Сохранить криптографические параметры\n\n"
             "Нажмите «Далее», чтобы продолжить.",
         )
@@ -204,7 +268,7 @@ class SetupWizard:
         ).pack(anchor=tk.W, pady=(8, 0))
 
     def _step_database_location(self):
-        ttk.Label(self.content_frame, text="Расположение базы данных vault", style="Wizard.TLabel", font=("Segoe UI", 10, "bold")).pack(
+        ttk.Label(self.content_frame, text="Расположение базы данных хранилища", style="Wizard.TLabel", font=("Segoe UI", 10, "bold")).pack(
             anchor=tk.W, pady=(0, 8)
         )
         ttk.Label(self.content_frame, text="Путь к файлу базы данных", style="Wizard.TLabel").pack(anchor=tk.W)
@@ -213,51 +277,25 @@ class SetupWizard:
         ttk.Entry(path_frame, textvariable=self.db_path).pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(path_frame, text="Обзор...", command=self._browse_db).pack(side=tk.RIGHT, padx=(5, 0))
 
-    def _step_encryption_settings(self):
-        ttk.Label(self.content_frame, text="Настройки шифрования", style="Wizard.TLabel", font=("Segoe UI", 10, "bold")).pack(
-            anchor=tk.W, pady=(0, 8)
-        )
-        ttk.Label(self.content_frame, text="Алгоритм", style="Wizard.TLabel").pack(anchor=tk.W)
-        combo = ttk.Combobox(self.content_frame, textvariable=self.algorithm, values=["XOR"], state="readonly")
-        combo.pack(fill=tk.X, pady=(0, 10))
-
-        ttk.Label(self.content_frame, text="Количество итераций PBKDF2", style="Wizard.TLabel").pack(anchor=tk.W)
-        ttk.Spinbox(
-            self.content_frame,
-            from_=100000,
-            to=1000000,
-            increment=10000,
-            textvariable=self.pbkdf2_iterations,
-        ).pack(fill=tk.X, pady=(0, 10))
-
-        ttk.Label(self.content_frame, text="Таймаут авто-блокировки (мин)", style="Wizard.TLabel").pack(anchor=tk.W)
-        ttk.Spinbox(self.content_frame, from_=1, to=120, textvariable=self.auto_lock_minutes).pack(fill=tk.X, pady=(0, 10))
-
-        ttk.Label(self.content_frame, text="Таймаут кэша ключа (мин)", style="Wizard.TLabel").pack(anchor=tk.W)
-        ttk.Spinbox(self.content_frame, from_=1, to=60, textvariable=self.key_cache_timeout_minutes).pack(
-            fill=tk.X, pady=(0, 10)
-        )
-
     def _step_finish(self):
         text = self._style_text(tk.Text(self.content_frame, wrap=tk.WORD, height=10, font=("Segoe UI", 10)))
         text.insert(
             "1.0",
-            f"Все готово к инициализации vault.\n\n"
+            f"Все готово к инициализации хранилища.\n\n"
             f"База данных: {self.db_path.get()}\n"
-            f"Алгоритм: {self.algorithm.get()}\n"
-            f"Итерации PBKDF2: {self.pbkdf2_iterations.get()}\n"
+            "Защита: AES-256-GCM для данных и стойкие KDF для мастер-пароля.\n"
             f"Авто-блокировка: {self.auto_lock_minutes.get()} мин\n"
             f"Кэш ключа: {self.key_cache_timeout_minutes.get()} мин\n\n"
-            "Нажмите «Готово», чтобы создать vault и сохранить мастер-пароль.",
+            "Нажмите «Готово», чтобы создать хранилище и сохранить мастер-пароль.",
         )
         text.config(state=tk.DISABLED)
         text.pack(fill=tk.BOTH, expand=True)
 
     def _browse_db(self):
         filename = filedialog.asksaveasfilename(
-            title="Выберите файл базы данных vault",
+            title="Выберите файл базы данных хранилища",
             defaultextension=".db",
-            filetypes=[("SQLite database", "*.db"), ("All files", "*.*")],
+            filetypes=[("База SQLite", "*.db"), ("Все файлы", "*.*")],
         )
         if filename:
             self.db_path.set(filename)
@@ -282,8 +320,8 @@ class SetupWizard:
             return
 
         self.config.set("database.path", self.db_path.get())
-        self.config.set("crypto.algorithm", self.algorithm.get())
-        self.config.set("crypto.pbkdf2_iterations", self.pbkdf2_iterations.get())
+        pbkdf2_iterations = int(self.config.get("crypto.pbkdf2_iterations", 100000))
+        self.config.set("crypto.pbkdf2_iterations", pbkdf2_iterations)
         self.config.set("security.auto_lock_minutes", self.auto_lock_minutes.get())
         self.config.set("security.key_cache_timeout_minutes", self.key_cache_timeout_minutes.get())
 
@@ -313,7 +351,7 @@ class SetupWizard:
                 "argon2_memory": self.config.get("crypto.argon2_memory", 65536),
                 "argon2_parallelism": self.config.get("crypto.argon2_parallelism", 4),
                 "argon2_hash_len": self.config.get("crypto.argon2_hash_len", 32),
-                "pbkdf2_iterations": self.pbkdf2_iterations.get(),
+                "pbkdf2_iterations": pbkdf2_iterations,
                 "pbkdf2_salt_len": self.config.get("crypto.pbkdf2_salt_len", 16),
                 "pbkdf2_key_len": self.config.get("crypto.pbkdf2_key_len", 32),
             },
@@ -323,5 +361,5 @@ class SetupWizard:
         database.set_setting("security.lock_on_focus_loss", self.config.get("security.lock_on_focus_loss", True))
         database.set_setting("security.lock_on_minimize", self.config.get("security.lock_on_minimize", True))
 
-        self._show_themed_message("Успешно", "Vault успешно инициализирован.")
+        self._show_themed_message("Успешно", "Хранилище успешно инициализировано.")
         self.wizard.destroy()

@@ -55,9 +55,9 @@ def decrypt_bitwarden_password_protected_export(payload: str | bytes, password: 
         enc_type, encoded_parts = enc_string.split(".", 1)
         iv_text, ciphertext_text, mac_text = encoded_parts.split("|", 2)
     except Exception as exc:
-        raise ImportValidationError("Bitwarden encrypted JSON is invalid") from exc
+        raise ImportValidationError("Зашифрованный JSON Bitwarden повреждён или имеет неверный формат") from exc
     if enc_type != "2":
-        raise ImportValidationError("Bitwarden encrypted JSON uses unsupported encryption type")
+        raise ImportValidationError("Зашифрованный JSON Bitwarden использует неподдерживаемый тип шифрования")
 
     pin_key = _derive_bitwarden_pin_key(
         password,
@@ -74,7 +74,7 @@ def decrypt_bitwarden_password_protected_export(payload: str | bytes, password: 
     try:
         signer.verify(expected_mac)
     except Exception as exc:
-        raise ImportValidationError("Bitwarden encrypted JSON failed authentication") from exc
+        raise ImportValidationError("Не удалось проверить пароль или подлинность зашифрованного JSON Bitwarden") from exc
 
     decryptor = Cipher(algorithms.AES(enc_key), modes.CBC(iv)).decryptor()
     padded = decryptor.update(ciphertext) + decryptor.finalize()
@@ -83,7 +83,7 @@ def decrypt_bitwarden_password_protected_export(payload: str | bytes, password: 
     try:
         return json.loads(plaintext.decode("utf-8"))
     except json.JSONDecodeError as exc:
-        raise ImportValidationError("Bitwarden encrypted JSON plaintext is invalid") from exc
+        raise ImportValidationError("Расшифрованные данные JSON Bitwarden имеют неверный формат") from exc
 
 
 class BitwardenJSONFormat:
@@ -213,7 +213,7 @@ class BitwardenEncryptedJSONFormat:
 
     def serialize_entries(self, entries: List[Dict[str, Any]], password: str) -> str:
         if not password:
-            raise ValueError("Bitwarden encrypted JSON export requires a password")
+            raise ValueError("Для экспорта зашифрованного JSON Bitwarden нужен пароль")
         plain_export = BitwardenJSONFormat().build_plain_export(entries)
         plain_payload = json.dumps(plain_export, ensure_ascii=False, sort_keys=True)
         salt = _b64(os.urandom(16))

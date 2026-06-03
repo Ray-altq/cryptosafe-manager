@@ -93,10 +93,10 @@ def get_security_profile(profile_name: str) -> dict[str, Any]:
 def explain_security_profile(profile_name: str) -> str:
     normalized = str(profile_name or "standard").strip().lower()
     if normalized == "paranoid":
-        return "Paranoid: максимум защиты, короткие таймауты, memory-only clipboard и stealth panic."
+        return "Параноидальный: максимум защиты, короткие таймауты, буфер обмена только в памяти и скрытый паник-режим."
     if normalized == "enhanced":
-        return "Enhanced: усиленная защита, memory-only clipboard и более строгая авто-блокировка."
-    return "Standard: сбалансированный режим с безопасными настройками по умолчанию."
+        return "Усиленный: повышенная защита, буфер обмена только в памяти и более строгая автоблокировка."
+    return "Стандартный: сбалансированный режим с безопасными настройками по умолчанию."
 
 
 def apply_security_profile(current_settings: dict[str, Any], profile_name: str) -> dict[str, Any]:
@@ -115,7 +115,7 @@ def validate_security_settings(settings: dict[str, Any]) -> SecuritySettingsVali
 
     profile = str(normalized.get("security_profile", "standard")).strip().lower()
     if profile not in SECURITY_PROFILES:
-        errors.append("Unknown security profile")
+        errors.append("Неизвестный профиль безопасности")
         profile = "standard"
     normalized["security_profile"] = profile
 
@@ -125,25 +125,25 @@ def validate_security_settings(settings: dict[str, Any]) -> SecuritySettingsVali
 
     sensitivity = str(normalized.get("activity_sensitivity", "medium")).strip().lower()
     if sensitivity not in {"low", "medium", "high"}:
-        errors.append("Invalid activity sensitivity")
+        errors.append("Недопустимая чувствительность мониторинга активности")
         sensitivity = "medium"
     normalized["activity_sensitivity"] = sensitivity
 
     device_profile = str(normalized.get("device_profile", "desktop")).strip().lower()
     if device_profile not in {"desktop", "laptop"}:
-        errors.append("Invalid device profile")
+        errors.append("Недопустимый профиль устройства")
         device_profile = "desktop"
     normalized["device_profile"] = device_profile
 
     delivery_mode = str(normalized.get("clipboard_delivery_mode", "system")).strip().lower()
     if delivery_mode not in {"system", "memory_only"}:
-        errors.append("Invalid clipboard delivery mode")
+        errors.append("Недопустимый режим доставки буфера обмена")
         delivery_mode = "system"
     normalized["clipboard_delivery_mode"] = delivery_mode
 
     clipboard_level = str(normalized.get("clipboard_security_level", "basic")).strip().lower()
     if clipboard_level not in {"basic", "advanced", "paranoid"}:
-        errors.append("Invalid clipboard security level")
+        errors.append("Недопустимый уровень защиты буфера обмена")
         clipboard_level = "basic"
     normalized["clipboard_security_level"] = clipboard_level
 
@@ -165,17 +165,17 @@ def validate_security_settings(settings: dict[str, Any]) -> SecuritySettingsVali
     try:
         parse_windows_hotkey(normalized["panic_hotkey"])
     except ValueError:
-        errors.append("Invalid panic hotkey")
+        errors.append("Недопустимая горячая клавиша паник-режима")
         normalized["panic_hotkey"] = "Ctrl+Shift+Esc"
 
     if clipboard_level == "paranoid" and delivery_mode != "memory_only":
-        errors.append("Paranoid clipboard requires memory_only delivery")
+        errors.append("Для параноидального уровня нужен режим буфера обмена «только память»")
     if normalized["auto_lock_minutes"] > 30:
-        warnings.append("Auto-lock timeout is longer than the secure default")
+        warnings.append("Таймаут автоблокировки длиннее безопасного значения по умолчанию")
     if not normalized["lock_on_focus_loss"]:
-        warnings.append("Focus-loss locking is disabled")
+        warnings.append("Блокировка при потере фокуса отключена")
     if not normalized["memory_locking_enabled"]:
-        warnings.append("Memory locking is disabled")
+        warnings.append("Блокировка памяти отключена")
 
     return SecuritySettingsValidation(valid=not errors, settings=normalized, warnings=warnings, errors=errors)
 

@@ -1496,6 +1496,36 @@ class Database:
                     progress_callback(index, total)
             return total
 
+    def reencrypt_audit_entry_payloads(
+        self,
+        transform,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+        pause_event=None,
+    ) -> int:
+        with self.transaction() as conn:
+            rows = conn.execute(
+                "SELECT rowid AS audit_rowid, sequence_number, entry_data FROM audit_log ORDER BY sequence_number ASC"
+            ).fetchall()
+            total = len(rows)
+            if progress_callback is not None:
+                progress_callback(0, total)
+
+            self._drop_audit_guards(conn)
+            try:
+                for index, row in enumerate(rows, start=1):
+                    if pause_event is not None:
+                        pause_event.wait()
+                    updated_entry_data = transform(row["entry_data"])
+                    conn.execute(
+                        "UPDATE audit_log SET entry_data = ? WHERE rowid = ?",
+                        (updated_entry_data, row["audit_rowid"]),
+                    )
+                    if progress_callback is not None:
+                        progress_callback(index, total)
+            finally:
+                self._create_audit_guards(conn)
+            return total
+
     def _compute_hash(self, value: str) -> str:
         return hashlib.sha256(value.encode("utf-8")).hexdigest()
 

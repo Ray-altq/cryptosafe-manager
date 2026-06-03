@@ -14,7 +14,7 @@ class NativeJSONFormat:
     def deserialize_header(self, payload: str) -> Dict[str, Any]:
         parsed = json.loads(payload)
         if not isinstance(parsed, dict):
-            raise ValueError("Native JSON export must be a JSON object")
+            raise ValueError("Нативный JSON-экспорт должен быть JSON-объектом")
         return parsed
 
     def is_native_export(self, payload: Dict[str, Any]) -> bool:
@@ -22,14 +22,14 @@ class NativeJSONFormat:
 
     def validate_package(self, package: Dict[str, Any]):
         if not self.is_native_export(package):
-            raise ImportValidationError("File is not a CryptoSafe native export")
+            raise ImportValidationError("Файл не является нативным экспортом CryptoSafe")
         required = {"cryptosafe_export", "timestamp", "encryption", "data", "integrity"}
         missing = sorted(required.difference(package))
         if missing:
-            raise ImportValidationError(f"Native export is missing fields: {', '.join(missing)}")
+            raise ImportValidationError(f"В нативном экспорте отсутствуют поля: {', '.join(missing)}")
         if not isinstance(package.get("encryption"), dict):
-            raise ImportValidationError("Native export encryption metadata is invalid")
+            raise ImportValidationError("Метаданные шифрования нативного экспорта имеют неверный формат")
         if not isinstance(package.get("data"), dict):
-            raise ImportValidationError("Native export data block is invalid")
+            raise ImportValidationError("Блок данных нативного экспорта имеет неверный формат")
         if not isinstance(package.get("integrity"), dict):
-            raise ImportValidationError("Native export integrity block is invalid")
+            raise ImportValidationError("Блок целостности нативного экспорта имеет неверный формат")

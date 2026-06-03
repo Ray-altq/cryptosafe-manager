@@ -74,7 +74,7 @@ class TestConfig(unittest.TestCase):
         )
 
         self.assertFalse(validation.valid)
-        self.assertIn("Paranoid clipboard requires memory_only delivery", validation.errors)
+        self.assertIn("Для параноидального уровня нужен режим буфера обмена «только память»", validation.errors)
         self.assertEqual(validation.settings["auto_lock_minutes"], 480)
 
     def test_apply_security_profile_updates_and_validates_settings(self):

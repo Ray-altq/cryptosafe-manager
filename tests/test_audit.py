@@ -13,7 +13,12 @@ import pytest
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from src.core.audit import AuditLogger, AuditLogSigner, AuditLogVerifier, export_logs_to_cef, export_logs_to_json, import_logs_from_json
+from src.core.crypto.authentication import AuthenticationService
+from src.core.crypto.key_derivation import KeyDerivation
+from src.core.crypto.key_storage import KeyStorage
+from src.core.crypto.password_validator import PasswordValidator
 from src.core.events import Event, EventBus, EventType
+from src.core.state_manager import StateManager
 from src.database.db import Database
 
 
@@ -214,6 +219,71 @@ class TestAuditLogging(unittest.TestCase):
 
         log = self.database.get_audit_log_by_sequence(2)
         self.assertIn('"event_type": "settings_changed"', log.entry_data)
+
+    def test_audit_entry_payloads_are_reencrypted_when_master_key_rotates(self):
+        active_key = {"value": b"a" * 32}
+        self.logger.close()
+        self.logger = AuditLogger(self.database, self.event_bus, key_provider=lambda: active_key["value"])
+        self.verifier = AuditLogVerifier(self.database, self.logger.signer)
+
+        self.logger.log_event(
+            event_type="settings_changed",
+            severity="INFO",
+            source="configuration",
+            details={"scope": "security"},
+            user_id="local-user",
+            force_sync=True,
+        )
+        self.assertTrue(self.verifier.verify()["verified"])
+
+        old_key = active_key["value"]
+        new_key = b"b" * 32
+        active_key["value"] = new_key
+        self.assertFalse(self.verifier.verify()["verified"])
+
+        rotated = self.logger.reencrypt_entry_payloads(old_key, new_key)
+
+        self.assertGreaterEqual(rotated, 1)
+        self.assertTrue(self.verifier.verify()["verified"])
+
+    def test_audit_integrity_survives_authentication_master_password_change(self):
+        self.logger.close()
+        self.database.close()
+        try:
+            os.unlink(self.temp_file.name)
+        except OSError:
+            pass
+
+        self.temp_file = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.temp_file.close()
+        self.database = Database(self.temp_file.name)
+        key_storage = KeyStorage(self.database)
+        auth_service = AuthenticationService(
+            key_storage,
+            KeyDerivation({}),
+            PasswordValidator(),
+            StateManager(),
+        )
+        auth_service.register_master_password("OldStrong!7xQ")
+        self.logger = AuditLogger(self.database, self.event_bus, key_provider=auth_service.get_active_key)
+        self.verifier = AuditLogVerifier(self.database, self.logger.signer)
+        self.logger.log_event(
+            event_type="settings_changed",
+            severity="INFO",
+            source="configuration",
+            details={"scope": "security"},
+            user_id="local-user",
+            force_sync=True,
+        )
+        self.assertTrue(self.verifier.verify()["verified"])
+
+        auth_service.change_master_password(
+            "OldStrong!7xQ",
+            "NewStrong!8zR",
+            rotate_entries_callback=lambda old_key, new_key: self.logger.reencrypt_entry_payloads(old_key, new_key),
+        )
+
+        self.assertTrue(self.verifier.verify()["verified"])
 
     def test_audit_entry_includes_utc_reliable_time_source_metadata(self):
         self._generate_logs(1)

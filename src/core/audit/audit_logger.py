@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Optional
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from .log_signer import AuditLogSigner
 from .log_verifier import AuditLogVerifier
@@ -517,6 +519,9 @@ class AuditLogger:
 
     def _encrypt_entry_payload(self, entry_data: str) -> str:
         storage_key = self.signer.derive_storage_key()
+        return self._encrypt_entry_payload_with_key(entry_data, storage_key)
+
+    def _encrypt_entry_payload_with_key(self, entry_data: str, storage_key: bytes) -> str:
         nonce = os.urandom(12)
         ciphertext = nonce + AESGCM(storage_key).encrypt(nonce, entry_data.encode("utf-8"), None)
         envelope = {
@@ -528,6 +533,10 @@ class AuditLogger:
         return json.dumps(envelope, ensure_ascii=False, sort_keys=True)
 
     def _decrypt_entry_payload(self, raw_value: Any) -> str:
+        storage_key = self.signer.derive_storage_key()
+        return self._decrypt_entry_payload_with_key(raw_value, storage_key)
+
+    def _decrypt_entry_payload_with_key(self, raw_value: Any, storage_key: bytes) -> str:
         if raw_value is None:
             return ""
         if isinstance(raw_value, bytes):
@@ -545,12 +554,39 @@ class AuditLogger:
         ciphertext = parsed.get("ciphertext", "")
         if not ciphertext:
             return raw_text
-        storage_key = self.signer.derive_storage_key()
         encrypted_payload = base64.b64decode(ciphertext)
         nonce = encrypted_payload[:12]
         payload = encrypted_payload[12:]
         plaintext = AESGCM(storage_key).decrypt(nonce, payload, None)
         return plaintext.decode("utf-8")
+
+    def reencrypt_entry_payloads(self, old_active_key: bytes, new_active_key: bytes, *, progress_callback=None, pause_event=None) -> int:
+        old_storage_key = self._derive_storage_key_from_active_key(old_active_key)
+        new_storage_key = self._derive_storage_key_from_active_key(new_active_key)
+
+        def transform(raw_value: Any) -> str:
+            try:
+                plaintext = self._decrypt_entry_payload_with_key(raw_value, old_storage_key)
+            except Exception:
+                return raw_value.decode("utf-8") if isinstance(raw_value, bytes) else str(raw_value or "")
+            return self._encrypt_entry_payload_with_key(plaintext, new_storage_key)
+
+        if not hasattr(self.database, "reencrypt_audit_entry_payloads"):
+            return 0
+        return self.database.reencrypt_audit_entry_payloads(
+            transform,
+            progress_callback=progress_callback,
+            pause_event=pause_event,
+        )
+
+    def _derive_storage_key_from_active_key(self, active_key: bytes) -> bytes:
+        hkdf = HKDF(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=None,
+            info=self.signer.STORAGE_CONTEXT,
+        )
+        return hkdf.derive(active_key)
 
     def _get_latest_entry(self):
         if hasattr(self.database, "get_latest_audit_log"):

@@ -23,8 +23,9 @@ from src.core.crypto.key_storage import KeyStorage
 from src.core.crypto.legacy_encryption import LegacyXOREncryptionService
 from src.core.crypto.password_validator import PasswordValidator
 from src.core.audit import AuditLogger as RealAuditLogger
-from src.core.events import EventType
-from src.core.import_export import ImportValidationError
+from src.core.events import Event, EventType
+from src.core.import_export import ImportValidationError, SharePermissions
+from src.core.import_export.sharing_service import SharingService
 from src.core.key_manager import KeyManager
 from src.core.vault import AESGCMEncryptionService, EntryManager
 from src.database.db import Database
@@ -435,9 +436,18 @@ class IntegrationTestCase(unittest.TestCase):
 
 
 class TestSetupWizardIntegration(IntegrationTestCase):
+    def test_initial_database_path_uses_selected_config_path(self):
+        db_path = self.make_db_path("selected-startup-vault.db")
+        wizard = SetupWizard.__new__(SetupWizard)
+        wizard.config = Config()
+        wizard.config.set("database.path", db_path)
+
+        self.assertEqual(wizard._get_initial_db_path(), db_path)
+
     def test_finish_initial_setup_persists_configuration_and_initializes_auth(self):
         db_path = self.make_db_path()
         config = Config()
+        config.set("crypto.pbkdf2_iterations", 150000)
         auth_service = self.make_auth_service(db_path)
 
         wizard = SetupWizard.__new__(SetupWizard)
@@ -446,8 +456,6 @@ class TestSetupWizardIntegration(IntegrationTestCase):
         wizard.master_password = FakeVar("ValidMasterPass!9X")
         wizard.confirm_password = FakeVar("ValidMasterPass!9X")
         wizard.db_path = FakeVar(db_path)
-        wizard.algorithm = FakeVar("XOR")
-        wizard.pbkdf2_iterations = FakeVar(150000)
         wizard.auto_lock_minutes = FakeVar(7)
         wizard.key_cache_timeout_minutes = FakeVar(17)
         wizard.wizard = FakeDialog()
@@ -581,6 +589,18 @@ class TestMainWindowIntegration(IntegrationTestCase):
         self.assertTrue(window.auth_service.is_initialized())
         self.assertTrue(window.auth_service.is_authenticated())
         self.assertEqual(window.db.db_path, db_path)
+        self.assertEqual(window.key_manager.load_key("active"), window.auth_service.get_active_key())
+
+    def test_sync_active_key_from_auth_populates_key_manager_after_setup(self):
+        window = MainWindow.__new__(MainWindow)
+        window.auth_service = FakeAuthService()
+        window.auth_service.authenticated = True
+        window.key_manager = KeyManager()
+
+        synced = window._sync_active_key_from_auth()
+
+        self.assertTrue(synced)
+        self.assertEqual(window.key_manager.load_key("active"), window.auth_service.get_active_key())
 
     def test_audit_log_keeps_entry_events_when_vault_is_locked_immediately(self):
         db_path = self.make_db_path("audit-lock.db")
@@ -782,6 +802,56 @@ class TestMainWindowSearchAndFilter(IntegrationTestCase):
 
 
 class TestMainWindowDialogHelpers(IntegrationTestCase):
+    def test_generated_entry_password_updates_strength_label(self):
+        window = MainWindow.__new__(MainWindow)
+
+        class PasswordGenerator:
+            def generate(self, _options):
+                return "StrongGenerated!123"
+
+            def is_strong_enough(self, password):
+                return password == "StrongGenerated!123"
+
+        class PasswordEntryField:
+            def __init__(self):
+                self.value = ""
+                self.show_password = type("ShowPassword", (), {"set": lambda _self, value: setattr(self, "visible", value)})()
+
+            def set(self, value):
+                self.value = value
+
+            def get(self):
+                return self.value
+
+        class StringVar:
+            def __init__(self):
+                self.value = "Сложность пароля: не задан"
+
+            def set(self, value):
+                self.value = value
+
+        dialog = type("Dialog", (), {"strength_var": StringVar(), "password_was_generated": False})()
+        password_entry = PasswordEntryField()
+        window.password_generator = PasswordGenerator()
+
+        window._generate_entry_password(dialog, password_entry)
+
+        self.assertTrue(dialog.password_was_generated)
+        self.assertEqual(password_entry.get(), "StrongGenerated!123")
+        self.assertEqual(dialog.strength_var.value, "Сложность пароля: сильный")
+
+    def test_add_entry_does_not_open_form_when_unlock_is_cancelled(self):
+        window = MainWindow.__new__(MainWindow)
+        window.auth_service = FakeAuthService()
+        window._require_login = lambda: setattr(window, "_login_requested", True)
+        window._build_entry_dialog = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("entry dialog should not open while vault is locked")
+        )
+
+        window.add_entry()
+
+        self.assertTrue(window._login_requested)
+
     def test_collect_entry_form_reads_category_tags_and_clipboard_policy_from_dialog(self):
         window = MainWindow.__new__(MainWindow)
         window.password_generator = type("PasswordGenerator", (), {"is_strong_enough": lambda _self, _password: True})()
@@ -1163,11 +1233,11 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
         labels = window._get_system_tray_menu_labels()
 
         self.assertIn("Показать окно", labels)
-        self.assertIn("Заблокировать vault", labels)
-        self.assertIn("Разблокировать vault", labels)
-        self.assertIn("Очистить clipboard", labels)
-        self.assertIn("Quick search", labels)
-        self.assertIn("Panic mode", labels)
+        self.assertIn("Заблокировать хранилище", labels)
+        self.assertIn("Разблокировать хранилище", labels)
+        self.assertIn("Очистить буфер обмена", labels)
+        self.assertIn("Быстрый поиск", labels)
+        self.assertIn("Паник-режим", labels)
         self.assertIn("Настройки", labels)
         self.assertIn("Выход", labels)
 
@@ -1202,6 +1272,15 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
         window._tray_crypto_operation_active = True
         self.assertEqual(window._get_system_tray_state(failed_status), "crypto")
 
+    def test_system_tray_icon_uses_green_for_unlocked_and_red_for_locked(self):
+        window = MainWindow.__new__(MainWindow)
+
+        locked_pixel = window._build_system_tray_icon_image("locked").getpixel((2, 2))
+        unlocked_pixel = window._build_system_tray_icon_image("unlocked").getpixel((2, 2))
+
+        self.assertGreater(locked_pixel[0], locked_pixel[1])
+        self.assertGreater(unlocked_pixel[1], unlocked_pixel[0])
+
     def test_update_system_tray_status_refreshes_icon_and_animates_crypto_operation(self):
         window = MainWindow.__new__(MainWindow)
         window.auth_service = FakeAuthService()
@@ -1219,7 +1298,25 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
         window._set_crypto_operation_active(True)
         self.assertEqual(built_states[-1][0], "crypto")
         self.assertGreater(window._tray_animation_frame, 0)
-        self.assertIn("crypto operation", window._system_tray_icon.title)
+        self.assertIn("криптооперация", window._system_tray_icon.title)
+
+    def test_unlock_vault_refreshes_system_tray_to_unlocked_state(self):
+        window = MainWindow.__new__(MainWindow)
+        window.auth_service = FakeAuthService()
+        window.auth_service.authenticated = True
+        window._system_tray_icon = FakeTrayIcon()
+        window._tray_crypto_operation_active = False
+        window._tray_animation_frame = 0
+        window._get_clipboard_status = lambda: ClipboardStatus(active=False)
+        window._load_entries = lambda: None
+        window._set_status = lambda text: setattr(window, "_status", text)
+        built_states = []
+        window._build_system_tray_icon_image = lambda state, frame=0: built_states.append((state, frame)) or f"{state}-{frame}"
+
+        self.assertTrue(window._unlock_vault())
+
+        self.assertEqual(window._system_tray_icon.icon, "unlocked-0")
+        self.assertEqual(built_states[-1][0], "unlocked")
 
     def test_tray_quick_search_restores_window_and_applies_query(self):
         window = MainWindow.__new__(MainWindow)
@@ -1250,7 +1347,7 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
             ClipboardStatus(active=True, data_type="password", delivery_mode="memory_only", remaining_seconds=12)
         )
 
-        self.assertIn("vault разблокирован", title)
+        self.assertIn("хранилище разблокировано", title)
         self.assertIn("пароль", title)
         self.assertIn("внутренняя память", title)
         self.assertIn("12 сек", title)
@@ -1890,8 +1987,8 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
         joined = "\n".join(lines)
 
         self.assertIn("Статус подписи: валидна", joined)
-        self.assertIn("Previous hash:", joined)
-        self.assertIn("Current hash:", joined)
+        self.assertIn("Предыдущий хэш:", joined)
+        self.assertIn("Текущий хэш:", joined)
         self.assertIn("- scope: security", joined)
 
     def test_run_audit_verification_manual_success_shows_message(self):
@@ -2251,13 +2348,13 @@ class TestMainWindowDialogHelpers(IntegrationTestCase):
             lines = window._build_clipboard_diagnostics_lines()
 
         joined = "\n".join(lines)
-        self.assertIn("Диагностика secure clipboard", joined)
+        self.assertIn("Диагностика защищённого буфера обмена", joined)
         self.assertIn("Режим доставки: внутренняя память", joined)
-        self.assertIn("Проверка platform adapter", joined)
+        self.assertIn("Проверка системного адаптера", joined)
         self.assertIn("macos_appkit: доступен", joined)
         self.assertIn("pyperclip: недоступен", joined)
-        self.assertIn("Проверка memory exposure", joined)
-        self.assertIn("plaintext в state_manager: нет", joined)
+        self.assertIn("Проверка следов в памяти", joined)
+        self.assertIn("открытый текст в state_manager: нет", joined)
 
     def test_check_security_timers_publishes_clipboard_error_when_monitor_fails(self):
         window = MainWindow.__new__(MainWindow)
@@ -2325,7 +2422,7 @@ class TestMainWindowSecurityState(IntegrationTestCase):
         window.state = FakeStateManager()
         window.root = FakeRoot()
         window.root.window_state = "iconic"
-        window._lock_vault = lambda show_dialog=True: setattr(window, "_locked_with", show_dialog)
+        window._lock_vault = lambda show_dialog=True, **_kwargs: setattr(window, "_locked_with", show_dialog)
 
         window._lock_if_window_minimized()
 
@@ -2338,7 +2435,7 @@ class TestMainWindowSecurityState(IntegrationTestCase):
         window.auth_service.authenticated = True
         window.state = FakeStateManager()
         window.key_storage = FakeKeyStorage()
-        def fake_lock(show_dialog=True):
+        def fake_lock(show_dialog=True, **_kwargs):
             setattr(window, "_locked_with", show_dialog)
         window._lock_vault = fake_lock
         window.activity_monitor = type(
@@ -2441,7 +2538,7 @@ class TestMainWindowSecurityState(IntegrationTestCase):
         window.config = Config()
         window.root = FakeRoot()
         window._clear_system_clipboard = lambda sync_service=True: setattr(window, "_clipboard_cleared", sync_service) or True
-        window._lock_vault = lambda show_dialog=True: setattr(window, "_locked_with", show_dialog)
+        window._lock_vault = lambda show_dialog=True, **_kwargs: setattr(window, "_locked_with", show_dialog)
         window._clear_sensitive_view_state = lambda: setattr(window, "_view_cleared", True)
         window._flush_audit_logger = lambda: setattr(window, "_audit_flushed", True)
         window._show_panic_notification = lambda method: setattr(window, "_panic_notification_method", method)
@@ -2602,7 +2699,7 @@ class TestMainWindowSecurityState(IntegrationTestCase):
         self.assertEqual(window.root.window_state, "normal")
         self.assertTrue(window._entries_reloaded)
 
-    def test_focus_loss_lock_is_delayed_while_temporary_clipboard_is_active(self):
+    def test_focus_loss_lock_preserves_active_clipboard_handoff(self):
         window = MainWindow.__new__(MainWindow)
         window.auth_service = FakeAuthService()
         window.auth_service.authenticated = True
@@ -2612,11 +2709,55 @@ class TestMainWindowSecurityState(IntegrationTestCase):
         window.state.clipboard_content = "Secret!123"
         window.root = FakeRoot()
         window.root.focus_displayof = lambda: None
-        window._lock_vault = lambda show_dialog=True: setattr(window, "_locked_with", show_dialog)
+        window._lock_vault = lambda show_dialog=True, **kwargs: setattr(
+            window,
+            "_locked_with",
+            {"show_dialog": show_dialog, **kwargs},
+        )
 
         window._lock_if_application_inactive()
 
-        self.assertFalse(hasattr(window, "_locked_with"))
+        self.assertEqual(
+            window._locked_with,
+            {"show_dialog": False, "preserve_clipboard": True, "reason": "focus_loss"},
+        )
+
+    def test_focus_loss_lock_preserves_temporary_clipboard_until_timeout(self):
+        window = MainWindow.__new__(MainWindow)
+        window.auth_service = FakeAuthService()
+        window.auth_service.authenticated = True
+        window.key_manager = FakeKeyManager()
+        window.state = FakeStateManager()
+        window.state.clipboard_content = "Secret!123"
+        window.root = FakeRoot()
+        window.audit_logger = FakeAuditLogger()
+        window.clipboard_service = FakeClipboardService()
+        window._clear_sensitive_view_state = lambda: setattr(window, "_view_cleared", True)
+        window._clear_system_clipboard = lambda sync_service=True: setattr(window, "_system_clipboard_cleared", True)
+        window._handle_clipboard_clear_failure = lambda: setattr(window, "_clear_failure_checked", True)
+        window._set_status = lambda text: setattr(window, "_status", text)
+        events = []
+
+        with patch("src.gui.main_window.event_bus.publish", lambda event: events.append(event)):
+            window._lock_vault(show_dialog=False, preserve_clipboard=True, reason="focus_loss")
+
+        self.assertTrue(window.auth_service.logged_out)
+        self.assertTrue(window.key_manager.cleared)
+        self.assertEqual(window.state.clipboard_content, "Secret!123")
+        self.assertFalse(window.state.clipboard_cleared)
+        self.assertFalse(hasattr(window, "_system_clipboard_cleared"))
+        self.assertFalse(window.clipboard_service.clear_calls)
+        self.assertTrue(window._view_cleared)
+        self.assertEqual(window._status, "Заблокировано")
+        self.assertEqual(events[-1].data, {"reason": "focus_loss", "preserve_clipboard": True})
+
+    def test_vault_locked_event_preserves_clipboard_when_requested(self):
+        window = MainWindow.__new__(MainWindow)
+        window.clipboard_service = FakeClipboardService()
+
+        window._on_vault_locked_event(Event(EventType.VAULT_LOCKED, {"preserve_clipboard": True}))
+
+        self.assertFalse(window.clipboard_service.clear_calls)
 
     def test_focus_loss_lock_is_suspended_while_internal_dialog_is_active(self):
         window = MainWindow.__new__(MainWindow)
@@ -2628,7 +2769,7 @@ class TestMainWindowSecurityState(IntegrationTestCase):
         window.root = FakeRoot()
         window.root.focus_displayof = lambda: None
         window._internal_modal_depth = 1
-        window._lock_vault = lambda show_dialog=True: setattr(window, "_locked_with", show_dialog)
+        window._lock_vault = lambda show_dialog=True, **_kwargs: setattr(window, "_locked_with", show_dialog)
 
         window._lock_if_application_inactive()
 
@@ -2669,7 +2810,7 @@ class TestMainWindowSecurityState(IntegrationTestCase):
         window.state.clipboard_content = None
         window.root = FakeRoot()
         window.clipboard_label = FakeLabel()
-        window._lock_vault = lambda show_dialog=True: setattr(window, "_locked_with", show_dialog)
+        window._lock_vault = lambda show_dialog=True, **_kwargs: setattr(window, "_locked_with", show_dialog)
         window._clear_system_clipboard = lambda: setattr(window, "_clipboard_cleared", True)
 
         with patch("src.gui.main_window.event_bus.publish"):
@@ -2961,6 +3102,7 @@ class TestMainWindowSecurityState(IntegrationTestCase):
         native_path = temp_dir / "vault-export.json"
         bitwarden_path = temp_dir / "bitwarden.json"
         lastpass_path = temp_dir / "lastpass.csv"
+        share_path = temp_dir / "entry-share.cs-share.json"
         window.db = Database(str(temp_dir / "vault.db"))
         self.addCleanup(window.db.close)
         window.entry_manager = FakeVaultEntryManager()
@@ -2970,10 +3112,66 @@ class TestMainWindowSecurityState(IntegrationTestCase):
         window.export_vault_encrypted_json_to_path(str(native_path), "ExportPassword!123")
         bitwarden_path.write_text('{"items":[{"type":1,"name":"Example","login":{"username":"u","password":"p"}}]}', encoding="utf-8")
         lastpass_path.write_text("url,username,password,extra,name,grouping\nhttps://e.test,u,p,,Example,Work\n", encoding="utf-8")
+        share_path.write_text(
+            SharingService(window.entry_manager).create_password_share_package(
+                entry_id=1,
+                recipient="ray@example.test",
+                password="SharePassword!123",
+                permissions=SharePermissions(read=True, edit=False, expires_in_days=2),
+            ),
+            encoding="utf-8",
+        )
 
         self.assertEqual(window.detect_vault_import_format(str(native_path), native_path.read_bytes()), "encrypted_json")
         self.assertEqual(window.detect_vault_import_format(str(bitwarden_path), bitwarden_path.read_bytes()), "bitwarden_json")
         self.assertEqual(window.detect_vault_import_format(str(lastpass_path), lastpass_path.read_bytes()), "lastpass_csv")
+        self.assertEqual(window.detect_vault_import_format(str(share_path), share_path.read_bytes()), "share_package")
+
+    def test_share_package_import_preview_and_merge_use_sharing_service(self):
+        window = MainWindow.__new__(MainWindow)
+        temp_dir = Path(self.make_db_path("share-package-import-gui")).parent
+        share_path = temp_dir / "entry-share.cs-share.json"
+        window.db = Database(str(temp_dir / "vault.db"))
+        self.addCleanup(window.db.close)
+        window.entry_manager = FakeVaultEntryManager()
+        window._show_info = lambda *args, **kwargs: None
+        window._load_entries = lambda: setattr(window, "_entries_reloaded", True)
+        share_path.write_text(
+            SharingService(window.entry_manager).create_password_share_package(
+                entry_id=1,
+                recipient="ray@example.test",
+                password="SharePassword!123",
+                permissions=SharePermissions(read=True, edit=False, expires_in_days=2),
+            ),
+            encoding="utf-8",
+        )
+        window.entry_manager.entries = []
+
+        preview = window.preview_vault_import_file(
+            str(share_path),
+            import_format="auto",
+            password="SharePassword!123",
+        )
+        dry_run = window.import_vault_file(
+            str(share_path),
+            import_format="auto",
+            password="SharePassword!123",
+            mode="dry-run",
+        )
+        result = window.import_vault_file(
+            str(share_path),
+            import_format="auto",
+            password="SharePassword!123",
+            mode="merge",
+        )
+
+        self.assertEqual(preview["format"], "share_package")
+        self.assertEqual(preview["validated"], 1)
+        self.assertEqual(preview["titles"], ["GitHub"])
+        self.assertEqual(dry_run["created"], 0)
+        self.assertEqual(result["created"], 1)
+        self.assertEqual(window.entry_manager.entries[0]["title"], "GitHub")
+        self.assertTrue(window._entries_reloaded)
 
     def test_vault_encrypted_export_toggles_tray_crypto_operation_status(self):
         window = MainWindow.__new__(MainWindow)
