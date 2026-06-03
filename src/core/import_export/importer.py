@@ -11,6 +11,7 @@ from ..security.side_channel_protection import constant_time_compare
 from .crypto import checksum, decrypt_aes_gcm, decrypt_with_private_key, derive_password_key, wipe_bytes
 from .exceptions import ImportValidationError
 from .formats import BitwardenJSONFormat, CSVVaultFormat, LastPassCSVFormat, NativeJSONFormat
+from .formats.password_manager import decrypt_bitwarden_password_protected_export
 from .models import ImportOptions
 
 
@@ -82,6 +83,32 @@ class VaultImporter:
         import_options = options or ImportOptions(format="csv")
         raw_entries = self._parse_plaintext_payload(payload, import_options)
         return self.validate_entries(raw_entries, import_options)
+
+    def preview_bitwarden_encrypted_json(self, payload: str | bytes, password: str, options: ImportOptions | None = None) -> List[Dict[str, Any]]:
+        if not password:
+            raise ImportValidationError("Для зашифрованного JSON Bitwarden нужен пароль экспорта")
+        import_options = options or ImportOptions(format="bitwarden_encrypted_json")
+        decrypted = decrypt_bitwarden_password_protected_export(payload, password)
+        raw_entries = BitwardenJSONFormat().parse_entries(json.dumps(decrypted))
+        return self.validate_entries(raw_entries, import_options)
+
+    def import_bitwarden_encrypted_json(self, payload: str | bytes, password: str, options: ImportOptions | None = None) -> Dict[str, Any]:
+        started = time.monotonic()
+        import_options = options or ImportOptions(format="bitwarden_encrypted_json", mode="dry-run")
+        entries = self.preview_bitwarden_encrypted_json(payload, password, import_options)
+        result = self._apply_entries(entries, import_options, started)
+        self._record_history(
+            "import",
+            "bitwarden_encrypted_json",
+            "Bitwarden password-protected JSON",
+            len(entries),
+            len(self._as_bytes(payload)),
+            "dry-run" if import_options.mode == "dry-run" else checksum(self._as_bytes(payload)),
+            "validated" if import_options.mode == "dry-run" else "verified",
+            result,
+        )
+        self._publish(EventType.IMPORT_OPERATION_COMPLETED, result)
+        return result
 
     def import_plaintext(self, payload: str | bytes, options: ImportOptions | None = None) -> Dict[str, Any]:
         started = time.monotonic()

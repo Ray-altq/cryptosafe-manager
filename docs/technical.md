@@ -259,9 +259,9 @@ python -m pytest
 
 Результат последнего Sprint 8 прогона:
 
-- 363 теста пройдено;
+- 383 теста пройдено;
 - 10 slow/stress тестов исключены из основного запуска;
-- время: 20.78с.
+- время coverage-запуска по JUnit: 30.884с.
 
 Slow/stress запуск:
 
@@ -282,7 +282,7 @@ python -m pytest --cov=src --cov-report=term --cov-report=html:tests/report/html
 
 Результат:
 
-- coverage: 84%;
+- coverage: 83%;
 - HTML report: `tests/report/html/index.html`;
 - JUnit report: `tests/report/junit.xml`;
 - summary: `tests/report/summary.md`.

@@ -487,6 +487,25 @@ class TestImportExportFoundation(unittest.TestCase):
         self.assertEqual(decrypted["items"][0]["name"], "GitHub")
         self.assertEqual(decrypted["items"][0]["login"]["password"], "Secret!123")
 
+    def test_bitwarden_encrypted_json_import_roundtrip(self):
+        source_manager = FakeEntryManager()
+        target_manager = FakeEntryManager()
+        target_manager.entries = []
+        exported = VaultExporter(source_manager, database=self.db).export_bitwarden_encrypted_json("BitwardenExport!123")
+        importer = VaultImporter(target_manager, database=self.db)
+
+        preview = importer.preview_bitwarden_encrypted_json(exported, "BitwardenExport!123")
+        result = importer.import_bitwarden_encrypted_json(
+            exported,
+            "BitwardenExport!123",
+            ImportOptions(format="bitwarden_encrypted_json", mode="merge"),
+        )
+
+        self.assertEqual(len(preview), 2)
+        self.assertEqual(result["created"], 2)
+        self.assertEqual(target_manager.entries[0]["title"], "GitHub")
+        self.assertEqual(target_manager.entries[0]["password"], "Secret!123")
+
     def test_legacy_plaintext_bitwarden_export_still_uses_real_import_shape(self):
         exported = VaultExporter(FakeEntryManager(), database=self.db).export_bitwarden_json(
             ExportOptions(format="bitwarden_json", plaintext_allowed=True)

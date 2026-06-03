@@ -3101,6 +3101,7 @@ class TestMainWindowSecurityState(IntegrationTestCase):
         temp_dir = Path(self.make_db_path("vault-import-detect")).parent
         native_path = temp_dir / "vault-export.json"
         bitwarden_path = temp_dir / "bitwarden.json"
+        bitwarden_encrypted_path = temp_dir / "bitwarden-protected.json"
         lastpass_path = temp_dir / "lastpass.csv"
         share_path = temp_dir / "entry-share.cs-share.json"
         window.db = Database(str(temp_dir / "vault.db"))
@@ -3111,6 +3112,7 @@ class TestMainWindowSecurityState(IntegrationTestCase):
 
         window.export_vault_encrypted_json_to_path(str(native_path), "ExportPassword!123")
         bitwarden_path.write_text('{"items":[{"type":1,"name":"Example","login":{"username":"u","password":"p"}}]}', encoding="utf-8")
+        bitwarden_encrypted_path.write_text('{"encrypted":true,"passwordProtected":true,"data":"2.a|b|c"}', encoding="utf-8")
         lastpass_path.write_text("url,username,password,extra,name,grouping\nhttps://e.test,u,p,,Example,Work\n", encoding="utf-8")
         share_path.write_text(
             SharingService(window.entry_manager).create_password_share_package(
@@ -3124,6 +3126,7 @@ class TestMainWindowSecurityState(IntegrationTestCase):
 
         self.assertEqual(window.detect_vault_import_format(str(native_path), native_path.read_bytes()), "encrypted_json")
         self.assertEqual(window.detect_vault_import_format(str(bitwarden_path), bitwarden_path.read_bytes()), "bitwarden_json")
+        self.assertEqual(window.detect_vault_import_format(str(bitwarden_encrypted_path), bitwarden_encrypted_path.read_bytes()), "bitwarden_encrypted_json")
         self.assertEqual(window.detect_vault_import_format(str(lastpass_path), lastpass_path.read_bytes()), "lastpass_csv")
         self.assertEqual(window.detect_vault_import_format(str(share_path), share_path.read_bytes()), "share_package")
 

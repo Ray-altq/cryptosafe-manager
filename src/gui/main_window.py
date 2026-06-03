@@ -3699,6 +3699,8 @@ class MainWindow:
             payload = handle.read()
         importer = self._build_vault_importer()
         normalized_format = self.detect_vault_import_format(source_path, payload) if str(import_format or "auto").strip().lower() == "auto" else str(import_format or "encrypted_json").strip().lower()
+        if normalized_format in {"bitwarden", "bitwarden_json"} and self.detect_vault_import_format(source_path, payload) == "bitwarden_encrypted_json":
+            normalized_format = "bitwarden_encrypted_json"
         options = ImportOptions(format=normalized_format, mode="dry-run", duplicate_strategy="skip")
         if normalized_format == "share_package":
             preview = self._preview_share_package_payload(payload, password)
@@ -3715,6 +3717,10 @@ class MainWindow:
             if not password:
                 raise ImportValidationError("Для зашифрованного JSON нужен пароль экспорта")
             entries = importer.preview_encrypted_json(payload, password, options)
+        elif normalized_format == "bitwarden_encrypted_json":
+            if not password:
+                raise ImportValidationError("Для зашифрованного JSON Bitwarden нужен пароль экспорта")
+            entries = importer.preview_bitwarden_encrypted_json(payload, password, options)
         else:
             entries = importer.preview_plaintext(payload, options)
         return {
@@ -3738,6 +3744,8 @@ class MainWindow:
                     return "encrypted_json"
                 if parsed.get("cryptosafe_share"):
                     return "share_package"
+                if parsed.get("encrypted") is True and parsed.get("passwordProtected") is True and parsed.get("data"):
+                    return "bitwarden_encrypted_json"
                 if isinstance(parsed.get("items"), list):
                     return "bitwarden_json"
         first_line = text.splitlines()[0].strip().lower() if text.splitlines() else ""
@@ -3942,6 +3950,8 @@ class MainWindow:
             payload = handle.read()
         importer = self._build_vault_importer()
         normalized_format = self.detect_vault_import_format(source_path, payload) if str(import_format or "auto").strip().lower() == "auto" else str(import_format or "encrypted_json").strip().lower()
+        if normalized_format in {"bitwarden", "bitwarden_json"} and self.detect_vault_import_format(source_path, payload) == "bitwarden_encrypted_json":
+            normalized_format = "bitwarden_encrypted_json"
         options = ImportOptions(format=normalized_format, mode=mode, duplicate_strategy=duplicate_strategy)
         with self._crypto_operation_status():
             if normalized_format == "share_package":
@@ -3957,6 +3967,10 @@ class MainWindow:
                 if not password:
                     raise ImportValidationError("Для зашифрованного JSON нужен пароль экспорта")
                 result = importer.import_encrypted_json(payload, password, options)
+            elif normalized_format == "bitwarden_encrypted_json":
+                if not password:
+                    raise ImportValidationError("Для зашифрованного JSON Bitwarden нужен пароль экспорта")
+                result = importer.import_bitwarden_encrypted_json(payload, password, options)
             else:
                 result = importer.import_plaintext(payload, options)
         if mode != "dry-run":
@@ -4478,6 +4492,7 @@ class MainWindow:
             "csv": "CSV",
             "lastpass_csv": "LastPass CSV",
             "bitwarden_json": "Bitwarden JSON",
+            "bitwarden_encrypted_json": "Зашифрованный Bitwarden JSON",
         }
         format_label_to_key = {label: key for key, label in format_labels.items()}
         mode_labels = {
@@ -4591,6 +4606,8 @@ class MainWindow:
                             lines = ["Определён пакет доступа CryptoSafe. Введите приватный ключ, чтобы показать предпросмотр."]
                     elif fmt in {"encrypted_json", "json"} and not password_var.get():
                         lines = ["Определён зашифрованный JSON. Введите пароль, чтобы показать предпросмотр."]
+                    elif fmt == "bitwarden_encrypted_json" and not password_var.get():
+                        lines = ["Определён зашифрованный Bitwarden JSON. Введите пароль экспорта, чтобы показать предпросмотр."]
                     else:
                         preview = self.preview_vault_import_file(
                             path,

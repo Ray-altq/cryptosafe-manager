@@ -150,7 +150,9 @@ class BitwardenJSONFormat:
         }
         items = parsed.get("items") if isinstance(parsed, dict) else None
         if not isinstance(items, list):
-            raise ImportValidationError("Bitwarden JSON does not contain items")
+            if isinstance(parsed, dict) and parsed.get("encrypted") and parsed.get("data"):
+                raise ImportValidationError("Это зашифрованный JSON Bitwarden. Выберите формат «Зашифрованный Bitwarden JSON» и введите пароль экспорта.")
+            raise ImportValidationError("JSON Bitwarden не содержит список items")
         entries = []
         for item in items:
             if not isinstance(item, dict) or item.get("type") not in {None, 1}:
